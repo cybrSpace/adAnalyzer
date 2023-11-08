@@ -67,7 +67,7 @@ class Config : Hashtable {
         'error'     = 'stop'
 
         'fqdn'      = 'ad.cybr.pro'
-        'path'      = 'C:\Users\allen\OneDrive - CybrPro\Documents\dev\repos\adAnalyzer'
+        'path'      = 'C:\Users\allen\OneDrive\Documents\dev\repos\adAnalyzer'
 
         'import'    = [Module].GetEnumNames()
         'report'    = [Classes].GetEnumNames()
