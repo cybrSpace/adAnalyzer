@@ -133,7 +133,7 @@
 		g. Nested Groups (de-nest)
 		h. Foreign Security Principals (analyze and remove)
 		i. Unconstrained Kerberos delegation
-		j. Token Bloat validating (users w/ >1000 group memberships)
+		j. Token Bloat validation (users w/ >1000 group memberships)
 	[ ] Insecure Account Attribute Clean-up
 		a. Password not required
 	 	b. Store password using reversible encryption (digest authentication)
