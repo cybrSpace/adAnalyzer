@@ -21,5 +21,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Run isolated regression tests
-        shell: ${{ matrix.shell }}
-        run: ./tests/Invoke-RegressionTests.ps1
+        shell: pwsh
+        run: |
+          & '${{ matrix.shell }}' -NoLogo -NoProfile -NonInteractive -File ./tests/Invoke-RegressionTests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
