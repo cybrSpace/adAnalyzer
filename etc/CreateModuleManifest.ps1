@@ -2,12 +2,12 @@ $var = @{
 
     'author' = 'Allen Lipa'
     'company' = 'cybrPro'
-    'name' = 'ADEnvironmentAnalyzer.psm1'
+    'name' = 'bin/ADEnvironment.psm1'
     'functions' = @('Get-ADEnvironment', 'Set-ADEnvironment')
     'modules' = (
         'ActiveDirectory', @{ModuleName = 'ActiveDirectory'; ModuleVersion = '1.0.0.0'}
     )
-    'path' = '.\ADEnvironment.psd1'
+    'path' = (Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath 'ADEnvironment.psd1')
 
 }
 if ($var['path'] -notmatch 'psd1$') {

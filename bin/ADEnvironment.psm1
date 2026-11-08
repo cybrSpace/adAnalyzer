@@ -3373,11 +3373,8 @@ function Set-ADEnvironment () {
 
             }
 
-            if ($PSCmdlet.ShouldProcess($value, 'Remediate AD Environment Findings')) {
-
-                # NOTE : [Process] class sets the WhatIfPreference and Confirm variables
-                # NOTE : Empty ShouldProcess to trigger prompt
-
+            if (-not $PSCmdlet.ShouldProcess($value, 'Remediate AD Environment Findings')) {
+                return
             }
 
             if ($Credential -ne [PSCredential]::Empty -and [String]::IsNullOrEmpty($FQDN)) {

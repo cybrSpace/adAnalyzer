@@ -67,7 +67,7 @@ class Config : Hashtable {
         'error'     = 'stop'
 
         'fqdn'      = 'ad.cybr.pro'
-        'path'      = 'C:\Users\allen\OneDrive\Documents\dev\repos\adAnalyzer'
+        'path'      = $null
 
         'import'    = [Module].GetEnumNames()
         'report'    = [Classes].GetEnumNames()
@@ -177,9 +177,15 @@ class Config : Hashtable {
 
         $this['path'] = @{'root' = $value }
 
-        If (Test-Path $value) {
+        If (Test-Path -LiteralPath $value -PathType Container) {
 
-            Get-ChildItem -Path $value -Directory | ForEach-Object { $this['path'][$_.Name] = $_.FullName }
+            Get-ChildItem -LiteralPath $value -Directory | ForEach-Object { $this['path'][$_.Name] = $_.FullName }
+
+            if (-not $this['path'].ContainsKey('tmp')) {
+                $outputPath = Join-Path -Path $value -ChildPath 'tmp'
+                New-Item -Path $outputPath -ItemType Directory -ErrorAction Stop > $null
+                $this['path']['tmp'] = $outputPath
+            }
 
         }
         else {
@@ -431,6 +437,15 @@ function Start-ADAnalyzer () {
 
         $target = $null
 
+        if ($Operation -eq 'remediate') {
+            if (-not $PSBoundParameters.ContainsKey('Class')) {
+                $Class = [Finding].GetEnumNames()
+            }
+            if (-not $PSCmdlet.ShouldProcess(($Class -join '; '), 'Remediate AD Environment Findings')) {
+                return
+            }
+        }
+
         if ($Credential -ne [PSCredential]::Empty -and [String]::IsNullOrEmpty($FQDN)) {
 
             # NOTE : Get-GPO does not work with credential object
@@ -508,6 +523,8 @@ function Start-ADAnalyzer () {
 
 try {
 
+    [Config]::Parameters['path'] = Split-Path -Parent $PSScriptRoot
+
     [Config]::Clear()
     [Config]::Telemetry()
     [Config]::Initialize()
@@ -516,7 +533,7 @@ try {
 
         'FQDN'       = ([Config]::Options['FQDN'])
         'Operation'  = ([Config]::Options['Operation'])
-        'Class'      = ([Classes].GetEnumNames())
+        'Class'      = ([Config]::Options[([Config]::Options['Operation'])])
         'Credential' = (Get-Credential)
     }
 
