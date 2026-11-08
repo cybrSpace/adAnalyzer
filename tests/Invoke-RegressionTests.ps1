@@ -1,9 +1,12 @@
 using namespace System.Management.Automation.Language
 
 [CmdletBinding()]
-param([string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot))
+param([string]$RepositoryRoot)
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrEmpty($RepositoryRoot)) {
+    $RepositoryRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+}
 $RepositoryRoot = (Resolve-Path -LiteralPath $RepositoryRoot).Path
 $script:Passed = 0
 $script:Failed = 0
