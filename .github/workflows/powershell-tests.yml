@@ -29,3 +29,5 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & '${{ matrix.shell }}' -NoLogo -NoProfile -NonInteractive -File ./tests/Invoke-NativeClassTests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & '${{ matrix.shell }}' -NoLogo -NoProfile -NonInteractive -File ./tests/Invoke-SelfContainedTests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

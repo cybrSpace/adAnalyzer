@@ -215,13 +215,9 @@ class Config : Hashtable {
 
     [void]Library([ArrayList]$value) {
 
-        if ($this.ContainsKey('path') -and $this['path'].ContainsKey('lib')) {
-            $value | ForEach-Object { $this.Import($this['path']['lib'], $_) }
-        }
-        if ($this.ContainsKey('path') -and $this['path'].ContainsKey('bin')) {
-            $value | ForEach-Object { $this.Import($this['path']['bin'], $_) }
-        }
-        else { throw ('error({0})' -f 'path to module library undefined') }
+        if (-not $this.ContainsKey('path')) { throw 'Path to module library undefined' }
+        $manifest = Join-Path $this['path']['root'] 'ADEnvironment.psd1'
+        Import-Module -Name $manifest -Force -ErrorAction Stop
 
     }
 
