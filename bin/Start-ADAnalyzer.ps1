@@ -269,7 +269,7 @@ Class Target : Hashtable {
         
         $target = [Target]::New()
 
-        $target['FQDN'] = [Config]::Options['FQDN']
+        $target['FQDN'] = $value
         $target['Class'] = $list
         $target['Export'] = [Config]::Options['path']['tmp']
 
@@ -328,7 +328,7 @@ Class Target : Hashtable {
 
         $target = [Target]::New()
 
-        $target['FQDN'] = [Config]::Options['FQDN']
+        $target['FQDN'] = $value
         $target['Class'] = $list
         $target['Export'] = [Config]::Options['path']['tmp']
 
@@ -429,7 +429,7 @@ function Start-ADAnalyzer () {
         [Alias('Analyze', 'Remediate', 'Report')]
         [Parameter(ParameterSetName = 'Target')]
         [ValidateSet('user', 'group', 'computer', 'groupPolicy')]
-        [ArrayList]$Class = @('user', 'group', 'computer', 'groupPolicy')
+        [String[]]$Class = @('user', 'group', 'computer', 'groupPolicy')
 
     )
 
@@ -481,6 +481,14 @@ function Start-ADAnalyzer () {
                 'report' { $target = [Target]::Report($FQDN, $Credential, $Class) }
                 'remediate' { $target = [Target]::Remediate($FQDN, $Credential, $Class) }
 
+            }
+
+        }
+        elseif (-not [String]::IsNullOrEmpty($FQDN)) {
+
+            switch ($Operation) {
+                'report' { $target = [Target]::Report($FQDN, [PSCredential]::Empty, $Class) }
+                'remediate' { $target = [Target]::Remediate($FQDN, [PSCredential]::Empty, $Class) }
             }
 
         }

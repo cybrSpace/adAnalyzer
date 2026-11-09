@@ -118,15 +118,21 @@ function Set-ADEnvironment {
         $Credential, $FQDN
     )
     $script:SetCalls++
+    $script:SelectedFQDN = $FQDN
     $script:SelectedClasses = $Remediate -join ','
     return New-FakeEnvironment
 }
 function Get-ADEnvironment {
     param($Analyze, $Credential, $FQDN)
     $script:ReportCalls++
+    $script:SelectedFQDN = $FQDN
     return New-FakeEnvironment
 }
-function Invoke-HelperProbe([string]$Operation, [bool]$Preview, [bool]$ExplicitClass) {
+function Test-ComputerSecureChannel {
+    param($Server, [switch]$WhatIf, [switch]$Confirm)
+    return $true
+}
+function Invoke-HelperProbe([string]$Operation, [bool]$Preview, [bool]$ExplicitClass, [string]$TargetFQDN) {
     [Config]::Options = [Config]::New()
     [Config]::Options['FQDN'] = 'example.invalid'
     [Config]::Options['path'] = @{ tmp = 'unused' }
@@ -135,13 +141,19 @@ function Invoke-HelperProbe([string]$Operation, [bool]$Preview, [bool]$ExplicitC
     $script:SetCalls = 0
     $script:ReportCalls = 0
     $script:SelectedClasses = ''
+    $script:SelectedFQDN = ''
     $arguments = @{ Operation = $Operation; WhatIf = $Preview; Confirm = $false }
     if ($ExplicitClass) { $arguments['Class'] = @('computer') }
-    $null = Start-ADAnalyzer @arguments
+    if ($TargetFQDN) { $arguments['FQDN'] = $TargetFQDN }
+    $target = Start-ADAnalyzer @arguments
+    $reportedFQDN = ''
+    if ($null -ne $target) { $reportedFQDN = $target['FQDN'] }
     return [pscustomobject]@{
         SetCalls = $script:SetCalls
         ReportCalls = $script:ReportCalls
         Classes = $script:SelectedClasses
+        RequestedFQDN = $script:SelectedFQDN
+        ReportedFQDN = $reportedFQDN
     }
 }
 function Invoke-HelperPathProbe([string]$Path) {
@@ -211,6 +223,18 @@ Invoke-Test 'reporting remains available with -WhatIf' {
     $result = & $helperProbe { Invoke-HelperProbe 'report' $true $true }
     Assert-Equal 0 $result.SetCalls
     Assert-Equal 1 $result.ReportCalls
+}
+
+Invoke-Test 'helper reports the requested domain without explicit credentials' {
+    $result = & $helperProbe { Invoke-HelperProbe 'report' $false $true 'target.example.invalid' }
+    Assert-Equal 'target.example.invalid' $result.RequestedFQDN
+    Assert-Equal 'target.example.invalid' $result.ReportedFQDN
+}
+
+Invoke-Test 'helper remediates the requested domain without explicit credentials' {
+    $result = & $helperProbe { Invoke-HelperProbe 'remediate' $false $true 'target.example.invalid' }
+    Assert-Equal 'target.example.invalid' $result.RequestedFQDN
+    Assert-Equal 'target.example.invalid' $result.ReportedFQDN
 }
 
 Invoke-Test 'script entry point uses the configured remediation classes' {
