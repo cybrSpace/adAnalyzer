@@ -404,16 +404,7 @@ function Start-ADAnalyzer () {
         [String]$Operation,
 
         [Parameter(ParameterSetName = 'Target')]
-        [ValidateScript(
-            {
-                if (Test-ComputerSecureChannel -Server $PSItem -WhatIf:$false -Confirm:$false) {
-                    return $true
-                }
-                else {
-                    return $false
-                }
-            }
-        )]
+        [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
         [String]$FQDN,
 
         [Parameter(ParameterSetName = 'Target')]
@@ -444,16 +435,7 @@ function Start-ADAnalyzer () {
 
         if ($Credential -ne [PSCredential]::Empty -and [String]::IsNullOrEmpty($FQDN)) {
 
-            # NOTE : Get-GPO does not work with credential object
-            # NOTE : credential is not a switch for the AD Management cmdlet
-
-            if ($Class -contains 'groupPolicy') {
-
-                $Class = $Class | Where-Object { $_ -notmatch 'groupPolicy' }
-
-            }
-
-            switch ($Operation) {
+switch ($Operation) {
 
                 'report' { $target = [Target]::Report($Credential, $Class) }
                 'remediate' { $target = [Target]::Remediate($Credential, $Class) }
@@ -463,16 +445,7 @@ function Start-ADAnalyzer () {
         }
         elseif ($Credential -ne [PSCredential]::Empty -and -not [String]::IsNullOrEmpty($FQDN)) {
 
-            # NOTE : Get-GPO does not work with credential object
-            # NOTE : credential is not a switch for the AD Management cmdlet
-            
-            if ($Class -contains 'groupPolicy') {
-
-                $Class = $Class | Where-Object { $_ -notmatch 'groupPolicy' }
-
-            }
-
-            switch ($Operation) {
+switch ($Operation) {
 
                 'report' { $target = [Target]::Report($FQDN, $Credential, $Class) }
                 'remediate' { $target = [Target]::Remediate($FQDN, $Credential, $Class) }

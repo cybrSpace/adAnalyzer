@@ -63,11 +63,13 @@ $script:AllowFixtureWrites = $false
 $script:FixtureDrives = [System.Collections.ArrayList]::new()
 $script:RemovedDrives = [System.Collections.ArrayList]::new()
 $script:SecureChannel = $true
+$script:FailDomainQuery = $false
 $script:LastMutationServer = ''
 $script:LastDriveScope = ''
 $script:QueryServers = [System.Collections.ArrayList]::new()
 $script:FailUserQuery = $false
 $script:FixturePolicyXml = $null
+$script:FailGpoRead = $false
 $script:UserRecord = [ordered]@{
     samaccountname='adoe'; givenName='Alice'; surName='Doe'; name='Alice Doe'
     userPrincipalName='adoe@example.invalid'; distinguishedName='CN=Alice Doe,OU=People,DC=example,DC=invalid'
@@ -92,6 +94,7 @@ function script:Get-CimInstance { param($ClassName) [pscustomobject]@{Domain='ex
 function script:Test-ComputerSecureChannel { param($Server,$Credential,[switch]$WhatIf,[switch]$Confirm) return $script:SecureChannel }
 function script:Get-ADDomain {
     param($Server,$Credential,$ErrorAction)
+    if($script:FailDomainQuery){throw 'fixture authentication failure'}
     $null=$script:QueryServers.Add($Server)
     $domain=[Microsoft.ActiveDirectory.Management.ADPartition]::new()
     $domain.DomainSID='S-1-5-21-1-2-3'; $domain.DNSRoot='example.invalid'; $domain.Name='example.invalid'
@@ -107,8 +110,8 @@ function script:Get-ADObject { param($Filter,$Properties,$Server,$ErrorAction) $
 function script:Get-ADUser { param($Filter,$Properties,$Server,$ErrorAction) if($script:FailUserQuery){throw 'fixture query failure'}; return $script:UserRecord }
 function script:Get-ADGroup { param($Filter,$Properties,$Server,$ErrorAction) return $script:GroupRecord }
 function script:Get-ADComputer { param($Filter,$Properties,$Server,$ErrorAction) return $script:ComputerRecord }
-function script:Get-GPO { param([switch]$All,$Domain,$Server,$ErrorAction) [pscustomobject]@{DisplayName='FixturePolicy';CreationTime=[datetime]::Now;ModificationTime=[datetime]::Now;GPOStatus='AllSettingsEnabled';Id=[guid]::Empty} }
-function script:Get-GPOReport { param($Guid,$ReportType,$Server,$Domain) if($script:FixturePolicyXml){return $script:FixturePolicyXml}; '<GPO><ReadTime>2026-01-01T00:00:00</ReadTime><Computer><Enabled>true</Enabled></Computer><User><Enabled>true</Enabled></User></GPO>' }
+function script:Get-ADAnalyzerGpo { param([switch]$All,$Domain,$Server,$ErrorAction,$Credential) $script:GpoQueryCredential=$Credential; [pscustomobject]@{DisplayName='FixturePolicy';CreationTime=[datetime]::Now;ModificationTime=[datetime]::Now;GPOStatus='AllSettingsEnabled';Id=[guid]::Empty} }
+function script:Get-ADAnalyzerGpoReport { param($Gpo,$SidNames,$Credential) $script:GpoReportCredential=$Credential; if($script:FailGpoRead){throw 'fixture unreadable SYSVOL'}; if($script:FixturePolicyXml){return $script:FixturePolicyXml}; '<GPO><ReadTime>2026-01-01T00:00:00</ReadTime><Computer><Enabled>true</Enabled></Computer><User><Enabled>true</Enabled></User></GPO>' }
 function script:Get-PSDrive { $script:FixtureDrives }
 function script:Get-Location { [pscustomobject]@{Path='fixture-start'} }
 function script:Set-Location { param($Path,$LiteralPath,$ErrorAction) }
@@ -255,10 +258,10 @@ $during=$script:FixtureDrives.Count; [ADEnvironment]::Close()
     Assert-ClassEqual 'Script' $result.Scope
 }
 
-Invoke-ClassTest 'failed secure-channel validation never creates a connection drive' {
+Invoke-ClassTest 'failed directory authentication never creates a connection drive' {
     $result=Invoke-ClassScope @'
-$script:SecureChannel=$false; $before=$script:FixtureDrives.Count; $failed=$false
-try { $credential=[pscredential]::new('fixture',(ConvertTo-SecureString 'fixture-only' -AsPlainText -Force)); $null=[ADTarget]::new('target.example.invalid',$credential) } catch { $failed=$true } finally {$script:SecureChannel=$true;[ADEnvironment]::Close()}
+$script:FailDomainQuery=$true; $before=$script:FixtureDrives.Count; $failed=$false
+try { $credential=[pscredential]::new('fixture',(ConvertTo-SecureString 'fixture-only' -AsPlainText -Force)); $null=[ADTarget]::new('target.example.invalid',$credential) } catch { $failed=$true } finally {$script:FailDomainQuery=$false;[ADEnvironment]::Close()}
 $failed -and $script:FixtureDrives.Count -eq $before
 '@
     Assert-ClassTrue $result 'A failed connection check must not be ignored'

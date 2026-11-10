@@ -3,6 +3,8 @@ using namespace System.Collections
 using namespace System.Collections.Specialized
 using namespace System.Management.Automation
 
+. (Join-Path $PSScriptRoot 'ADGpo.ps1')
+
 ######################################################################################################################################################################################################################################################
 #region Enumeration
 
@@ -44,6 +46,10 @@ Enum GPOConfiguration {
 Enum GPOExtensionType {
 
     Security
+    Registry
+    Preferences
+    Xml
+    Ini
 
 }
 
@@ -955,6 +961,7 @@ class PasswordPolicyObject : OrderedDictionary {
         $object.Properties.List | ForEach-Object { $object[$_] = $null }
 
         $object['policyName'] = $obj['gpo.name']
+        $object['policyId'] = $obj['gpo.id']
 
         $object['linked'] = $obj['gpo.linked']
         $object['linkedOU'] = $obj['gpo.linked.OU']
@@ -1006,7 +1013,8 @@ class PasswordPolicyObject : OrderedDictionary {
     }
     [void]UpdateInstance() {
 
-        [PasswordPolicy]::GetInstance()[($this['policyName'])] = [PSCustomObject]$this
+        $key = if ($this['policyId']) { $this['policyId'] } else { $this['policyName'] }
+        [PasswordPolicy]::GetInstance()[$key] = [PSCustomObject]$this
 
     }
 
@@ -1017,7 +1025,7 @@ class PasswordPolicyObject : OrderedDictionary {
         $this.Properties.SetList(
             @(
 
-                'policyName', 'linked', 'linkedOU', 'configuration', 'configurationEnabled'
+                'policyId', 'policyName', 'linked', 'linkedOU', 'configuration', 'configurationEnabled'
                 'LockoutBadCount', 'LockoutDuration', 'ResetLockoutCount'
                 'ClearTextPassword', 'MaximumPasswordAge', 'MinimumPasswordAge', 'MinimumPasswordLength', 'PasswordComplexity', 'PasswordHistorySize', 'ResetLockoutCount'
                 'MaxClockSkew', 'MaxRenewAge', 'MaxServiceAge', 'MaxTicketAge', 'MaxTicketAgeForRenew', 'TicketValidateClient'
@@ -2048,9 +2056,9 @@ class GroupPolicyData : Data {
 
             $table = [GroupPolicyTable]::SetDefault()
 
-            $table.Properties.SetKey('DisplayName')
+            $table.Properties.SetKey('Id')
 
-            $list = [ArrayList]@('DisplayName', 'CreationTime', 'ModificationTime', 'GPOStatus', 'id')
+            $list = [ArrayList]@('DisplayName', 'CreationTime', 'ModificationTime', 'GPOStatus', 'id', 'ReadError')
 
             $value = @{
 
@@ -2060,7 +2068,10 @@ class GroupPolicyData : Data {
 
             }
 
-            Get-GPO -All @value | Select-Object -Property $list | ForEach-Object {
+            $credential = [ADEnvironment]::GetEnvironment().Credential
+            if ($null -ne $credential -and $credential -ne [PSCredential]::Empty) { $value['Credential'] = $credential }
+
+            Get-ADAnalyzerGpo -All @value | ForEach-Object {
 
                 $obj = $_
 
@@ -2072,19 +2083,21 @@ class GroupPolicyData : Data {
 
                     $item = @{
 
-                        'guid'       = $_.Id
-                        'reporttype' = 'xml'
-                        'server'     = ([ADTarget]::FQDN)
-                        'domain'     = ([ADTarget]::FQDN)
+                        'Gpo'        = $obj
+                        'SidNames'   = [DomainData]::GetInstance().WellKnownSID
 
                     }
 
-                    $object['xml'] = [xml]( Get-GPOReport @item )
+                    if ($null -ne $credential -and $credential -ne [PSCredential]::Empty) { $item['Credential'] = $credential }
+
+                    $object['xml'] = [xml]( Get-ADAnalyzerGpoReport @item )
 
                 }
                 catch {
 
                     $object['xml'] = $null
+                    $object['ReadError'] = $_.Exception.Message
+                    Write-Warning ('Unable to read GPO {0}: {1}' -f $obj.Id, $_.Exception.Message)
 
                 }
                 
@@ -2107,6 +2120,8 @@ class GroupPolicyData : Data {
         $table = [GroupPolicyTable]::SetDefault()
 
         $this.Data.Values | ForEach-Object { 
+
+            if ($null -eq $_['xml']) { return }
             
             $object = [GroupPolicyObject]::Initialize($_) 
 
@@ -2124,6 +2139,8 @@ class GroupPolicyData : Data {
     [void]GetFinding() {
 
         $array = [Finding]::New()
+
+        $this.Data.Values | Where-Object { $_['ReadError'] } | ForEach-Object { $array.AddFinding($_, 'Error - GPO report unreadable') }
 
         $this.Report.Values | ForEach-Object { 
             
@@ -2217,6 +2234,19 @@ class GroupPolicyObject : OrderedDictionary {
 
         }
 
+        if ($null -eq $object) {
+            foreach ($extension in @($value | Where-Object Name -eq 'Registry')) {
+                foreach ($record in @($extension.Extension.Record)) {
+                    if ($record.Name -ieq 'HKLM\Software\Policies\Microsoft\Windows\System\UserPolicyMode') {
+                        switch ([String]$record.Value) {
+                            '0' { $object = 'Disabled' }
+                            '1' { $object = 'Enabled(Merge)' }
+                            '2' { $object = 'Enabled(Replace)' }
+                        }
+                    }
+                }
+            }
+        }
         return $object
 
     }
@@ -2351,7 +2381,7 @@ class GroupPolicyObject : OrderedDictionary {
                 # TODO : Add 'Network access: Shares that can be access anonymously' to the list
 
                 # NTLM Settings
-                { $_ -eq 'Network security: LAN Manager authentication level' -and $value.'property.setting.value' -notin @('Send NTLMv2 responses only. Refuse LM & NTLM', 'Send NTLMv2 response only') } { $list.AddFinding($value, 'Defect - LAN Manager Authentication Level (LmCompatibilityLevel)') }
+                { $_ -eq 'Network security: LAN Manager authentication level' -and $value.'property.setting.value' -notin @('Send NTLMv2 responses only. Refuse LM & NTLM', 'Send NTLMv2 response only. Refuse LM & NTLM', 'Send NTLMv2 response only') } { $list.AddFinding($value, 'Defect - LAN Manager Authentication Level (LmCompatibilityLevel)') }
 
                 # (Server) Digitally Sign Communications
                 { $_ -eq 'Microsoft network server: Digitally sign communications (if client agrees)' -and $value.'property.setting.value' -eq $false } { $list.AddFinding($value, 'Defect - Digital Signing Disabled') }
@@ -2367,10 +2397,10 @@ class GroupPolicyObject : OrderedDictionary {
                 { $_ -eq 'Network access: Let Everyone permissions apply to anonymous users' -and $value.'property.setting.value' -eq $true } { $list.AddFinding($value, 'Defect - Everyone Permissions Apply to Anonymous Users') }
 
                 # Send Named Pipes Null Session
-                { $_ -eq 'Network access: Named Pipes that can be accessed anonymously' -and $value.'property.setting.value' -notin @('LSARPC', 'NETLOGON', 'SAMR') } { $list.AddFinding($value, 'Defect - Named Pipes Allow Anonymous (Null) Session') }
+                { $_ -eq 'Network access: Named Pipes that can be accessed anonymously' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') -and $value.'property.setting.value' -notin @('LSARPC', 'NETLOGON', 'SAMR') } { $list.AddFinding($value, 'Defect - Named Pipes Allow Anonymous (Null) Session') }
 
                 # Shares that can be access anonymously
-                { $_ -eq 'Network access: Shares that can be access anonymously' -and $value.'property.setting.value' -notin @() } { $list.AddFinding($value, 'Defect - Shares Allow Anonymous (Null) Session') }
+                { $_ -eq 'Network access: Shares that can be access anonymously' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Shares Allow Anonymous (Null) Session') }
 
                 # Named Pipes Allow Anonymous (Null) Session
                 { $_ -eq 'Network access: Restrict anonymous access to Named Pipes and Shares' -and $value.'property.setting.value' -eq $false } { $list.AddFinding($value, 'Defect - Named Pipes Allow Anonymous (Null) Session') }
@@ -2389,7 +2419,7 @@ class GroupPolicyObject : OrderedDictionary {
 
                 # (Domain Controller) LDAP Server Signing Requirements
                 { $_ -eq 'Domain controller: LDAP server signing requirements' -and $value.'property.setting.value' -notin @('Require signature') } { $list.AddFinding($value, 'Defect - LDAP Signing Not Required') }
-                { $_ -eq 'Network security: LDAP client signing requirements' -and $value.'property.setting.value' -notin @('') } { $list.AddFinding($value, 'Defect - LDAP Signing Not Required') }
+                { $_ -eq 'Network security: LDAP client signing requirements' -and $value.'property.setting.value' -ne 'Require signing' } { $list.AddFinding($value, 'Defect - LDAP Signing Not Required') }
 
                 # User Account Control
                 { $_ -eq 'User Account Control: Admin Approval Mode for the Built-in Administrator account' -and $value.'property.setting.value' -eq $false } { $list.AddFinding($value, 'Defect - Invalid User Account Control') }
@@ -2460,7 +2490,7 @@ class GroupPolicyObject : OrderedDictionary {
 
             switch ($value.'property.setting.name') {
 
-                { $value.'property.setting.value' -match '^S-1-5' } { $list.AddFinding($value, 'Defect - Unresolvable UserRightsAssignment') }
+                { $value.'property.setting.value' -match '^S-1-5' -and $value.'property.setting.parameter' -notmatch '^SID resolution: ' } { $list.AddFinding($value, 'Defect - Unresolvable UserRightsAssignment') }
 
             }
 
@@ -2489,6 +2519,7 @@ class GroupPolicyObject : OrderedDictionary {
 
                     { $item.SettingNumber } { $object.Record['property.setting.value'] = [bigint]$item.SettingNumber }
                     { $item.SettingBoolean } { $object.Record['property.setting.value'] = [Convert]::ToBoolean($item.SettingBoolean) }
+                    { $null -ne $item.SelectSingleNode('./*[local-name()="SettingString"]') } { $object.Record['property.setting.value'] = [String]$item.SettingString }
 
                 }
 
@@ -2584,6 +2615,8 @@ class GroupPolicyObject : OrderedDictionary {
                         $memberName = if ($null -ne $nameNode) { $nameNode.InnerText } else { $null }
                         $memberSID = if ($null -ne $sidNode) { $sidNode.InnerText } else { $null }
                         $object.Record['property.setting.value'] = if (-not [String]::IsNullOrEmpty($memberName)) { $memberName } else { $memberSID }
+                        $resolutionNode = $item.SelectSingleNode('./*[local-name()="Resolution"]')
+                        if ($null -ne $resolutionNode) { $object.Record['property.setting.parameter'] = 'SID resolution: ' + $resolutionNode.InnerText }
                         
                         $array.add([PSCustomObject]$object.Record) > $null
 
@@ -2636,6 +2669,10 @@ class GroupPolicyObject : OrderedDictionary {
                 switch ($item.name) {
 
                     ([GPOExtensionType]::Security) { $array.AddItem($this.GetSecurityExtension($item)) }
+                    ([GPOExtensionType]::Registry) { $array.AddItem($this.GetRawExtension($item)) }
+                    ([GPOExtensionType]::Preferences) { $array.AddItem($this.GetRawExtension($item)) }
+                    ([GPOExtensionType]::Xml) { $array.AddItem($this.GetRawExtension($item)) }
+                    ([GPOExtensionType]::Ini) { $array.AddItem($this.GetRawExtension($item)) }
 
                 }
 
@@ -2648,12 +2685,27 @@ class GroupPolicyObject : OrderedDictionary {
 
     }
 
+    [List]GetRawExtension([XmlElement]$value) {
+        $array = [List]::New()
+        foreach ($item in @($value.Extension.Record)) {
+            $object = [GroupPolicyObject]::ImportRecord($this.Record)
+            $object.Record['cfg.extension'] = [String]$value.Name
+            $object.Record['ext.property.name'] = [String]$value.Name
+            $object.Record['ext.property.type'] = [String]$item.Type
+            $object.Record['property.setting.name'] = [String]$item.Name
+            $object.Record['property.setting.value'] = [String]$item.Value
+            $array.Add([PSCustomObject]$object.Record) > $null
+        }
+        return $array
+    }
+
     [void]NewRecordItem() {
 
         $this.Record = [GroupPolicyObject]::SetDefault()
 
         switch ($this.Record.Properties.List) {
 
+            'gpo.id' { $this.Record[$_] = [String]$this.Data.Id }
             'gpo.name' { $this.Record[$_] = $this.Data.DisplayName }
             'gpo.created' { $this.Record[$_] = (Get-Date $this.Data.CreationTime -f 'yyyy/MM/dd HH:mm') }
             'gpo.modified' { $this.Record[$_] = (Get-Date $this.Data.ModificationTime -f 'yyyy/MM/dd HH:mm') }
@@ -2701,11 +2753,11 @@ class GroupPolicyObject : OrderedDictionary {
     }
     [void]SetDefaultProperties() {
 
-        $this.Properties.SetKey('gpo.name')
+        $this.Properties.SetKey('gpo.id')
         $this.Properties.SetList(
 
             @(
-                'gpo.name', 'gpo.created', 'gpo.modified', 'gpo.read', 'gpo.status', 'gpo.linked', 'gpo.linked.ou'
+                'gpo.id', 'gpo.name', 'gpo.created', 'gpo.modified', 'gpo.read', 'gpo.status', 'gpo.linked', 'gpo.linked.ou'
                 'cfg.class', 'cfg.enabled', 'cfg.loopback', 'cfg.extension'
                 'ext.property.name', 'ext.property.enabled', 'ext.property.type'
                 'property.setting.name', 'property.setting.value', 'property.setting.parameter'
@@ -2799,16 +2851,7 @@ class ADTarget {
 
         $object = $null
 
-        try {
-
-            if (-not (Test-ComputerSecureChannel -Server ([ADTarget]::FQDN) -Credential $value -WhatIf:$false -Confirm:$false)) {
-                throw 'Secure channel validation failed'
-            }
-
-        }
-        catch { throw '{0}({1})' -f 'targetConnection', 'unable to establish secure connection' }
-
-        try {
+try {
 
             $item = Get-ADDomain -Server ([ADTarget]::FQDN) -Credential $value
 
@@ -2840,16 +2883,7 @@ class ADTarget {
 
         $object = $null
 
-        try {
-
-            if (-not (Test-ComputerSecureChannel -Server $fqdn -Credential $value -WhatIf:$false -Confirm:$false)) {
-                throw 'Secure channel validation failed'
-            }
-
-        }
-        catch { throw '{0}({1})' -f 'targetConnection', 'unable to establish secure connection' }
-
-        try {
+try {
 
             $item = Get-ADDomain -Server $fqdn -Credential $value
 
@@ -3189,16 +3223,7 @@ function Get-ADEnvironment () {
         [Switch]$Help,
 
         [Parameter(ParameterSetName = 'Target')]
-        [ValidateScript(
-            {
-                if (Test-ComputerSecureChannel -Server $PSItem -WhatIf:$false -Confirm:$false) {
-                    $true
-                }
-                else {
-                    $false
-                }
-            }
-        )]
+        [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
         [String]$FQDN,
 
         [Parameter(ParameterSetName = 'Target')]
@@ -3290,16 +3315,7 @@ function Set-ADEnvironment () {
         [Switch]$Help,
 
         [Parameter(ParameterSetName = 'Target')]
-        [ValidateScript(
-            {
-                if (Test-ComputerSecureChannel -Server $PSItem -WhatIf:$false ) {
-                    $true
-                }
-                else {
-                    $false
-                }
-            }
-        )]
+        [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
         [String]$FQDN,
 
         [Parameter(ParameterSetName = 'Target')]

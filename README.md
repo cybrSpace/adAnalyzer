@@ -2,8 +2,39 @@
 
 + .\bin\ADEnvironment.psm1 is a homegrown PoSh module I wrote which provides the **Get-ADEnvironment** & **Set-ADEnvironment** cmdlets to execute the corrective actions required for my **_AD Tactical Hardening Playbook_**
 + .\bin\Start-ADAnalyzer.ps1 is the helper script I wrote for the **Get-ADEnvironment** & **Set-ADEnvironment** cmdlets to simplify the ongoing analysis, reporting, remediation, & validation of AD Environment Hardening efforts via the helper's **Start-ADAnalyzer** cmdlet 
-+ DLLs for AD Remote Server Administration Tools are pre-loaded in .\lib
++ The manifest registers the bundled Active Directory DLL in .\lib; installed RSAT modules are not required.
 + Various other scripts loaded in .\etc 
+
+## Running the module
+
+Use Windows PowerShell 5.1 or PowerShell 7 on Windows. Import the package manifest so the bundled AD commands and provider are registered before the analyzer classes load:
+
+```powershell
+Import-Module .\ADEnvironment.psd1
+Get-ADEnvironment -FQDN 'example.com' -Class User,Group,Computer,GroupPolicy
+# A domain-joined client is not required when using explicit credentials.
+$credential = Get-Credential
+Get-ADEnvironment -FQDN 'example.com' -Class GroupPolicy -Credential $credential
+```
+
+Live collection needs a reachable domain controller running AD Web Services, read access to directory objects, and SMB read access to SYSVOL. The package supplies its own GPO reader; it does not load the GroupPolicy module or use GPMC COM. Explicit credentials are forwarded to directory queries and a temporary SYSVOL drive, which is removed when the read finishes or fails. The reader pins metadata and SYSVOL reads to the same DC and warns if directory and GPT.INI versions differ.
+
+```powershell
+$gpos = Get-ADAnalyzerGpo -All -Domain 'example.com' -Credential $credential
+$gpo = $gpos | Select-Object -First 1
+$policy = Get-ADAnalyzerGpoReport -Gpo $gpo -Credential $credential -AsObject
+$xml = Get-ADAnalyzerGpoReport -Gpo $gpo -Credential $credential
+# Parse a previously copied policy folder without a directory connection:
+$offline = Read-ADAnalyzerGpo -Path 'C:\PolicyCopies\{GPO-GUID}'
+```
+
+`Read-ADAnalyzerGpo` parses Machine/User Registry.pol (including typed values and deletion directives), security-template INF, INI files, and XML such as Group Policy Preferences. It preserves raw INI settings, XML, registry bytes, and a file inventory with `UnparsedFiles` for unsupported content. The generated XML feeds the existing security/password analyzers and includes raw registry, preference, and other XML/INI records. GPO identity uses GUIDs, so policies with identical display names remain distinct. SID names are resolved where available; lookup status stays visible and a missing domain match does not prove a SID invalid.
+
+This is a file-based policy reader, not a GPMC HTML report generator or an ADMX display-name engine. Scripts and other unsupported client-side extension formats are inventoried rather than interpreted; parsed settings are not a calculation of effective policy or RSoP. Offline parsing is portable; live directory/SMB integration is supported on Windows. The older GroupPolicy DLLs in `lib` are not loaded.
+
+## Validation
+
+Run `tests/Invoke-RegressionTests.ps1`, `tests/Invoke-ClassContractTests.ps1`, `tests/Invoke-NativeClassTests.ps1`, `tests/Invoke-SelfContainedTests.ps1`, and `tests/Invoke-GpoReaderTests.ps1` in separate fresh PowerShell processes. CI exercises Windows PowerShell 5.1 and PowerShell 7 on a runner without installed RSAT modules. Fixture tests do not contact a live domain controller.
  
 ## AD Tactical Hardening Playbook 
 

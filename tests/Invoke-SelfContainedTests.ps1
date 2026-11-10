@@ -15,4 +15,16 @@ $paths=& $module {
 foreach($path in $paths){if([IO.Path]::GetFullPath($path) -ne $expected){throw "External AD dependency: $path"}}
 if(-not (Get-PSProvider ActiveDirectory -ErrorAction Stop)){throw 'Bundled AD provider was not registered'}
 if(Get-Module -Name GroupPolicy){throw 'Unexpected external GroupPolicy module'}
+foreach($name in @('Get-ADAnalyzerGpo','Get-ADAnalyzerGpoReport','Read-ADAnalyzerGpo')){
+    if(-not $module.ExportedFunctions.ContainsKey($name)){throw "Missing package GPO command: $name"}
+}
+$reader=Get-Content -LiteralPath (Join-Path $RepositoryRoot 'bin/ADGpo.ps1') -Raw
+if($reader -match '(?i)\bGet-GPO(?:Report)?\b|\bNew-Object\s+-ComObject\b|Import-Module\s+GroupPolicy'){throw 'GPO reader depends on GPMC/GroupPolicy'}
+$temporary=Join-Path ([IO.Path]::GetTempPath()) ('ad-bootstrap-'+[guid]::NewGuid().ToString('N'))
+$null=New-Item -Path $temporary -ItemType Directory
+try {
+    $report=Read-ADAnalyzerGpo -Path $temporary
+    if($report.Files.Count -ne 0){throw 'Unexpected empty-policy output'}
+} finally {Remove-Item -LiteralPath $temporary -Recurse -Force}
 Write-Host 'PASS manifest registers bundled AD commands and provider without installed RSAT'
+Write-Host 'PASS package exports its own offline GPO reader without GPMC'
