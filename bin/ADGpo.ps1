@@ -277,7 +277,13 @@ function ConvertTo-AnalyzerGpoXml {
             }
         }
         foreach($kind in @('Registry','Preferences','Xml','Ini')) {
-            $rows=if($kind -eq 'Registry'){@($Parsed.RegistrySettings | Where-Object Scope -eq $scope)}elseif($kind -eq 'Ini'){@($Parsed.IniSettings | Where-Object { $_.Scope -eq $scope -and -not $_.Analyzed })}else{@($Parsed.XmlFiles | Where-Object { $_.Scope -eq $scope -and $_.Kind -eq $kind })}
+            # Wrap the complete conditional: Windows PowerShell 5.1 does not
+            # provide Count on a singleton PSCustomObject after pipeline unwrap.
+            $rows=@(
+                if($kind -eq 'Registry'){$Parsed.RegistrySettings | Where-Object Scope -eq $scope}
+                elseif($kind -eq 'Ini'){$Parsed.IniSettings | Where-Object { $_.Scope -eq $scope -and -not $_.Analyzed }}
+                else{$Parsed.XmlFiles | Where-Object { $_.Scope -eq $scope -and $_.Kind -eq $kind }}
+            )
             if(-not $rows.Count){continue}
             $ext=Add-AnalyzerGpoXmlNode $doc $side 'ExtensionData';$null=Add-AnalyzerGpoXmlNode $doc $ext 'Name' $kind;$body=Add-AnalyzerGpoXmlNode $doc $ext 'Extension'
             foreach($row in $rows) {

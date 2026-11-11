@@ -175,6 +175,19 @@ try {
         Assert-True ($xml.GPO.Computer.ExtensionData.Name -contains 'Ini') 'Unsupported INI section missing'
         Assert-Equal 'false' $xml.GPO.VersionMismatch
     }
+    Test-Gpo 'singleton registry preferences XML and INI extensions survive on both engines' {
+        $single=[pscustomobject]@{
+            SysvolVersion=65538;SecuritySettings=@();Files=@()
+            RegistrySettings=@([pscustomobject]@{Scope='Computer';Hive='HKLM';Key='Software\Fixture';ValueName='One';Type=4;Value=0})
+            XmlFiles=@([pscustomobject]@{Scope='Computer';Kind='Preferences';Path='Machine/Preferences/One.xml';Xml='<One />'},[pscustomobject]@{Scope='Computer';Kind='Xml';Path='Machine/Other.xml';Xml='<Other />'})
+            IniSettings=@([pscustomobject]@{Scope='Computer';Source='Machine/Other.ini';Section='Fixture';Name='One';Value='0';Analyzed=$false})
+        }
+        $xml=[xml](ConvertTo-AnalyzerGpoXml $metadata $single)
+        Assert-Equal 4 $xml.GPO.Computer.SelectNodes('./ExtensionData').Count
+        Assert-Equal 0 $xml.GPO.User.SelectNodes('./ExtensionData').Count
+        foreach($kind in @('Registry','Preferences','Xml','Ini')){Assert-Equal 1 ($xml.GPO.Computer.ExtensionData | Where-Object Name -eq $kind).SelectNodes('./Extension/Record').Count}
+        Assert-Equal '0' ($xml.GPO.Computer.ExtensionData | Where-Object Name -eq Registry).Extension.Record.Value
+    }
     # Directory mocks record every endpoint and credential; no network is used.
     $script:Queries=[Collections.ArrayList]::new()
     $credential=[pscredential]::new('EXAMPLE\reader',(ConvertTo-SecureString 'fixture-only' -AsPlainText -Force))
