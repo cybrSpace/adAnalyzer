@@ -135,6 +135,38 @@ try {
         $comparison=Compare-ADAnalyzerAssessment @{SchemaVersion=1;Findings=@()} @{SchemaVersion=1;Findings=@()}
         Assert-Equal 0 @($comparison.Changes).Count
     }
+    Invoke-Test 'named XML secret payloads become idempotent boolean presence without losing normal settings' {
+        $fixtures=@(
+            @('<Registry><Properties name="DefaultPassword" value="unit2-secret"/><Properties name="PasswordComplexity" value="0"/></Registry>',$true),
+            @('<Setting ValueName="HKLM\Software\Fixture\DefaultPassword" Data="unit2-secret"/>',$true),
+            @('<p:Setting xmlns:p="urn:fixture" p:AttributeName="PASSWORD"><p:Value>unit2-secret</p:Value></p:Setting>',$true),
+            @('<Setting><Name>DefaultPassword</Name><Value>unit2-secret</Value></Setting>',$true),
+            @('<Setting name="DefaultPassword"><![CDATA[unit2-secret]]></Setting>',$true),
+            @('<Setting name="DefaultPassword">unit2-secret</Setting>',$true),
+            @('<Setting name="DefaultPassword" value="" Expected="unit2-expected"/>',$false),
+            @('<Setting><Name>DefaultPassword</Name><Value/></Setting>',$false),
+            @('<Setting name="DefaultPassword" SecretPresent="true" value=""/>',$true),
+            @('<Setting name="DefaultPassword" SecretPresent="false" value="unit2-secret"/>',$true)
+        )
+        foreach($fixture in $fixtures){
+            $source=[xml]$fixture[0];$original=$source.OuterXml
+            $safe=ConvertTo-ADAnalyzerSafeData $source
+            Assert-True ($safe -notmatch 'unit2-secret|unit2-expected|REDACTED') $safe
+            $projected=[xml]$safe;$flag=@($projected.SelectNodes('//@*') | Where-Object LocalName -eq SecretPresent)[0]
+            Assert-Equal ([string]$fixture[1]).ToLowerInvariant() $flag.Value
+            Assert-Equal $safe (ConvertTo-ADAnalyzerSafeData $safe)
+            Assert-Equal $original $source.OuterXml
+        }
+        $normal=ConvertTo-ADAnalyzerSafeData '<Settings><Setting name="PasswordComplexity" value="0"/><Setting name="ClearTextPassword" value="false"/><Setting name="ManagedPasswordIntervalInDays" value="30"/></Settings>'
+        Assert-True ($normal -match 'value="0"' -and $normal -match 'value="false"' -and $normal -match 'value="30"' -and $normal -notmatch 'SecretPresent') $normal
+        $fragment=ConvertTo-ADAnalyzerSafeData 'prefix <Properties name="DefaultPassword" value="unit2-secret"/> suffix'
+        Assert-True ($fragment -notmatch 'unit2-secret|REDACTED' -and $fragment -match 'SecretPresent="true"' -and $fragment.StartsWith('prefix ') -and $fragment.EndsWith(' suffix')) $fragment
+        Assert-Equal $fragment (ConvertTo-ADAnalyzerSafeData $fragment)
+        Assert-Equal 'passwordPresent="true"' (ConvertTo-ADAnalyzerSafeData 'password="unit2-secret"')
+        $mixed=ConvertTo-ADAnalyzerSafeData 'password="unit2-secret" <Other/>'
+        Assert-True ($mixed -notmatch 'unit2-secret' -and $mixed -match 'passwordPresent="true"') $mixed
+        Assert-Equal 'Password age > 90' (ConvertTo-ADAnalyzerSafeData 'Password age > 90')
+    }
     Invoke-Test 'comparison preserves evidence sequences where order is meaningful' {
         $old=@{SchemaVersion=1;Findings=@(@{RuleId='precedence';Target='a';Evidence=@{PolicySequence=@('first','second')}})}
         $new=@{SchemaVersion=1;Findings=@(@{RuleId='precedence';Target='a';Evidence=@{PolicySequence=@('second','first')}})}

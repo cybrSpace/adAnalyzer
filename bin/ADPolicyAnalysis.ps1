@@ -237,6 +237,15 @@ function Test-ADAnalyzerGpoPolicy {
             $safe['Attribute']='cpassword';$safe['ItemPath']=$attributePath
             New-ADAnalyzerCheck -RuleId 'GPO.Preferences.CPassword' -Status Fail -Severity Critical -Category CredentialExposure -Target ($target+'/'+$xmlRecord.File.Path+'/'+$attributePath) -Observed $true -Expected $false -Evidence $safe -Message 'A recoverable preference credential remains in stored policy. Remove the exposed credential and rotate the affected password; only its presence is reported.' -Applicability Configured
         }
+        $presenceDocument=ConvertTo-ADAnalyzerSecretIndicatorXml $xmlRecord.Document
+        foreach($record in @($presenceDocument.SelectNodes('//*[@SecretPresent]'))){
+            $name=Get-ADAnalyzerXmlSecretName $record
+            if(-not $name){continue}
+            $present=$record.GetAttribute('SecretPresent') -ieq 'true'
+            $itemPath=Get-ADAnalyzerPolicyXmlPath $record
+            $location=('{0}/{1}/{2}' -f $xmlRecord.File.Scope,$xmlRecord.File.Path,$itemPath)
+            New-ADAnalyzerCheck -RuleId 'GPO.StoredSecret' -Status $(if($present){'Fail'}else{'Pass'}) -Severity Critical -Category CredentialExposure -Target ($target+'/'+$location) -Observed $present -Expected $false -Evidence @{SecretPresent=$present;Path=$xmlRecord.File.Path;Scope=$xmlRecord.File.Scope;ItemPath=$itemPath;SettingName=$name} -Message 'Only the presence of a named XML secret is reported; its value is omitted.' -Applicability Configured
+        }
     }
     if(-not $secretCount){New-ADAnalyzerCheck -RuleId 'GPO.Preferences.CPassword' -Status $(if($xmlErrors){'Unknown'}else{'Pass'}) -Severity Critical -Category CredentialExposure -Target ($target+'/cpassword') -Observed $(if($xmlErrors){$null}else{$false}) -Expected $false -Evidence @{SecretPresent=$(if($xmlErrors){$null}else{$false});UnreadableXmlFiles=$xmlErrors} -Message 'Assessed XML contains no nonempty cpassword attribute; unreadable files prevent a complete conclusion.' -Applicability Configured}
 

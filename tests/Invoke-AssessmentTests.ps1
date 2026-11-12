@@ -73,6 +73,17 @@ try {
         $result=Invoke-ADAnalyzerAssessment -DirectoryData (New-AssessmentFixture) -GpoData @([pscustomobject]@{Gpo=$gpo;Policy=$null;Error='fixture SYSVOL denied'})
         Assert-Equal Unreadable ($result.Checks | Where-Object RuleId -eq GPO.READ).Status;Assert-Equal Partial $result.State
     }
+    Test-Assessment 'named XML secrets remain boolean findings through assessment and all exports' {
+        $policy=New-PolicyFixture;$policy.XmlFiles=@([pscustomobject]@{Scope='Computer';Kind='Preferences';Path='Machine/Preferences/Registry.xml';Xml='<RegistrySettings><Registry uid="one"><Properties name="DefaultPassword" value="unit2-assessment-secret"/></Registry></RegistrySettings>'})
+        $gpo=[pscustomobject]@{Id=[guid]'11111111-1111-1111-1111-111111111111';Flags=0;Version=1;Links=@()}
+        $result=Invoke-ADAnalyzerAssessment -DirectoryData (New-AssessmentFixture) -GpoData @([pscustomobject]@{Gpo=$gpo;Policy=$policy;Error=$null})
+        $finding=$result.Findings | Where-Object RuleId -eq GPO.StoredSecret
+        Assert-Equal Fail $finding.Status;Assert-Equal $true $finding.Observed;Assert-Equal $true $finding.Evidence.SecretPresent
+        Assert-True (($result | ConvertTo-Json -Depth 100) -notmatch 'unit2-assessment-secret|REDACTED') 'Assessment retained a named XML secret'
+        foreach($path in @(Export-ADAnalyzerAssessment -Assessment $result -Path (Join-Path $temp 'named-secret') -Format All -Confirm:$false)){
+            Assert-True ((Get-Content -LiteralPath $path -Raw) -notmatch 'unit2-assessment-secret|REDACTED') 'Export retained a named XML secret'
+        }
+    }
     Test-Assessment 'missing policy versions remain unknown' {
         $policy=New-PolicyFixture;$policy.SysvolVersion=$null
         $gpo=[pscustomobject]@{Id=[guid]'11111111-1111-1111-1111-111111111111';Flags=0;Version=1;Links=@()}

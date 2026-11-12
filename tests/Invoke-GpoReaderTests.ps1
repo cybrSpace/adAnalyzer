@@ -103,6 +103,17 @@ try {
         Assert-Equal $false ($parsed.SecuritySettings | Where-Object Name -eq 'TicketValidateClient').Value
         Assert-Equal 'Renamed, Admin' ($parsed.SecuritySettings | Where-Object Name -eq 'NewAdministratorName').Value
     }
+    Test-Gpo 'named registry preference secrets are absent from reader and canonical XML values' {
+        $namedRoot=Join-Path $temp 'named-xml-secret';$path=Join-Path $namedRoot 'Machine/Preferences/Registry/Registry.xml'
+        $xml='<RegistrySettings><Registry uid="item" name="DefaultPassword"><Properties name="DefaultPassword" key="Software\Fixture" value="unit2-reader-secret"/></Registry></RegistrySettings>'
+        Write-Text $path $xml
+        $data=Read-ADAnalyzerGpo $namedRoot
+        Assert-True ($data.XmlFiles[0].Xml -match 'SecretPresent="true"' -and $data.XmlFiles[0].Xml -notmatch 'unit2-reader-secret|REDACTED') 'Named secret retained by reader'
+        $metadata=[pscustomobject]@{Id=[guid]::NewGuid();Flags=0;Links=@();Version=0}
+        $canonical=ConvertTo-AnalyzerGpoXml -Gpo $metadata -Parsed $data
+        Assert-True ($canonical -notmatch 'unit2-reader-secret|REDACTED') 'Named secret retained by canonical report'
+        Assert-Equal $xml (Get-Content -LiteralPath $path -Raw)
+    }
     Test-Gpo 'privilege assignments preserve SID lists and empty assignments' {
         Assert-Equal 2 ($parsed.SecuritySettings | Where-Object Name -eq 'SeNetworkLogonRight').Value.Count
         Assert-Equal 0 @((($parsed.SecuritySettings | Where-Object Name -eq 'SeDenyNetworkLogonRight').Value)).Count

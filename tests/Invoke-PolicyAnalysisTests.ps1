@@ -74,6 +74,17 @@ Test-Policy 'malformed XML produces Unreadable and unknown credential coverage' 
     Assert-Policy (($checks | Where-Object RuleId -eq GPO.Xml.Readable).Status -eq 'Unreadable') 'Malformed XML was hidden'
     Assert-Policy (($checks | Where-Object RuleId -eq GPO.Preferences.CPassword).Status -eq 'Unknown') 'Unreadable XML was called credential-clean'
 }
+Test-Policy 'named XML secret detection keeps booleans locations and stable raw versus projected identity' {
+    $policy=New-PolicyFixture
+    $policy.XmlFiles=@([pscustomobject]@{Scope='Computer';Path='Machine/Preferences/Registry/Registry.xml';Xml='<RegistrySettings><Registry uid="one" name="DefaultPassword"><Properties name="DefaultPassword" value="unit2-policy-secret"/></Registry><Registry uid="two"><Properties name="DefaultPassword" value=""/></Registry></RegistrySettings>'})
+    $raw=@(Get-PolicyChecks $policy | Where-Object RuleId -eq GPO.StoredSecret)
+    Assert-Policy ($raw.Count -eq 2 -and @($raw | Where-Object Status -eq Fail).Count -eq 1 -and @($raw | Where-Object Status -eq Pass).Count -eq 1) 'Named XML presence is not correctly assessed'
+    foreach($check in $raw){Assert-Policy ($check.Observed -is [bool] -and $check.Evidence.Path -eq $policy.XmlFiles[0].Path -and $check.Evidence.ItemPath) 'Presence or location contract missing'}
+    Assert-Policy (($raw | ConvertTo-Json -Depth 30) -notmatch 'unit2-policy-secret|REDACTED') 'Named XML secret leaked into checks'
+    $policy.XmlFiles[0].Xml=ConvertTo-ADAnalyzerSecretIndicatorText $policy.XmlFiles[0].Xml
+    $safe=@(Get-PolicyChecks $policy | Where-Object RuleId -eq GPO.StoredSecret)
+    Assert-Policy ((@($raw.CheckId | Sort-Object) -join ',') -eq (@($safe.CheckId | Sort-Object) -join ',')) 'Projection changed a secret check identity'
+}
 Test-Policy 'RestrictedGroups preserves Members versus MemberOf and empty assignments' {
     $policy=New-PolicyFixture;$policy.IniSettings=@(
         [pscustomobject]@{Section='Group Membership';Name='*S-1-5-32-544__Members';Value='*S-1-5-21-1-2-3-1001';Scope='Computer';Source='GptTmpl.inf'}
