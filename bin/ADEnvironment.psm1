@@ -912,6 +912,19 @@ class PasswordPolicyObject : OrderedDictionary {
         $object['configurationEnabled'] = $obj['cfg.enabled']
 
         foreach ($item in $value) {
+            $presenceKey = [string]$item.Name + '.SecretPresent'
+            $presenceNode = $item.SelectSingleNode('./*[local-name()="SecretPresent"]')
+            if ($null -ne $presenceNode) {
+                if ($object.Contains([string]$item.Name)) { $object.Remove([string]$item.Name) }
+                $present = $false
+                $valid = [bool]::TryParse($presenceNode.InnerText, [ref]$present)
+                $object[$presenceKey] = if ($valid) { $present } else { $null }
+                $validityKey = [string]$item.Name + '.ValueValid'
+                $validityNode = $item.SelectSingleNode('./*[local-name()="ValueValid"]')
+                $object[$validityKey] = if (-not $valid) { $false } elseif ($null -ne $validityNode) { [System.Convert]::ToBoolean($validityNode.InnerText) } else { $null }
+                continue
+            }
+            if ($object.Contains($presenceKey)) { $object[$presenceKey] = $null }
             if ($null -ne $item.SettingNumber) {
                 $object[$item.Name] = [bigint]$item.SettingNumber
             }
@@ -939,6 +952,10 @@ class PasswordPolicyObject : OrderedDictionary {
             return $list
         }
 
+        if ($value.'property.setting.secretPresent' -is [bool]) {
+            if ($value.'property.setting.secretPresent') { $list.AddFinding($value, 'Defect - Stored Secret') }
+            return $list
+        }
 
         if ($value.'ext.property.name' -eq 'Account') {
 
@@ -2285,6 +2302,10 @@ class GroupPolicyObject : OrderedDictionary {
             return $list
         }
 
+        if ($value.'property.setting.secretPresent' -is [bool]) {
+            if ($value.'property.setting.secretPresent') { $list.AddFinding($value, 'Defect - Stored Secret') }
+            return $list
+        }
 
         if ($value.'ext.property.name' -eq 'Account') {
 
@@ -2413,6 +2434,20 @@ class GroupPolicyObject : OrderedDictionary {
         return $true
     }
 
+    static [bool]SetSecretPresence([OrderedDictionary]$record, [XmlElement]$value) {
+        $record['property.setting.secretPresent'] = $null
+        $record['property.setting.source'] = $null
+        $marker = $value.SelectSingleNode('./*[local-name()="SecretPresent"]')
+        if ($null -eq $marker) { return $false }
+        $record['property.setting.value'] = $null
+        $present = $false
+        if ([bool]::TryParse($marker.InnerText, [ref]$present)) { $record['property.setting.secretPresent'] = $present }
+        else { $record['property.setting.valid'] = $false }
+        $source = $value.SelectSingleNode('./*[local-name()="Source"]')
+        if ($null -ne $source) { $record['property.setting.source'] = $source.InnerText }
+        return $true
+    }
+
     [List]GetAccountSettings([XmlElement]$value, [GPOExtensionProperty]$name) {
 
         $array = [List]::New()
@@ -2431,13 +2466,13 @@ class GroupPolicyObject : OrderedDictionary {
                 $validityNode = $item.SelectSingleNode('./*[local-name()="ValueValid"]')
                 if ($null -ne $validityNode) { $object.Record['property.setting.valid'] = [System.Convert]::ToBoolean($validityNode.InnerText) }
 
-                switch ($item) {
+                if (-not [GroupPolicyObject]::SetSecretPresence($object.Record, $item)) { switch ($item) {
 
                     { $item.SettingNumber } { $object.Record['property.setting.value'] = [bigint]$item.SettingNumber }
                     { $item.SettingBoolean } { $object.Record['property.setting.value'] = [Convert]::ToBoolean($item.SettingBoolean) }
                     { $null -ne $item.SelectSingleNode('./*[local-name()="SettingString"]') } { $object.Record['property.setting.value'] = $item.SelectSingleNode('./*[local-name()="SettingString"]').InnerText }
 
-                }
+                } }
 
                 $array.Add([PSCustomObject]$object.Record) > $null
 
@@ -2464,24 +2499,24 @@ class GroupPolicyObject : OrderedDictionary {
 
             foreach ($item in @($value.Extension.($name))) {
 
-                if (-not [String]::IsNullOrEmpty($item.Display)) {
+                if (-not [String]::IsNullOrEmpty($item.Display) -or $null -ne $item.SelectSingleNode('./*[local-name()="SecretPresent"]')) {
 
                     $object = [GroupPolicyObject]::ImportRecord($this.Record)
 
                     $object.Record['ext.property.name'] = $name
                     $object.Record['ext.property.type'] = $null
 
-                    $object.Record['property.setting.name'] = $item.Display.Name
+                    $object.Record['property.setting.name'] = if ($item.Display.Name) { $item.Display.Name } else { [string]$item.Name }
                     $object.Record['property.setting.valid'] = $null
                     $validityNode = $item.SelectSingleNode('./*[local-name()="ValueValid"]')
                     if ($null -ne $validityNode) { $object.Record['property.setting.valid'] = [System.Convert]::ToBoolean($validityNode.InnerText) }
 
-                    switch ($item) {
+                    if (-not [GroupPolicyObject]::SetSecretPresence($object.Record, $item)) { switch ($item) {
 
                         { $null -ne $item.SelectSingleNode('./*[local-name()="Display"]/*[local-name()="DisplayString"]') } { $object.Record['property.setting.value'] = $item.SelectSingleNode('./*[local-name()="Display"]/*[local-name()="DisplayString"]').InnerText }
                         { $item.Display.DisplayBoolean } { $object.Record['property.setting.value'] = [Convert]::ToBoolean($item.Display.DisplayBoolean) }
 
-                    }
+                    } }
 
                     $array.Add([PSCustomObject]$object.Record) > $null
 
@@ -2620,7 +2655,8 @@ class GroupPolicyObject : OrderedDictionary {
             $object.Record['ext.property.name'] = [String]$value.Name
             $object.Record['ext.property.type'] = [String]$item.Type
             $object.Record['property.setting.name'] = [String]$item.Name
-            $object.Record['property.setting.value'] = [String]$item.Value
+            $object.Record['property.setting.valid'] = $null
+            if (-not [GroupPolicyObject]::SetSecretPresence($object.Record, $item)) { $object.Record['property.setting.value'] = [String]$item.Value }
             $array.Add([PSCustomObject]$object.Record) > $null
         }
         return $array
@@ -2690,7 +2726,7 @@ class GroupPolicyObject : OrderedDictionary {
                 'property.setting.name', 'property.setting.value', 'property.setting.parameter'
                 'ext.property.parameter', 'ext.property.filter'
                 'property.setting.right', 'property.setting.sid', 'property.setting.empty'
-                'property.setting.valid'
+                'property.setting.valid', 'property.setting.secretPresent', 'property.setting.source'
             )
 
         )

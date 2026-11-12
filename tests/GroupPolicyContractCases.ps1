@@ -14,6 +14,60 @@ try{
     Assert-ClassEqual 1 $r.Count;Assert-ClassEqual Ini $r.Extension;Assert-ClassEqual '1' $r.Value
     Assert-ClassTrue ($r.Name.Replace('\','/') -eq 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf: [Kerberos Policy] PasswordComplexity') 'Legacy raw setting lost its source/section identity'
 }
+Invoke-ClassTest 'legacy GPO reports findings and exports retain boolean secret detection and location' {
+    $r=Invoke-ClassScope @'
+$previous=$script:FixturePolicyXml;$path=Join-Path ([IO.Path]::GetTempPath()) ('ad-secret-report-'+[guid]::NewGuid().ToString('N')+'.csv')
+try{
+    $security=@();$registry=@();$ini=@()
+    foreach($present in @($true,$false)){
+        foreach($kind in @('Account','SecurityOptions')){$security+=@([pscustomobject]@{Scope='Computer';Kind=$kind;Name='MACHINE\Software\Fixture\DefaultPassword';SecretPresent=$present;Source='Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf'})}
+        $registry+=@([pscustomobject]@{Scope='Computer';Hive='HKLM';Key='Software\Fixture';ValueName='DefaultPassword';SecretPresent=$present;Type=1;Source='Machine/Registry.pol'})
+        $ini+=@([pscustomobject]@{Scope='User';Section='Fixture';Name='Password';SecretPresent=$present;Source='User/settings.ini';Analyzed=$false})
+    }
+    $security+=@([pscustomobject]@{Scope='Computer';Kind='Account';Name='MinimumPasswordLength';Value=16L;Source='Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf'})
+    $registry+=@([pscustomobject]@{Scope='Computer';Hive='HKLM';Key='Software\Fixture';ValueName='Enabled';Type=4;Value=0;Source='Machine/Registry.pol'})
+    $policy=[pscustomobject]@{SecuritySettings=$security;RegistrySettings=$registry;IniSettings=$ini;XmlFiles=@();Files=@()}
+    $xml=ConvertTo-AnalyzerGpoXml -Gpo ([pscustomobject]@{Id=[guid]::Empty;Flags=0;Links=@()}) -Parsed $policy
+    $script:FixturePolicyXml=$xml
+    $environment=Get-ADEnvironment -Class GroupPolicy -FQDN target.example.invalid
+    $rows=@(foreach($group in $environment.GroupPolicy.Report.Values){foreach($row in $group){$row}})
+    $before=ConvertTo-Json -InputObject $rows -Depth 50 -Compress
+    $indicators=@($rows | Where-Object {$_.'property.setting.secretPresent' -is [bool]})
+    $positive=@($indicators | Where-Object {$_.'property.setting.secretPresent'})
+    $negative=@($indicators | Where-Object {-not $_.'property.setting.secretPresent'})
+    $exposures=@($environment.GroupPolicy.Finding | Where-Object finding -eq 'Defect - Stored Secret')
+    $aggregate=@($environment.Finding | ForEach-Object {$_.object | ConvertFrom-Json})
+    $environment.GroupPolicy.Finding.ExportCSV($path);$csv=@(Import-Csv -LiteralPath $path)
+    [pscustomobject]@{Rows=$rows.Count;Positive=$positive.Count;Negative=$negative.Count;Findings=$exposures.Count;NullValues=(@($indicators | Where-Object {$null -ne $_.'property.setting.value'}).Count -eq 0);SecuritySources=@($indicators | Where-Object {$_.'property.setting.source' -eq 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf'}).Count;IniLocation=@($indicators | Where-Object {$_.'property.setting.name'.Replace('\','/') -like 'User/settings.ini:*'}).Count;NormalFlags=@($rows | Where-Object {$null -eq $_.'property.setting.secretPresent'}).Count;CsvFlags=(@($csv | Where-Object {$_.'property.setting.secretPresent' -eq 'True'}).Count);AggregateFlags=@($aggregate | Where-Object {$_.'property.setting.secretPresent' -is [bool] -and $_.'property.setting.secretPresent'}).Count;Unchanged=($before -ceq (ConvertTo-Json -InputObject $rows -Depth 50 -Compress));XmlUnchanged=($xml -ceq $script:FixturePolicyXml)}
+}finally{$script:FixturePolicyXml=$previous;if([IO.File]::Exists($path)){[IO.File]::Delete($path)}}
+'@
+    Assert-ClassEqual 10 $r.Rows;Assert-ClassEqual 4 $r.Positive;Assert-ClassEqual 4 $r.Negative
+    Assert-ClassEqual 4 $r.Findings;Assert-ClassEqual $true $r.NullValues;Assert-ClassEqual 4 $r.SecuritySources
+    Assert-ClassEqual 2 $r.IniLocation;Assert-ClassEqual 2 $r.NormalFlags;Assert-ClassEqual 4 $r.CsvFlags;Assert-ClassEqual 4 $r.AggregateFlags
+    Assert-ClassEqual $true $r.Unchanged;Assert-ClassEqual $true $r.XmlUnchanged
+}
+Invoke-ClassTest 'legacy presence markers suppress value nodes reject malformed flags and reset normal rows' {
+    $r=Invoke-ClassScope @'
+$owner=[GroupPolicyObject]::SetDefault();$owner.Record=[GroupPolicyObject]::SetDefault();$owner.Record['property.setting.secretPresent']=$true;$owner.Record['property.setting.source']='stale'
+$xml=[xml]'<ExtensionData><Name>Registry</Name><Extension><Record><Name>HKLM\Fixture\DefaultPassword</Name><SecretPresent>true</SecretPresent><Value>unit13-never-retain</Value></Record><Record><Name>HKLM\Fixture\Password</Name><SecretPresent>unknown</SecretPresent><Value>unit13-never-retain</Value></Record><Record><Name>HKLM\Fixture\Enabled</Name><Value>0</Value></Record></Extension></ExtensionData>'
+$before=$xml.OuterXml;$rows=$owner.GetRawExtension($xml.DocumentElement)
+[pscustomobject]@{Count=$rows.Count;Present=$rows[0].'property.setting.secretPresent';Value=$rows[0].'property.setting.value';Invalid=$rows[1].'property.setting.valid';InvalidLabel=([GroupPolicyObject]::Analyze($rows[1]))[0].finding;NormalFlag=$rows[2].'property.setting.secretPresent';NormalSource=$rows[2].'property.setting.source';NormalValue=$rows[2].'property.setting.value';Safe=(($rows | ConvertTo-Json -Depth 30) -notmatch 'unit13-never-retain|REDACTED');Unchanged=($before -ceq $xml.OuterXml)}
+'@
+    Assert-ClassEqual 3 $r.Count;Assert-ClassEqual $true $r.Present;Assert-ClassEqual $null $r.Value
+    Assert-ClassEqual $false $r.Invalid;Assert-ClassEqual 'Validate - Invalid stored policy value' $r.InvalidLabel
+    Assert-ClassEqual $null $r.NormalFlag;Assert-ClassEqual $null $r.NormalSource;Assert-ClassEqual '0' $r.NormalValue
+    Assert-ClassEqual $true $r.Safe;Assert-ClassEqual $true $r.Unchanged
+}
+Invoke-ClassTest 'wide password-policy records retain presence without copying tagged value nodes' {
+    $r=Invoke-ClassScope @'
+$null=[PasswordPolicy]::Initialize();$owner=[GroupPolicyObject]::SetDefault();$owner.Record=[GroupPolicyObject]::SetDefault();$owner.Record['gpo.name']='Presence fixture'
+$xml=[xml]'<ExtensionData><Name>Security</Name><Extension><Account><Name>DefaultPassword</Name><SecretPresent>true</SecretPresent><SettingString>unit13-wide-never-retain</SettingString></Account><Account><Name>Password</Name><SecretPresent>false</SecretPresent><SettingString>unit13-wide-never-retain</SettingString></Account><Account><Name>Credential</Name><SecretPresent>unknown</SecretPresent><SettingString>unit13-wide-never-retain</SettingString></Account><Account><Name>MinimumPasswordLength</Name><SettingNumber>16</SettingNumber></Account></Extension></ExtensionData>'
+$rows=$owner.GetSecurityExtension($xml.DocumentElement);$wide=[PasswordPolicy]::GetInstance()['Presence fixture']
+[pscustomobject]@{Present=$wide.'DefaultPassword.SecretPresent';Absent=$wide.'Password.SecretPresent';Invalid=$wide.'Credential.ValueValid';Neighbor=$wide.MinimumPasswordLength;Safe=(($wide | ConvertTo-Json -Depth 30) -notmatch 'unit13-wide-never-retain|REDACTED');FlatCount=$rows.Count}
+'@
+    Assert-ClassEqual $true $r.Present;Assert-ClassEqual $false $r.Absent;Assert-ClassEqual $false $r.Invalid
+    Assert-ClassEqual 16 $r.Neighbor;Assert-ClassEqual $true $r.Safe;Assert-ClassEqual 4 $r.FlatCount
+}
 Invoke-ClassTest 'singleton GPO account settings retain zero and extension metadata' {
     $r=Invoke-ClassScope @'
 $null=[PasswordPolicy]::Initialize()

@@ -325,6 +325,7 @@ function ConvertTo-AnalyzerGpoXml {
                 if($null -ne $setting.PSObject.Properties['SecretPresent']){
                     $null=Add-AnalyzerGpoXmlNode $doc $node 'Name' $setting.Name
                     $null=Add-AnalyzerGpoXmlNode $doc $node 'SecretPresent' ([string]$setting.SecretPresent).ToLowerInvariant()
+                    if($setting.Source){$null=Add-AnalyzerGpoXmlNode $doc $node 'Source' $setting.Source}
                     continue
                 }
                 if($setting.Kind -eq 'SecurityOptions') {
