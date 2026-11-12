@@ -254,8 +254,8 @@ function Get-ADAnalyzerDirectoryData {
     $available=@($schema | ForEach-Object {[string](Get-ADAnalyzerDirectoryField $_ 'lDAPDisplayName')})
     $searchBase=[string](Get-ADAnalyzerDirectoryField $Context 'SearchBase')
     if([string]::IsNullOrWhiteSpace($searchBase)){$searchBase=$domainDn}
-    $userProperties=@('ObjectGuid','SID','SamAccountName','Enabled','WhenChanged','WhenCreated','LastLogonDate','PasswordLastSet','PasswordNeverExpires','AdminCount','IsCriticalSystemObject','MemberOf','PrimaryGroupID','ServicePrincipalNames','UserAccountControl','ProtectedFromAccidentalDeletion','msDS-AllowedToDelegateTo','msDS-SupportedEncryptionTypes','Description')
-    $computerProperties=@('ObjectGuid','SID','SamAccountName','Enabled','WhenChanged','WhenCreated','LastLogonDate','PasswordLastSet','AdminCount','MemberOf','PrimaryGroupID','UserAccountControl','ServicePrincipalNames','TrustedForDelegation','IsCriticalSystemObject','ProtectedFromAccidentalDeletion','OperatingSystem','OperatingSystemVersion','DNSHostName','msDS-AllowedToDelegateTo','msDS-SupportedEncryptionTypes')
+    $userProperties=@('ObjectGuid','SID','SIDHistory','SamAccountName','Enabled','WhenChanged','WhenCreated','LastLogonDate','PasswordLastSet','PasswordNeverExpires','AdminCount','IsCriticalSystemObject','MemberOf','PrimaryGroupID','ServicePrincipalNames','UserAccountControl','ProtectedFromAccidentalDeletion','msDS-AllowedToDelegateTo','msDS-SupportedEncryptionTypes','Description')
+    $computerProperties=@('ObjectGuid','SID','SIDHistory','SamAccountName','Enabled','WhenChanged','WhenCreated','LastLogonDate','PasswordLastSet','AdminCount','MemberOf','PrimaryGroupID','UserAccountControl','ServicePrincipalNames','TrustedForDelegation','IsCriticalSystemObject','ProtectedFromAccidentalDeletion','OperatingSystem','OperatingSystemVersion','DNSHostName','msDS-AllowedToDelegateTo','msDS-SupportedEncryptionTypes')
     $classificationAttributes=@()
     foreach($rule in @(Get-ADAnalyzerDirectoryField (Get-ADAnalyzerDirectoryField $Profile 'AccountClassification' @{}) 'AttributeRules' @())){
         $attribute=[string](Get-ADAnalyzerDirectoryField $rule 'Attribute')
@@ -278,7 +278,7 @@ function Get-ADAnalyzerDirectoryData {
     $groups=@(& $query 'Get-ADGroup' $groupArgs 'Groups')
     $trusts=@(& $query 'Get-ADTrust' @{Filter='*';Properties=@('SIDFilteringForestAware','SIDFilteringQuarantined','SelectiveAuthentication','TGTDelegation','ForestTransitive','IntraForest','Direction','TrustType','Source','Target')} 'Trusts')
     $controllers=@(& $query 'Get-ADDomainController' @{Filter='*'} 'DomainControllers')
-    $serviceArgs=@{Filter='*';Properties=@('SID','ObjectGuid','Enabled','AdminCount','IsCriticalSystemObject','UserAccountControl','MemberOf','PrimaryGroupID','ServicePrincipalNames','PrincipalsAllowedToRetrieveManagedPassword','ManagedPasswordIntervalInDays','DNSHostName','msDS-SupportedEncryptionTypes','WhenChanged','WhenCreated','ProtectedFromAccidentalDeletion')}
+    $serviceArgs=@{Filter='*';Properties=@('SID','ObjectGuid','SIDHistory','Enabled','AdminCount','IsCriticalSystemObject','UserAccountControl','MemberOf','PrimaryGroupID','ServicePrincipalNames','PrincipalsAllowedToRetrieveManagedPassword','ManagedPasswordIntervalInDays','DNSHostName','msDS-SupportedEncryptionTypes','WhenChanged','WhenCreated','ProtectedFromAccidentalDeletion')}
     $serviceArgs.Properties=@($serviceArgs.Properties+$classificationAttributes | Select-Object -Unique)
     if($domainDn){$serviceArgs['SearchBase']=$domainDn}
     $rawServices=@(& $query 'Get-ADServiceAccount' $serviceArgs 'ServiceAccounts')

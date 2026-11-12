@@ -13,6 +13,7 @@ function Invoke-DirectoryTest([string]$Name,[scriptblock]$Body){
 $script:Credential=[pscredential]::new('fixture-user',(ConvertTo-SecureString 'fixture-only' -AsPlainText -Force))
 $script:Queries=[System.Collections.Generic.List[object]]::new()
 $script:Denied='';$script:IncludeLapsSchema=$true;$script:HostUnavailable=$false;$script:DeniedHostClass=''
+$script:ServiceAccount=$null
 $script:DomainDn='DC=example,DC=invalid';$script:DomainSid='S-1-5-21-1-2-3'
 $script:User=[pscustomobject]@{
     ObjectClass='user';ObjectGuid='11111111-1111-1111-1111-111111111111';SID=($script:DomainSid+'-1001')
@@ -52,12 +53,21 @@ function Register-DirectoryQuery([string]$Command,$Bound){
 function Get-ADRootDSE {param($Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADRootDSE' $PSBoundParameters;[pscustomobject]@{DefaultNamingContext=$script:DomainDn;SchemaNamingContext=('CN=Schema,CN=Configuration,'+$script:DomainDn);ConfigurationNamingContext=('CN=Configuration,'+$script:DomainDn)}}
 function Get-ADDomain {param($Identity,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADDomain' $PSBoundParameters;[pscustomobject]@{DistinguishedName=$script:DomainDn;DNSRoot='example.invalid';DomainSID=$script:DomainSid;DomainMode='fixture'}}
 function Get-ADForest {param($Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADForest' $PSBoundParameters;[pscustomobject]@{RootDomain='example.invalid';ForestMode='fixture'}}
-function Get-ADUser {param($Filter,$Properties,$SearchBase,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADUser' $PSBoundParameters; $script:User}
-function Get-ADComputer {param($Filter,$Properties,$SearchBase,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADComputer' $PSBoundParameters; $script:Computer}
+function Select-RequestedDirectoryFixture($Record,$Properties) {
+    if($null -eq $Record){return}
+    $result=[ordered]@{}
+    foreach($property in $Record.PSObject.Properties){
+        if($property.Name -ieq 'SIDHistory' -and 'SIDHistory' -notin $Properties){continue}
+        $result[$property.Name]=$property.Value
+    }
+    [pscustomobject]$result
+}
+function Get-ADUser {param($Filter,$Properties,$SearchBase,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADUser' $PSBoundParameters; Select-RequestedDirectoryFixture $script:User $Properties}
+function Get-ADComputer {param($Filter,$Properties,$SearchBase,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADComputer' $PSBoundParameters; Select-RequestedDirectoryFixture $script:Computer $Properties}
 function Get-ADGroup {param($Filter,$Properties,$SearchBase,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADGroup' $PSBoundParameters; $script:Groups}
 function Get-ADTrust {param($Filter,$Properties,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADTrust' $PSBoundParameters;[pscustomobject]@{Name='partner.invalid';Target='partner.invalid';IntraForest=$false;ForestTransitive=$false;SIDFilteringQuarantined=$false;TrustType='External'}}
 function Get-ADDomainController {param($Filter,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADDomainController' $PSBoundParameters;[pscustomobject]@{HostName='dc.example.invalid'}}
-function Get-ADServiceAccount {param($Filter,$Properties,$SearchBase,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADServiceAccount' $PSBoundParameters}
+function Get-ADServiceAccount {param($Filter,$Properties,$SearchBase,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADServiceAccount' $PSBoundParameters; Select-RequestedDirectoryFixture $script:ServiceAccount $Properties}
 function Get-ADDefaultDomainPasswordPolicy {param($Identity,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADDefaultDomainPasswordPolicy' $PSBoundParameters;$script:PasswordPolicy}
 function Get-ADFineGrainedPasswordPolicy {param($Filter,$Properties,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADFineGrainedPasswordPolicy' $PSBoundParameters}
 function Get-ADUserResultantPasswordPolicy {param($Identity,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADUserResultantPasswordPolicy' $PSBoundParameters}
@@ -149,6 +159,34 @@ Invoke-DirectoryTest 'OU-scoped users retain domain-scoped group resolution' {
     $groupQuery=@($script:Queries | Where-Object Command -eq 'Get-ADGroup')[0]
     Assert-DirectoryEqual $context.SearchBase $userQuery.Parameters.SearchBase
     Assert-DirectoryEqual $script:DomainDn $groupQuery.Parameters.SearchBase
+}
+Invoke-DirectoryTest 'live collection requests and preserves SIDHistory for every account class' {
+    $originalUser=$script:User;$originalComputer=$script:Computer
+    try {
+        $history=$script:DomainSid+'-512'
+        $script:User=$originalUser.PSObject.Copy();$script:User.SIDHistory=@($history)
+        $script:Computer=$originalComputer.PSObject.Copy();$script:Computer | Add-Member NoteProperty SIDHistory @($history) -Force
+        $script:ServiceAccount=$script:User.PSObject.Copy()
+        $script:ServiceAccount.ObjectClass='msDS-GroupManagedServiceAccount'
+        $script:ServiceAccount.ObjectGuid='33333333-3333-3333-3333-333333333333'
+        $script:ServiceAccount.SID=$script:DomainSid+'-1003'
+        $script:ServiceAccount.DistinguishedName='CN=Service,OU=Services,DC=example,DC=invalid'
+        $profile=New-DirectoryProfile;$script:Queries.Clear()
+        $data=Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile $profile
+        foreach($command in @('Get-ADUser','Get-ADComputer','Get-ADServiceAccount')){
+            $query=@($script:Queries | Where-Object Command -eq $command)[0]
+            Assert-DirectoryTrue ('SIDHistory' -in $query.Parameters.Properties) ($command+' omitted SIDHistory')
+        }
+        foreach($object in @($data.Users)+@($data.Computers)+@($data.ServiceAccounts)){
+            Assert-DirectoryEqual 1 $object.SIDHistory.Count
+            Assert-DirectoryEqual $history $object.SIDHistory[0]
+        }
+        $checks=@(Test-ADAnalyzerDirectoryPolicy -Data $data -Profile $profile | Where-Object RuleId -eq SIDHISTORY.PRIVILEGED)
+        Assert-DirectoryEqual 3 $checks.Count
+        Assert-DirectoryEqual 3 @($checks | Where-Object Status -eq Fail).Count
+    } finally {$script:User=$originalUser;$script:Computer=$originalComputer;$script:ServiceAccount=$null}
+    $clean=Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile (New-DirectoryProfile)
+    Assert-DirectoryEqual 0 $clean.Computers[0].SIDHistory.Count
 }
 Invoke-DirectoryTest 'failed group collection prevents a complete privilege assertion' {
     $script:Denied='Get-ADGroup'
