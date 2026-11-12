@@ -366,6 +366,106 @@ Write-Output 'PASS clean public API boundary'
         Assert-Equal 0 $LASTEXITCODE
         Assert-True (($output -join ' ') -match 'PASS clean public API boundary') 'Clean child did not finish'
     }
+    $legacyFixture=Join-Path $script:Temporary 'legacy-export-fixture.ps1'
+    Write-FixtureText $legacyFixture @'
+param([string]$Root,[string]$Script,[string]$Mode,[string]$Work)
+$ErrorActionPreference='Stop'
+. (Join-Path $Root 'bin/ADFile.ps1')
+$null=[IO.Directory]::CreateDirectory($Work);$path=Join-Path $Work 'report.csv'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $Root ('etc/'+$Script)),[ref]$tokens,[ref]$errors)
+if($errors.Count){throw ($errors.Message -join '; ')}
+$types=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.TypeDefinitionAst]},$true))
+if($Mode -eq 'Export'){$types=@($types | Where-Object Name -eq Collection)}
+if(-not $types.Count){throw 'Fixture class extraction failed'}
+function Assert-Legacy($Condition,[string]$Message){if(-not $Condition){throw $Message}}
+function Fingerprint-Legacy {[System.Convert]::ToBase64String([IO.File]::ReadAllBytes($path))}
+$body=if($Mode -eq 'Export'){
+    {
+        $row=if($Script -eq 'Get-NTLMEvents.ps1'){
+            [pscustomobject]@{Server=('server '+[char]0x00FC+' "quoted"');EventID='4624';LogName='Security';Time='fixture';UserName='fixture';WorkstationName='work';LogonType=3;ImpersonationLevel=2}
+        }else{[pscustomobject]@{iteration=1;url='https://fixture.invalid/a,"quoted"';status='Success';seconds=1.25;timestamp='2026-01-01 00:00:00Z'}}
+        $collection=[Collection]::new();$null=$collection.Add($row)
+        $collection.Export($path);$copy=@(Import-Csv -LiteralPath $path)
+        Assert-Legacy ($copy.Count -eq 1) 'Populated CSV row count changed'
+        foreach($property in $row.PSObject.Properties){Assert-Legacy ([string]$copy[0].($property.Name) -ceq [string]$property.Value) ('CSV value changed: '+$property.Name)}
+        $preference=$ErrorActionPreference
+        try{
+            $ErrorActionPreference='Continue'
+            function ConvertTo-Csv {
+                [CmdletBinding()]param([Parameter(ValueFromPipeline)]$InputObject,[switch]$NoTypeInformation)
+                process{if($script:ExportFaultMode -eq 'Terminating'){throw 'fixture conversion failure'};Write-Error 'fixture conversion failure'}
+            }
+            function Export-Csv {
+                [CmdletBinding(SupportsShouldProcess=$true)]param([Parameter(ValueFromPipeline)]$InputObject,$Path,[switch]$NoTypeInformation,$Encoding,[switch]$Force)
+                process{if($script:ExportFaultMode -eq 'Terminating'){throw 'fixture conversion failure'};Write-Error 'fixture conversion failure'}
+            }
+            foreach($script:ExportFaultMode in @('Terminating','NonTerminating')){
+                [IO.File]::WriteAllText($path,('previous '+[char]0x03A9));$before=Fingerprint-Legacy
+                $caught=$false;try{$collection.Export($path)}catch{$caught=$true}
+                Assert-Legacy $caught 'Conversion failure was reported as success'
+                Assert-Legacy ([IO.File]::Exists($path) -and (Fingerprint-Legacy) -ceq $before) 'Conversion failure destroyed previous bytes'
+            }
+        }finally{Remove-Item Function:ConvertTo-Csv,Function:Export-Csv;$ErrorActionPreference=$preference}
+        $empty=[Collection]::new();$empty.Export($path)
+        Assert-Legacy ([IO.File]::Exists($path) -and @(Import-Csv -LiteralPath $path).Count -eq 0) 'Empty export removed or retained stale rows'
+        $headers=if($Script -eq 'Get-NTLMEvents.ps1'){'"Server","EventID","LogName","Time","UserName","WorkstationName","LogonType","ImpersonationLevel"'}else{'"iteration","url","status","seconds","timestamp"'}
+        Assert-Legacy ([IO.File]::ReadAllText($path).Trim() -eq $headers) 'Empty CSV schema changed'
+        if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){
+            [IO.File]::WriteAllText($path,'previous locked report');$before=Fingerprint-Legacy
+            $held=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+            try{$caught=$false;try{$collection.Export($path)}catch{$caught=$true}}finally{$held.Dispose()}
+            Assert-Legacy ($caught -and (Fingerprint-Legacy) -ceq $before) 'Locked export failed to preserve its destination'
+        }
+        Assert-Legacy ([IO.Directory]::GetFiles($Work).Count -eq 1) 'Exporter silently renamed output or left a staging file'
+    }.ToString()
+}else{
+    {
+        $ErrorActionPreference='Continue'
+        [IO.File]::WriteAllText($path,'previous query report');$before=Fingerprint-Legacy
+        $script:QueryCalls=0
+        function Get-Credential {
+            [CmdletBinding()]param($UserName,$Message)
+            [pscredential]::new('fixture',(ConvertTo-SecureString 'fixture-only' -AsPlainText -Force))
+        }
+        function Get-WinEvent {
+            [CmdletBinding()]param($FilterHashtable,$Credential,$ComputerName)
+            $script:QueryCalls++
+            Write-Error 'fixture event query failure'
+        }
+        function Invoke-RestMethod {
+            [CmdletBinding()]param($Uri,$Method,$WebSession,[switch]$UseBasicParsing,$UserAgent)
+            $script:QueryCalls++
+            Write-Error 'fixture measurement failure'
+        }
+        $caught=$false;$failureMessage=''
+        try{
+            if($Script -eq 'Get-NTLMEvents.ps1'){$target=[Target]::Scan([Collections.ArrayList]@('fixture-host'),@{},'fixture')}
+            else{
+                $target=[Target]::new(@{},@{limit=1;wait=0})
+                # Supply a valid collection to isolate export/query behavior;
+                # constructor finding C-013 is tested in its separate correction.
+                $target.Collection=[Collection]::new();$target.Analyze('https://fixture.invalid/')
+            }
+            $target.Export($path)
+        }catch{$caught=$true;$failureMessage=$_.Exception.Message}
+        $marker=if($Script -eq 'Get-NTLMEvents.ps1'){'fixture event query failure'}else{'fixture measurement failure'}
+        Assert-Legacy ($script:QueryCalls -eq 1 -and $failureMessage.Contains($marker)) 'Fixture did not reach and propagate the intended query failure'
+        Assert-Legacy ($caught -and [IO.File]::Exists($path) -and (Fingerprint-Legacy) -ceq $before) 'Failed query reached export or changed prior bytes'
+    }.ToString()
+}
+$source="using namespace System.Collections"+[Environment]::NewLine+"using namespace System.Collections.Specialized"+[Environment]::NewLine+($types.Extent.Text -join [Environment]::NewLine)+[Environment]::NewLine+$body
+. ([scriptblock]::Create($source))
+Write-Output ('PASS legacy '+$Script+' '+$Mode)
+'@
+    foreach($legacyScript in @('Get-NTLMEvents.ps1','Test-SAMLProtectedResponseTimes.ps1')){foreach($legacyMode in @('Export','Query')){
+        Invoke-AuxiliaryTest ('legacy '+$legacyScript+' '+$legacyMode+' preserves reports on failures and supports empty data') {
+            $work=Join-Path $script:Temporary ([guid]::NewGuid().ToString('N'))
+            $output=& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $legacyFixture -Root $RepositoryRoot -Script $legacyScript -Mode $legacyMode -Work $work
+            Assert-Equal 0 $LASTEXITCODE
+            Assert-True (($output -join ' ') -match 'PASS legacy') 'Legacy child fixture did not finish'
+        }
+    }}
     if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){
         Invoke-AuxiliaryTest 'Windows held destinations preserve bytes and clean failed staging files' {
             $path=Join-Path $script:Temporary 'held.txt';Write-FixtureText $path 'old report';$before=Get-BytesFingerprint $path

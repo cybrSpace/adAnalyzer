@@ -260,19 +260,6 @@ class Export {
 
         try {
 
-            if (Test-Path $value) { 
-                Remove-Item $value -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false 
-            }
-
-        }
-        catch {
-
-            $value = $value.Replace('.csv', ('_{0}.csv' -f (Get-Date -Format 'yyyy.MM.dd.HHmm')))
-
-        }
-
-        try {
-
             $list = [ArrayList]::New()
 
             $array | ForEach-Object { 
@@ -292,7 +279,8 @@ class Export {
             
             }
 
-            $list | Export-Csv -Path $value -NoTypeInformation -Encoding UTF8 -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false
+            $content = if ($list.Count) { ($list | ConvertTo-Csv -NoTypeInformation -ErrorAction Stop) -join [Environment]::NewLine } else { '' }
+            $null = Write-ADAnalyzerFile -Path $value -Content $content
 
         }
         catch {

@@ -1,6 +1,8 @@
 using namespace System.Collections
 using namespace System.Collections.Specialized
 
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'bin/ADFile.ps1')
+
 $var = @{
 
     'config' = @{
@@ -128,7 +130,7 @@ class Target {
 
             $time = Measure-Command -Expression {
 
-                $r = Invoke-RestMethod -Uri $string -Method GET -WebSession $this.Session -UseBasicParsing -UserAgent $this.Agent
+                $r = Invoke-RestMethod -Uri $string -Method GET -WebSession $this.Session -UseBasicParsing -UserAgent $this.Agent -ErrorAction Stop
 
             }
 
@@ -151,11 +153,7 @@ class Target {
     }
     [void]Export([String]$value) {
 
-        if ($this.Collection.Count -gt 0) {
-
-            $this.Collection.Export($value)
-
-        }
+        $this.Collection.Export($value)
 
     }
     [Collection]Report() {
@@ -176,40 +174,16 @@ class Target {
 }
 class Collection : ArrayList {
 
-    Collection() : base () { }
+    Collection() : base() {}
 
     [void]Export([String]$value) {
-
         try {
-
-            if (Test-Path $value) {
-                
-                Remove-Item $value -Force -ErrorAction Stop
-
-            }
-
+            $content = if ($this.Count) {
+                ($this | ConvertTo-Csv -NoTypeInformation -ErrorAction Stop) -join [Environment]::NewLine
+            } else { '"iteration","url","status","seconds","timestamp"' }
+            $null = Write-ADAnalyzerFile -Path $value -Content $content
         }
-        catch {
-
-            $value = $value -replace '.csv', ('.{0}.csv' -f (Get-Date -Format 'ss'))
-
-        }
-
-        try {
-
-            if ($this.Count -gt 0) {
-
-                $this | Export-Csv -Path $value -NoTypeInformation
-
-            }
-
-        }
-        catch {
-
-            throw ('{0}({1})' -f 'export', $_.Exception.Message)
-
-        }
-
+        catch { throw ('{0}({1})' -f 'export', $_.Exception.Message) }
     }
 
 }
@@ -232,11 +206,7 @@ try {
         $target.Export($target.Config['export'])
 
     }
-    catch {
-
-        $_.Exception.Message
-
-    }
+    catch { throw }
 
 }
 catch {

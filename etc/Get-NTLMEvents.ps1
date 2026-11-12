@@ -3,6 +3,8 @@
 using namespace System.Collections
 using namespace System.Collections.Specialized
 
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'bin/ADFile.ps1')
+
 $var = @{
 
     'user'   = [String]'ad\da-alipa'
@@ -51,7 +53,7 @@ class Target {
             # [-] Therefore, our general recommendation is to ignore the event for security protocol usage information when the event is loggon for ANONYMOUS LOGON
             # [!] https://docs.microsoft.com/en-us/troubleshoot/windows-server/windows-security/audit-domain-controller-ntlmv1
 
-            Get-WinEvent -FilterHashtable $target.Filter -Credential $c -ComputerName $item | Where-Object { $_.Properties[5].Value -ne 'ANONYMOUS LOGON' } | ForEach-Object {
+            Get-WinEvent -FilterHashtable $target.Filter -Credential $c -ComputerName $item -ErrorAction Stop | Where-Object { $_.Properties[5].Value -ne 'ANONYMOUS LOGON' } | ForEach-Object {
 
                 $object = [Finding]::New($_.TimeCreated.ToString('g'), $item, $_.Properties)
 
@@ -105,37 +107,13 @@ class Collection : ArrayList {
     Collection() : base() {}
 
     [void]Export([String]$value) {
-
         try {
-
-            if (Test-Path -Path $value) {
-
-                Remove-Item -Path $value -Force -ErrorAction Stop
-
-            }
-
+            $content = if ($this.Count) {
+                ($this | ConvertTo-Csv -NoTypeInformation -ErrorAction Stop) -join [Environment]::NewLine
+            } else { '"Server","EventID","LogName","Time","UserName","WorkstationName","LogonType","ImpersonationLevel"' }
+            $null = Write-ADAnalyzerFile -Path $value -Content $content
         }
-        catch {
-
-            $value = $value -replace $value, ('.{0}.csv') -f (Get-Date -f 'ss')
-
-        }
-
-        try {
-
-            if ($this.Count -gt 0) {
-
-                $this | Export-Csv -Path $value -NoTypeInformation -ErrorAction Stop
-
-            }
-
-        }
-        catch {
-
-            throw ('{0}({1})' -f 'export', $_.Exception.Message)
-
-        }
-
+        catch { throw ('{0}({1})' -f 'export', $_.Exception.Message) }
     }
 
 }

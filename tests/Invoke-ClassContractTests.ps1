@@ -322,6 +322,45 @@ try {
 '@
     Assert-ClassTrue $result 'Export changed the source or exposed a secret'
 }
+Invoke-ClassTest 'legacy CSV projection failures preserve the exact previous destination' {
+    $result=Invoke-ClassScope @'
+$path=Join-Path ([IO.Path]::GetTempPath()) ('ad-legacy-csv-'+[guid]::NewGuid().ToString('N')+'.csv')
+$projection=(Get-Item Function:ConvertTo-ADAnalyzerSafeData).ScriptBlock
+try{
+    [IO.File]::WriteAllText($path,'previous report');$before=[System.Convert]::ToBase64String([IO.File]::ReadAllBytes($path))
+    function script:ConvertTo-ADAnalyzerSafeData {param($InputObject) throw 'fixture projection failure'}
+    $caught=$false;try{[Export]::CSV(@([pscustomobject]@{Name='fixture'}),$path)}catch{$caught=$true}
+    $caught -and [IO.File]::Exists($path) -and [System.Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) -ceq $before
+}finally{Set-Item Function:script:ConvertTo-ADAnalyzerSafeData $projection;if([IO.File]::Exists($path)){[IO.File]::Delete($path)}}
+'@
+    Assert-ClassTrue $result 'CSV conversion failure erased the previous report'
+}
+Invoke-ClassTest 'successful empty legacy CSV export replaces stale content explicitly' {
+    $result=Invoke-ClassScope @'
+$path=Join-Path ([IO.Path]::GetTempPath()) ('ad-empty-csv-'+[guid]::NewGuid().ToString('N')+'.csv')
+try{
+    [IO.File]::WriteAllText($path,'stale report');[Export]::CSV(@(),$path)
+    [IO.File]::Exists($path) -and [IO.File]::ReadAllText($path) -eq ''
+}finally{if([IO.File]::Exists($path)){[IO.File]::Delete($path)}}
+'@
+    Assert-ClassTrue $result 'Empty export left stale content or removed the destination'
+}
+if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){
+    Invoke-ClassTest 'legacy CSV locked destinations fail without silently choosing another filename' {
+        $result=Invoke-ClassScope @'
+$directory=Join-Path ([IO.Path]::GetTempPath()) ('ad-locked-csv-'+[guid]::NewGuid().ToString('N'));$null=[IO.Directory]::CreateDirectory($directory)
+$path=Join-Path $directory 'report.csv';$held=$null
+try{
+    [IO.File]::WriteAllText($path,'previous report')
+    $held=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    $caught=$false;try{[Export]::CSV(@([pscustomobject]@{Name='fixture'}),$path)}catch{$caught=$true}
+    $held.Dispose();$held=$null
+    $caught -and [IO.File]::ReadAllText($path) -eq 'previous report' -and [IO.Directory]::GetFiles($directory).Count -eq 1
+}finally{if($null -ne $held){$held.Dispose()};[IO.Directory]::Delete($directory,$true)}
+'@
+        Assert-ClassTrue $result 'Locked export did not preserve the original destination contract'
+    }
+}
 Invoke-ClassTest 'legacy queries use required metadata and retain only presence for unexpected secrets' {
     $result=Invoke-ClassScope @'
 $user=$script:UserRecord;$group=$script:GroupRecord
