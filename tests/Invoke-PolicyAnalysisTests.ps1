@@ -38,6 +38,23 @@ Test-Policy 'missing settings are NotConfigured with unknown applicability' {
     Assert-Policy ($length.Status -eq 'NotConfigured' -and $length.Applicability -eq 'Unknown') 'Missing setting was reported as compliant/effective'
     Assert-Policy (@($checks | Group-Object CheckId | Where-Object Count -gt 1).Count -eq 0) 'Duplicate check identities'
 }
+Test-Policy 'malformed baseline identities cannot conceal a secret or act as a multi-setting query' {
+    foreach($section in @('RegistryRules','ExpectedGpoSettings','Host')){foreach($rule in @(
+        @{ValueName='';Name=@('DefaultPassword','Friendly');Key='Software\Fixture';Expected='unit7-array-secret'}
+        @{Kind='SecurityOptions';Name=@($null,$null);ValueName='DefaultPassword';Expected='unit7-array-secret'}
+        @{Kind=@('SecurityOptions','Registry');Name='Friendly';ValueName='DefaultPassword';Expected='unit7-array-secret'}
+        @{Key=@{Name='DefaultPassword'};Expected='unit7-array-secret'}
+    )){
+        $profile=Get-ADAnalyzerDefaultProfile
+        if($section -eq 'Host'){$profile.Host.RegistryRules=@($rule)}else{$profile[$section]=@($rule)}
+        $caught=$null;try{$null=Import-ADAnalyzerProfile -Profile $profile}catch{$caught=$_}
+        Assert-Policy ($null -ne $caught -and $caught.Exception.Message -eq 'Custom value baseline identity fields must be strings or null.') 'Malformed profile identity accepted'
+        $emitted=[Collections.ArrayList]::new();$caught=$null
+        try{Test-ADAnalyzerGpoPolicy -Gpo $script:Gpo -Policy (New-PolicyFixture) -Profile $profile | ForEach-Object {$null=$emitted.Add($_)}}catch{$caught=$_}
+        Assert-Policy ($null -ne $caught -and $emitted.Count -eq 0) 'Malformed raw profile emitted evidence'
+        Assert-Policy ($caught.Exception.Message -eq 'Custom value baseline identity fields must be strings or null.' -and ([string]$caught.TargetObject) -notmatch 'unit7-array-secret') 'Malformed identity error exposed supplied data'
+    }}
+}
 Test-Policy 'password and lockout sentinel values retain their meaning' {
     $policy=New-PolicyFixture
     $policy.SecuritySettings=@(

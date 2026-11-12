@@ -57,7 +57,7 @@ Checks expose Pass, Fail, Unknown, Unreadable, NotConfigured, Invalid, and NotAp
 
 The new analyzers cover cpassword using boolean presence only, Restricted Groups, Local Users and Groups preference actions, exact-SID user-right allowlists, password/lockout sentinel values, raw Registry.pol types/deletions, and custom baseline rules. Optional ADMX/ADML enrichment accepts `Analysis.TemplatePath` and `Analysis.Language`; unresolved or complex definitions stay Unknown and raw registry identity remains authoritative.
 
-Custom value baselines in `RegistryRules`, `ExpectedGpoSettings`, and `Host.RegistryRules` reject known secret-bearing settings. Use the built-in boolean secret-presence findings for those settings; their stored values are not supported baseline inputs.
+Custom value baselines in `RegistryRules`, `ExpectedGpoSettings`, and `Host.RegistryRules` reject known secret-bearing settings. Use the built-in boolean secret-presence findings for those settings; their stored values are not supported baseline inputs. Identity fields (`Kind`, `Name`, `Key`, `ValueName`) identify one setting and must be strings or null; expected value collections remain supported.
 
 Directory checks include MachineAccountQuota, Recycle Bin, default/fine-grained/resultant password policies, trusts/SID filtering, SPNs, SIDHistory, delegation including RBCD, LAPS and gMSA metadata. Managed passwords are never requested. Reader-permission and delegation checks report configured grants, not a complete effective-access calculation.
 

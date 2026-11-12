@@ -18,6 +18,11 @@ function Assert-ADAnalyzerValueBaseline {
     )
     foreach($collection in $collections){foreach($rule in @($collection.Rules)){
         if($null -eq $rule){continue}
+        foreach($field in @('Kind','Name','Key','ValueName')){
+            if($null -ne $rule.$field -and $rule.$field -isnot [string]){
+                throw 'Custom value baseline identity fields must be strings or null.'
+            }
+        }
         $kind='Registry'
         if($rule -is [Collections.IDictionary]){if($rule.Contains('Kind')){$kind=$rule['Kind']}}
         elseif($null -ne $rule.PSObject.Properties['Kind']){$kind=$rule.Kind}
