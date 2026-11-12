@@ -2330,65 +2330,31 @@ class GroupPolicyObject : OrderedDictionary {
         }
         elseif ($value.'ext.property.name' -eq 'UserRightsAssignment') {
 
-            if ($value.'gpo.linked.ou' -match 'Domain Controllers') { 
-
-                switch ($value.'property.setting.name') {
-
-                    { $_ -match 'Access Credential Manager as a trusted caller' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Access this computer from the network' -and $value.'property.setting.value' -notmatch '(Administrators|Authenticated Users|Domain Admins)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Act as part of the operating system' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Add workstations to domain' -and $value.'property.setting.value' -notmatch '(Administrators|Authenticated Users)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Adjust memory quotas for a process' -and $value.'property.setting.value' -notmatch '(Administrators|LOCAL SERVICE|NETWORK SERVICE)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Allow log on locally' -and $value.'property.setting.value' -notmatch '(Domain Admins|Enterprise Admins|Administrators)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Allow log on through Remote Desktop Services' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Back up files and directories' -and $value.'property.setting.value' -notmatch '(Administrators)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    # Hardened (Requires thorough testing) { $_ -match 'Bypass traverse checking' -and $value.'property.setting.value' -notmatch '(Administrators|Authenticated Users|Local Service|Network Service)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Bypass traverse checking' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Change the system time' -and $value.'property.setting.value' -notmatch '(Administrators|LOCAL SERVICE)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Change the time zone' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Create a pagefile' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Create a token object' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Create global objects' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Create permanent shared objects' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Create symbolic links' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Debug programs' -and $value.'property.setting.value' -notmatch '(Administrators)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Deny access to this computer from the network' -and $value.'property.setting.value' -notmatch '(Guests|ANONYMOUS LOGON)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Deny log on as a batch job' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Deny log on as a service' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Deny log on locally' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Deny log on through Remote Desktop Services' -and $value.'property.setting.value' -notmatch '(Guests)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Enable computer and user accounts to be trusted for delegation' -and $value.'property.setting.value' -notmatch '(Administrators)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Force shutdown from a remote system' -and $value.'property.setting.value' -notmatch '(Administrators)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Generate security audits' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Impersonate a client after authentication' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Increase a process working set' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Increase scheduling priority' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Load and unload device drivers' -and $value.'property.setting.value' -notmatch '(Administrators)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Lock pages in memory' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Log on as a batch job' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Log on as a service' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Manage auditing and security log' -and $value.'property.setting.value' -notmatch '(Administrators)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Modify an object label' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Modify firmware environment values' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Obtain an impersonation token for another user in the same session' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Perform volume maintenance tasks' -and $value.'property.setting.value' -notmatch '(Administrators)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Profile single process' -and $value.'property.setting.value' -notmatch '(Administrators)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Profile system performance' -and $value.'property.setting.value' -notmatch '(Administrators)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Remove computer from docking station' -and $value.'property.setting.value' -notmatch '(Administrators)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Replace a process level token' -and $value.'property.setting.value' -notmatch '(Network Service|Local Service)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Restore files and directories' -and $value.'property.setting.value' -notmatch '(Administrators)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Shut down the system' -and $value.'property.setting.value' -notmatch '(Administrators)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Synchronize directory service data' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-                    { $_ -match 'Take ownership of files or other objects' -and $value.'property.setting.value' -notmatch '(Administrators)' } { $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment') }
-
+            if ($value.'gpo.linked.ou' -match 'Domain Controllers') {
+                $right = [string]$value.'property.setting.right'
+                $rights = $policy.AllowedUserRightSids
+                if ([string]::IsNullOrWhiteSpace($right) -or $rights -isnot [Collections.IDictionary] -or -not $rights.Contains($right)) {
+                    $list.AddFinding($value, 'Validate - UserRightsAssignment Allowlist Not Configured')
                 }
-
-            }
-
-            switch ($value.'property.setting.name') {
-
-                { $value.'property.setting.value' -match '^S-1-5' -and $value.'property.setting.parameter' -notmatch '^SID resolution: ' } { $list.AddFinding($value, 'Defect - Unresolvable UserRightsAssignment') }
-
+                else {
+                    $approved = $rights[$right]
+                    $valid = $null -ne $approved -and ($approved -is [string] -or $approved -is [Collections.IList])
+                    foreach ($sid in @($approved)) {
+                        if ($sid -isnot [string] -or $sid -notmatch '^S-1-\d+(?:-\d+){1,15}$') { $valid = $false }
+                    }
+                    if (-not $valid) {
+                        $list.AddFinding($value, 'Validate - Invalid UserRightsAssignment Allowlist')
+                    }
+                    elseif ($value.'property.setting.empty' -ne $true) {
+                        $memberSid = [string]$value.'property.setting.sid'
+                        if ($memberSid -notmatch '^S-1-\d+(?:-\d+){1,15}$') {
+                            $list.AddFinding($value, 'Validate - UserRightsAssignment SID Required')
+                        }
+                        elseif (@($approved) -notcontains $memberSid) {
+                            $list.AddFinding($value, 'Defect - Invalid UserRightsAssignment')
+                        }
+                    }
+                }
             }
 
         }
@@ -2483,34 +2449,42 @@ class GroupPolicyObject : OrderedDictionary {
 
             foreach ($list in @($value.Extension.($name))) {
 
-                if ([String]::IsNullOrEmpty($list.Member)) {
+                $rightNode = $list.SelectSingleNode('./*[local-name()="Name"]')
+                $right = if ($null -ne $rightNode) { $rightNode.InnerText.Trim() } else { '' }
+                $members = $list.SelectNodes('./*[local-name()="Member"]')
+                if ($members.Count -eq 0) {
 
                     $object = [GroupPolicyObject]::ImportRecord($this.Record)
 
                     $object.Record['ext.property.name'] = $name
                     $object.Record['ext.property.type'] = $null
 
-                    $object.Record['property.setting.name'] = ('{0} ({1})' -f $table[$list.Name], $list.Name)
+                    $object.Record['property.setting.name'] = ('{0} ({1})' -f $table[$right], $right)
+                    $object.Record['property.setting.right'] = $right
+                    $object.Record['property.setting.empty'] = $true
 
                     $array.add([PSCustomObject]$object.Record) > $null
 
                 }
                 else {
 
-                    foreach ($item in $list.Member) {
+                    foreach ($item in $members) {
 
                         $object = [GroupPolicyObject]::ImportRecord($this.Record)
 
                         $object.Record['ext.property.name'] = $name
                         $object.Record['ext.property.type'] = $null
 
-                        $object.Record['property.setting.name'] = ('{0} ({1})' -f $table[$list.Name], $list.Name)
+                        $object.Record['property.setting.name'] = ('{0} ({1})' -f $table[$right], $right)
+                        $object.Record['property.setting.right'] = $right
+                        $object.Record['property.setting.empty'] = $false
                         $object.Record['property.setting.value'] = $item
 
                         $nameNode = $item.SelectSingleNode('./*[local-name()="Name"]')
                         $sidNode = $item.SelectSingleNode('./*[local-name()="SID"]')
                         $memberName = if ($null -ne $nameNode) { $nameNode.InnerText } else { $null }
-                        $memberSID = if ($null -ne $sidNode) { $sidNode.InnerText } else { $null }
+                        $memberSID = if ($null -ne $sidNode) { $sidNode.InnerText.Trim() } else { $null }
+                        $object.Record['property.setting.sid'] = $memberSID
                         $object.Record['property.setting.value'] = if (-not [String]::IsNullOrEmpty($memberName)) { $memberName } else { $memberSID }
                         $resolutionNode = $item.SelectSingleNode('./*[local-name()="Resolution"]')
                         if ($null -ne $resolutionNode) { $object.Record['property.setting.parameter'] = 'SID resolution: ' + $resolutionNode.InnerText }
@@ -2659,6 +2633,7 @@ class GroupPolicyObject : OrderedDictionary {
                 'ext.property.name', 'ext.property.enabled', 'ext.property.type'
                 'property.setting.name', 'property.setting.value', 'property.setting.parameter'
                 'ext.property.parameter', 'ext.property.filter'
+                'property.setting.right', 'property.setting.sid', 'property.setting.empty'
             )
 
         )

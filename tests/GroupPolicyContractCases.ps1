@@ -44,11 +44,82 @@ Invoke-ClassTest 'singleton GPO user rights retain member names and SID fallback
 $owner=[GroupPolicyObject]::SetDefault();$owner.Record=[GroupPolicyObject]::SetDefault()
 $xml=[xml]'<ExtensionData><Name>Security</Name><Extension><UserRightsAssignment><Name>SeNetworkLogonRight</Name><Member><Name>Fixture Operator</Name><SID>S-1-5-32-544</SID></Member><Member><SID>S-1-5-32-545</SID></Member></UserRightsAssignment></Extension></ExtensionData>'
 $rows=$owner.GetSecurityExtension($xml.DocumentElement)
-[pscustomobject]@{Count=$rows.Count;First=$rows[0].'property.setting.value';Second=$rows[1].'property.setting.value'}
+[pscustomobject]@{Count=$rows.Count;First=$rows[0].'property.setting.value';Second=$rows[1].'property.setting.value';Right=$rows[0].'property.setting.right';Sid=$rows[0].'property.setting.sid';Empty=$rows[0].'property.setting.empty'}
 '@
     Assert-ClassEqual 2 $r.Count
     Assert-ClassEqual 'Fixture Operator' $r.First
     Assert-ClassEqual 'S-1-5-32-545' $r.Second
+    Assert-ClassEqual 'SeNetworkLogonRight' $r.Right
+    Assert-ClassEqual 'S-1-5-32-544' $r.Sid
+    Assert-ClassEqual $false $r.Empty
+}
+
+Invoke-ClassTest 'legacy user-right approval follows exact SID identity across names and resolution states' {
+    $r=Invoke-ClassScope @'
+$script:ADAnalyzerLegacyProfile=Get-ADAnalyzerDefaultProfile
+$script:ADAnalyzerLegacyProfile.Policy.AllowedUserRightSids=@{SeDebugPrivilege=@('S-1-5-32-544')}
+try {
+    $owner=[GroupPolicyObject]::SetDefault();$owner.Record=[GroupPolicyObject]::SetDefault();$owner.Record['gpo.linked.ou']='Domain Controllers'
+    $xml=[xml]'<ExtensionData><Name>Security</Name><Extension><UserRightsAssignment><Name>SeDebugPrivilege</Name><Member><Name>Administrateurs</Name><SID>S-1-5-32-544</SID></Member><Member><Name>NotAdministrators</Name><SID>S-1-5-21-1-2-3-1100</SID></Member><Member><Name>S-1-5-32-544</Name><SID>S-1-5-21-1-2-3-1100</SID></Member><Member><SID>S-1-5-32-544</SID><Resolution>LookupFailed</Resolution></Member></UserRightsAssignment></Extension></ExtensionData>'
+    $rows=$owner.GetSecurityExtension($xml.DocumentElement)
+    foreach($row in $rows){[pscustomobject]@{Display=$row.'property.setting.value';Labels=@([GroupPolicyObject]::Analyze($row) | ForEach-Object finding)}}
+}finally{$script:ADAnalyzerLegacyProfile=$null}
+'@
+    Assert-ClassEqual 4 $r.Count
+    Assert-ClassEqual 'Administrateurs' $r[0].Display
+    Assert-ClassEqual 0 $r[0].Labels.Count
+    Assert-ClassEqual 'Defect - Invalid UserRightsAssignment' $r[1].Labels[0]
+    Assert-ClassEqual 'Defect - Invalid UserRightsAssignment' $r[2].Labels[0]
+    Assert-ClassEqual 0 $r[3].Labels.Count
+}
+
+Invoke-ClassTest 'legacy user-right missing identity and malformed allowlists require validation' {
+    $r=Invoke-ClassScope @'
+$cases=@(
+    @{Rights=@{};Sid='S-1-5-32-544';Prefix='Validate -'}
+    @{Rights=@{SeDebugPrivilege=@('S-1-5-32-544')};Sid='';Prefix='Validate -'}
+    @{Rights=@{SeDebugPrivilege=@('S-1-5-32-544')};Sid='S-1-bad';Prefix='Validate -'}
+    @{Rights=@{SeDebugPrivilege=$null};Sid='S-1-5-32-544';Prefix='Validate -'}
+    @{Rights=@{SeDebugPrivilege=@{Sid='S-1-5-32-544'}};Sid='S-1-5-32-544';Prefix='Validate -'}
+    @{Rights=@{SeDebugPrivilege=@(@('S-1-5-32-544','S-1-5-32-545'), 'S-1-5-32-546')};Sid='S-1-5-32-544';Prefix='Validate -'}
+    @{Rights=@{SeDebugPrivilege=@('S-1-*')};Sid='S-1-5-32-544';Prefix='Validate -'}
+    @{Rights=@{SeDebugPrivilege='S-1-5-32-544'};Sid='S-1-5-32-544';Prefix=''}
+    @{Rights=@{SeDebugPrivilege=@()};Sid='S-1-5-32-544';Prefix='Defect -'}
+)
+try{
+    foreach($case in $cases){
+        $script:ADAnalyzerLegacyProfile=Get-ADAnalyzerDefaultProfile;$script:ADAnalyzerLegacyProfile.Policy.AllowedUserRightSids=$case.Rights
+        $row=[pscustomobject]@{'ext.property.name'='UserRightsAssignment';'gpo.linked.ou'='Domain Controllers';'property.setting.name'='Debug programs (SeDebugPrivilege)';'property.setting.value'='Administrators';'property.setting.right'='SeDebugPrivilege';'property.setting.sid'=$case.Sid;'property.setting.empty'=$false}
+        $findings=[GroupPolicyObject]::Analyze($row)
+        [pscustomobject]@{Expected=$case.Prefix;Count=$findings.Count;Label=($findings | Select-Object -First 1).finding}
+    }
+    $row.'property.setting.right'=$null
+    [pscustomobject]@{Expected='Validate -';Count=([GroupPolicyObject]::Analyze($row)).Count;Label=([GroupPolicyObject]::Analyze($row))[0].finding}
+}finally{$script:ADAnalyzerLegacyProfile=$null}
+'@
+    foreach($case in $r){
+        if($case.Expected){Assert-ClassEqual 1 $case.Count;Assert-ClassTrue ($case.Label.StartsWith($case.Expected)) $case.Label}
+        else{Assert-ClassEqual 0 $case.Count}
+    }
+}
+
+Invoke-ClassTest 'legacy user-right empty assignment differs from a malformed Member and preserves scope' {
+    $r=Invoke-ClassScope @'
+$script:ADAnalyzerLegacyProfile=Get-ADAnalyzerDefaultProfile
+$script:ADAnalyzerLegacyProfile.Policy.AllowedUserRightSids=@{SeDebugPrivilege=@()}
+try{
+    $owner=[GroupPolicyObject]::SetDefault();$owner.Record=[GroupPolicyObject]::SetDefault();$owner.Record['gpo.linked.ou']='Domain Controllers'
+    $xml=[xml]'<ExtensionData><Name>Security</Name><Extension><UserRightsAssignment><Name>SeDebugPrivilege</Name></UserRightsAssignment><UserRightsAssignment><Name>SeDebugPrivilege</Name><Member /></UserRightsAssignment></Extension></ExtensionData>'
+    $rows=$owner.GetSecurityExtension($xml.DocumentElement)
+    $result=[pscustomobject]@{Count=$rows.Count;Empty=$rows[0].'property.setting.empty';Malformed=$rows[1].'property.setting.empty';EmptyFindings=[GroupPolicyObject]::Analyze($rows[0]).Count;MalformedLabel=([GroupPolicyObject]::Analyze($rows[1]))[0].finding;OutsideFindings=0}
+    $rows[1].'gpo.linked.ou'='Workstations';$result.OutsideFindings=[GroupPolicyObject]::Analyze($rows[1]).Count
+    $result
+}finally{$script:ADAnalyzerLegacyProfile=$null}
+'@
+    Assert-ClassEqual 2 $r.Count;Assert-ClassEqual $true $r.Empty;Assert-ClassEqual $false $r.Malformed
+    Assert-ClassEqual 0 $r.EmptyFindings
+    Assert-ClassTrue ($r.MalformedLabel -like 'Validate -*') $r.MalformedLabel
+    Assert-ClassEqual 0 $r.OutsideFindings
 }
 
 Invoke-ClassTest 'empty GPO user-right assignments remain explicit records' {
