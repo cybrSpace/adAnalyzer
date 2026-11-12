@@ -428,6 +428,12 @@ function Test-ADAnalyzerGpoPolicy {
             New-ADAnalyzerCheck -RuleId ('GPO.Expected.'+$id) -Status $status -Severity $severity -Category PolicyBaseline -Target $checkTarget -Observed $row.Value -Expected $expected -Evidence @{Path=$row.Source;Scope=$row.Scope;Operator=$operator;RegistryType=$row.Type;ExpectedRegistryType=$expectedType} -Message 'Stored setting scope, registry type when specified, and value were assessed against the configured baseline rule.' -Applicability (Get-ADAnalyzerPolicyApplicability $Gpo $row.Scope $Profile)
         }
     }
+    $unsupportedInf=@($Policy.IniSettings | Where-Object {
+        $_.Analyzed -is [bool] -and -not $_.Analyzed -and $_.Section -in 'System Access','Kerberos Policy' -and
+        (($_.Scope -eq 'Computer' -and ([string]$_.Source).Replace('\','/') -ieq 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf') -or
+         ($_.Scope -eq 'User' -and ([string]$_.Source).Replace('\','/') -ieq 'User/Microsoft/Windows NT/SecEdit/GptTmpl.inf'))
+    })
+    if($unsupportedInf.Count){New-ADAnalyzerCheck -RuleId 'GPO.Coverage.UnsupportedInfSettings' -Status Unknown -Severity Information -Category PolicyCoverage -Target ($target+'/UnsupportedInfSettings') -Observed @($unsupportedInf | Select-Object Scope,Source,Section,Name) -Expected 'Known setting in its authoritative section' -Evidence $null -Message 'Unknown or misplaced account-template entries remain inventoried; their policy behavior was not assessed.' -Applicability Unknown}
     if(@($Policy.UnparsedFiles).Count){New-ADAnalyzerCheck -RuleId 'GPO.Coverage.UnsupportedFiles' -Status Unknown -Severity Information -Category PolicyCoverage -Target ($target+'/UnsupportedFiles') -Observed @($Policy.UnparsedFiles | Select-Object Scope,Path,Kind) -Expected 'Supported parsed content' -Evidence $null -Message 'Unsupported files remain inventoried; their policy behavior was not assessed.' -Applicability Unknown}
 }
 

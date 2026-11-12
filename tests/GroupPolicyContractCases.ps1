@@ -1,3 +1,19 @@
+Invoke-ClassTest 'misplaced INF entries survive canonical and legacy raw INI projection' {
+    $r=Invoke-ClassScope @'
+$root=Join-Path ([IO.Path]::GetTempPath()) ('ad-legacy-section-'+[guid]::NewGuid().ToString('N'))
+try{
+    $directory=Join-Path $root 'Machine/Microsoft/Windows NT/SecEdit';$null=[IO.Directory]::CreateDirectory($directory)
+    $path=Join-Path $directory 'GptTmpl.inf';[IO.File]::WriteAllText($path,"[Kerberos Policy]`nPasswordComplexity=1",[Text.Encoding]::Unicode)
+    $policy=Read-ADAnalyzerGpo $root
+    [xml]$xml=ConvertTo-AnalyzerGpoXml -Gpo ([pscustomobject]@{Id=[guid]::Empty;Flags=0}) -Parsed $policy
+    $owner=[GroupPolicyObject]::SetDefault();$owner.Record=[GroupPolicyObject]::SetDefault()
+    $extension=@($xml.GPO.Computer.ExtensionData | Where-Object Name -eq Ini)[0];$rows=$owner.GetRawExtension($extension)
+    [pscustomobject]@{Count=$rows.Count;Extension=$rows[0].'cfg.extension';Name=$rows[0].'property.setting.name';Value=$rows[0].'property.setting.value'}
+}finally{if([IO.Directory]::Exists($root)){[IO.Directory]::Delete($root,$true)}}
+'@
+    Assert-ClassEqual 1 $r.Count;Assert-ClassEqual Ini $r.Extension;Assert-ClassEqual '1' $r.Value
+    Assert-ClassTrue ($r.Name.Replace('\','/') -eq 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf: [Kerberos Policy] PasswordComplexity') 'Legacy raw setting lost its source/section identity'
+}
 Invoke-ClassTest 'singleton GPO account settings retain zero and extension metadata' {
     $r=Invoke-ClassScope @'
 $null=[PasswordPolicy]::Initialize()

@@ -145,6 +145,33 @@ try {
         $ignored=(Read-ADAnalyzerGpo $ignoredRoot).SecuritySettings[0]
         Assert-Equal 'opaque' $ignored.Value;Assert-Equal $null $ignored.PSObject.Properties['ValueValid']
     }
+    Test-Gpo 'account and Kerberos keys require their authoritative INF section' {
+        $root=Join-Path $temp 'section-pairs';$path=Join-Path $root 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf'
+        $system=@('MinimumPasswordAge','MaximumPasswordAge','MinimumPasswordLength','PasswordComplexity','PasswordHistorySize','ClearTextPassword','RequireLogonToChangePassword','LockoutBadCount','ResetLockoutCount','LockoutDuration','ForceLogoffWhenHourExpire','LSAAnonymousNameLookup','EnableAdminAccount','EnableGuestAccount','NewAdministratorName','NewGuestName')
+        $kerberos=@('MaxTicketAge','MaxRenewAge','MaxServiceAge','MaxClockSkew','TicketValidateClient')
+        $text="[system access]`n"+(($system | ForEach-Object { $_.ToLowerInvariant()+'=1' }) -join "`n")+"`n[KERBEROS POLICY]`n"+(($kerberos | ForEach-Object { $_.ToUpperInvariant()+'=1' }) -join "`n")
+        Write-Text $path $text ([Text.Encoding]::Unicode);$data=Read-ADAnalyzerGpo $root
+        Assert-Equal 21 @($data.SecuritySettings).Count;Assert-Equal 21 @($data.IniSettings | Where-Object Analyzed).Count
+        $swapped="[System Access]`n"+(($kerberos | ForEach-Object {$_+'=1'}) -join "`n")+"`n[Kerberos Policy]`n"+(($system | ForEach-Object {$_+'=1'}) -join "`n")
+        Write-Text $path $swapped ([Text.Encoding]::Unicode);$data=Read-ADAnalyzerGpo $root
+        Assert-Equal 0 @($data.SecuritySettings).Count;Assert-Equal 21 @($data.IniSettings | Where-Object {-not $_.Analyzed}).Count
+        Assert-Equal $swapped (Get-Content -LiteralPath $path -Raw)
+        [xml]$xml=ConvertTo-AnalyzerGpoXml -Gpo ([pscustomobject]@{Id=[guid]::Empty;Flags=0}) -Parsed $data
+        Assert-Equal 21 @($xml.GPO.Computer.ExtensionData | Where-Object Name -eq Ini | ForEach-Object {$_.Extension.Record}).Count
+    }
+    Test-Gpo 'unknown INF values stay raw without parsing oversized numbers or incomplete quoting' {
+        $root=Join-Path $temp 'unknown-section-values';$path=Join-Path $root 'User/Microsoft/Windows NT/SecEdit/GptTmpl.inf'
+        $huge='999999999999999999999999999999999999999';$quoted='"unfinished'
+        $text="[System Access]`nMinimumPasswordLength=16`nUnknownNumber=$huge`nUnknownQuoted=$quoted`nTicketValidateClient=1`nPassword=unit12-secret`n[Kerberos Policy]`nMaxTicketAge=10`nPasswordComplexity=1"
+        Write-Text $path $text ([Text.Encoding]::Unicode);$data=Read-ADAnalyzerGpo $root
+        Assert-Equal 2 @($data.SecuritySettings).Count
+        Assert-Equal $huge ($data.IniSettings | Where-Object Name -eq UnknownNumber).Value
+        Assert-Equal $quoted ($data.IniSettings | Where-Object Name -eq UnknownQuoted).Value
+        Assert-Equal $false ($data.IniSettings | Where-Object Name -eq PasswordComplexity).Analyzed
+        Assert-Equal $true ($data.IniSettings | Where-Object Name -eq Password).SecretPresent
+        Assert-True (($data | ConvertTo-Json -Depth 30) -notmatch 'unit12-secret|REDACTED') 'Unknown setting retained secret payload'
+        Assert-Equal $text (Get-Content -LiteralPath $path -Raw)
+    }
     Test-Gpo 'named registry preference secrets are absent from reader and canonical XML values' {
         $namedRoot=Join-Path $temp 'named-xml-secret';$path=Join-Path $namedRoot 'Machine/Preferences/Registry/Registry.xml'
         $xml='<RegistrySettings><Registry uid="item" name="DefaultPassword"><Properties name="DefaultPassword" key="Software\Fixture" value="unit2-reader-secret"/></Registry></RegistrySettings>'

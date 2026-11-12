@@ -88,6 +88,33 @@ Test-Policy 'real INF invalid flags cannot pass and valid neighboring settings r
         }
     }finally{if([IO.Directory]::Exists($root)){[IO.Directory]::Delete($root,$true)}}
 }
+Test-Policy 'misplaced INF account and Kerberos settings cannot satisfy baselines' {
+    $root=Join-Path ([IO.Path]::GetTempPath()) ('ad-section-policy-'+[guid]::NewGuid().ToString('N'))
+    try{
+        $directory=Join-Path $root 'Machine/Microsoft/Windows NT/SecEdit';$null=[IO.Directory]::CreateDirectory($directory)
+        [IO.File]::WriteAllText((Join-Path $directory 'GptTmpl.inf'),"[System Access]`nMinimumPasswordLength=16`nTicketValidateClient=1`n[Kerberos Policy]`nPasswordComplexity=1`nMaxTicketAge=10",[Text.Encoding]::Unicode)
+        $policy=Read-ADAnalyzerGpo $root;$checks=Get-PolicyChecks $policy
+        Assert-Policy (($checks | Where-Object RuleId -eq GPO.Account.PasswordComplexity).Status -eq 'NotConfigured') 'Misplaced password flag became compliance evidence'
+        Assert-Policy (@($policy.SecuritySettings | Where-Object Name -eq TicketValidateClient).Count -eq 0) 'Misplaced Kerberos setting promoted'
+        Assert-Policy (($checks | Where-Object RuleId -eq GPO.Account.MinimumPasswordLength).Status -eq 'Pass') 'Valid neighbor lost'
+        $coverage=@($checks | Where-Object RuleId -eq GPO.Coverage.UnsupportedInfSettings)
+        Assert-Policy ($coverage.Count -eq 1 -and $coverage[0].Status -eq 'Unknown' -and @($coverage[0].Observed).Count -eq 2) 'Unsupported section settings missing from coverage'
+        Assert-Policy (@($coverage[0].Observed | Where-Object {$null -ne $_.PSObject.Properties['Value']}).Count -eq 0) 'Coverage unexpectedly includes payload values'
+    }finally{if([IO.Directory]::Exists($root)){[IO.Directory]::Delete($root,$true)}}
+}
+Test-Policy 'unsupported INF coverage requires explicit false metadata and authoritative account provenance' {
+    $policy=New-PolicyFixture
+    $policy.IniSettings=@(
+        [pscustomobject]@{Scope='Computer';Source='Machine/Scripts/GptTmpl.inf';Section='System Access';Name='Unknown';Analyzed=$false}
+        [pscustomobject]@{Scope='Computer';Source='Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf';Section='Version';Name='Revision';Analyzed=$false}
+        [pscustomobject]@{Scope='Computer';Source='Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf';Section='System Access';Name='OldDto'}
+        [pscustomobject]@{Scope='Computer';Source='Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf';Section='System Access';Name='StringMarker';Analyzed='false'}
+    )
+    Assert-Policy (@((Get-PolicyChecks $policy) | Where-Object RuleId -eq GPO.Coverage.UnsupportedInfSettings).Count -eq 0) 'Compatibility rows produced unsupported coverage'
+    $policy.IniSettings+=@([pscustomobject]@{Scope='User';Source='User\Microsoft\Windows NT\SecEdit\GptTmpl.inf';Section='kerberos policy';Name='Unknown';Analyzed=$false})
+    $checks=@((Get-PolicyChecks $policy) | Where-Object RuleId -eq GPO.Coverage.UnsupportedInfSettings)
+    Assert-Policy ($checks.Count -eq 1 -and @($checks[0].Observed).Count -eq 1) 'User template provenance or case handling lost'
+}
 Test-Policy 'explicit invalid metadata overrides default and custom value comparisons' {
     $policy=New-PolicyFixture;$policy.SecuritySettings=@([pscustomobject]@{Kind='Account';Name='PasswordComplexity';Value='true';ValueValid=$false;Scope='Computer';Source='Machine/GptTmpl.inf'})
     $profile=Get-ADAnalyzerDefaultProfile;$profile.ExpectedGpoSettings=@(@{Id='single-invalid';Kind='Account';Name='PasswordComplexity';Expected='true'},@{Id='aggregate-invalid';Kind='Account';Name='PasswordComplexity';Expected=@('true');Aggregate=$true})

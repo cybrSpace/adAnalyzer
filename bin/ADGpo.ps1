@@ -137,6 +137,11 @@ function Read-ADAnalyzerGpo {
     $root=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if(-not $root.PSIsContainer){throw 'GPO path must be a directory'}
     $security=[Collections.ArrayList]::new();$registry=[Collections.ArrayList]::new();$xmlFiles=[Collections.ArrayList]::new();$files=[Collections.ArrayList]::new();$iniSettings=[Collections.ArrayList]::new();$sysvolVersion=$null
+    # MS-GPSB assigns these keys to distinct client-side stores by section.
+    $accountKeys=@{
+        'System Access'=@('MinimumPasswordAge','MaximumPasswordAge','MinimumPasswordLength','PasswordComplexity','PasswordHistorySize','ClearTextPassword','RequireLogonToChangePassword','LockoutBadCount','ResetLockoutCount','LockoutDuration','ForceLogoffWhenHourExpire','LSAAnonymousNameLookup','EnableAdminAccount','EnableGuestAccount','NewAdministratorName','NewGuestName')
+        'Kerberos Policy'=@('MaxTicketAge','MaxRenewAge','MaxServiceAge','MaxClockSkew','TicketValidateClient')
+    }
     foreach($file in Get-ChildItem -LiteralPath $root.FullName -File -Force -ErrorAction Stop) {
         $kind='Unparsed'
         if($file.Name -ieq 'GPT.INI') {
@@ -163,7 +168,8 @@ function Read-ADAnalyzerGpo {
                             $parts=Split-AnalyzerPolicyCsv $entry.Value
                             $iniValue=if($parts.Count -ge 2){$parts[1..($parts.Count-1)] -join ','}else{''}
                         }
-                        $null=$iniSettings.Add((ConvertTo-ADAnalyzerSecretRecord ([pscustomobject]@{Scope=$scope;Section=$section;Name=$entry.Key;Value=$iniValue;Source=$relative;Analyzed=($securityTemplate -and $section -in 'System Access','Kerberos Policy','Privilege Rights','Registry Values')})))
+                        $analyzed=$securityTemplate -and (($section -in 'Privilege Rights','Registry Values') -or ($accountKeys.ContainsKey($section) -and $entry.Key -in $accountKeys[$section]))
+                        $null=$iniSettings.Add((ConvertTo-ADAnalyzerSecretRecord ([pscustomobject]@{Scope=$scope;Section=$section;Name=$entry.Key;Value=$iniValue;Source=$relative;Analyzed=$analyzed})))
                     }
                 }
                 if(-not $securityTemplate) {$null=$files.Add([pscustomobject]@{Scope=$scope;Path=$relative;Kind=$kind;Length=$file.Length});continue}
@@ -171,6 +177,7 @@ function Read-ADAnalyzerGpo {
                 foreach($section in @('System Access','Kerberos Policy')) {
                     if(-not $ini.Contains($section)){continue}
                     foreach($entry in $ini[$section].GetEnumerator()) {
+                        if($entry.Key -notin $accountKeys[$section]){continue}
                         $flag=ConvertFrom-ADAnalyzerInfFlag -Name $entry.Key -RawValue $entry.Value
                         $value=$entry.Value
                         if($null -ne $flag){$value=$flag.Value}

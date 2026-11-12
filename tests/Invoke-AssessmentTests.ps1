@@ -133,6 +133,20 @@ try {
         $again=Import-ADAnalyzerBaseline -GpoPath $path -Name Fixture -Version '2026.11'
         Assert-Equal ($profile.ExpectedGpoSettings.Id -join '|') ($again.ExpectedGpoSettings.Id -join '|')
     }
+    Test-Assessment 'misplaced account-template entries are excluded from baselines and leave explicit coverage' {
+        $root=Join-Path $temp 'section-baseline';$directory=Join-Path $root 'Machine/Microsoft/Windows NT/SecEdit';$null=[IO.Directory]::CreateDirectory($directory)
+        [IO.File]::WriteAllText((Join-Path $root 'GPT.INI'),"[General]`nVersion=1")
+        [IO.File]::WriteAllText((Join-Path $directory 'GptTmpl.inf'),"[System Access]`nMinimumPasswordLength=16`nTicketValidateClient=1`n[Kerberos Policy]`nPasswordComplexity=1`nMaxTicketAge=10",[Text.Encoding]::Unicode)
+        $profile=Import-ADAnalyzerBaseline -GpoPath $root -Version section
+        Assert-Equal 2 @($profile.ExpectedGpoSettings).Count
+        Assert-Equal 0 @($profile.ExpectedGpoSettings | Where-Object {$_.Name -in 'TicketValidateClient','PasswordComplexity'}).Count
+        $gpo=[pscustomobject]@{Id=[guid]::Empty;Flags=0;Version=1;Links=@()};$policy=Read-ADAnalyzerGpo $root
+        $result=Invoke-ADAnalyzerAssessment -DirectoryData (New-AssessmentFixture) -GpoData @([pscustomobject]@{Gpo=$gpo;Policy=$policy;Error=$null}) -Profile $profile
+        Assert-Equal 'Unknown' ($result.Checks | Where-Object RuleId -eq GPO.Coverage.UnsupportedInfSettings).Status
+        Assert-Equal 'Partial' $result.State
+        Assert-Equal 'NotConfigured' ($result.Checks | Where-Object RuleId -eq GPO.Account.PasswordComplexity).Status
+        Assert-Equal 0 @($result.Checks | Where-Object {$_.RuleId -like 'GPO.Expected.*' -and $_.Status -ne 'Pass'}).Count
+    }
     Test-Assessment 'conflicting baseline inputs are rejected without silently overwriting' {
         $a=Join-Path $temp 'baseline/DomainSysvol/GPO';$b=Join-Path $temp 'conflict';$null=New-Item -Path (Join-Path $b 'Machine/Microsoft/Windows NT/SecEdit') -ItemType Directory -Force
         Set-Content -LiteralPath (Join-Path $b 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf') -Value "[System Access]`nMinimumPasswordLength=8"
