@@ -3220,7 +3220,7 @@ function Get-ADEnvironment () {
             return $adEnvironment
 
         }
-        else { Get-Help -Name 'Get-ADEnvironment' -Detailed; exit }
+        else { Get-Help -Name 'Get-ADEnvironment' -Detailed; return }
 
     }
     catch { 

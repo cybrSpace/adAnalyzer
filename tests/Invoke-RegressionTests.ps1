@@ -20,6 +20,32 @@ try {
             if($errors.Count){throw ($file.Name+': '+($errors.Message -join '; '))}
         }
     }
+    $helpFixture=Join-Path $temporary 'legacy-help.ps1'
+    Set-Content -LiteralPath $helpFixture -Value @'
+param([string]$Root,[string]$Mode)
+$ErrorActionPreference='Stop'
+Add-Type -TypeDefinition 'namespace Microsoft.ActiveDirectory.Management {public class ADPropertyValueCollection {} public class ADPartition {} public class ADEntity {}} namespace Microsoft.ActiveDirectory.Management.Provider {public class ADDriveInfo {}}'
+$module=Import-Module (Join-Path $Root 'bin/ADEnvironment.psm1') -Force -PassThru
+& $module {
+    $script:HelpCalls=0;$script:DirectoryCalls=0
+    function script:Get-Help {param($Name,[switch]$Detailed) $script:HelpCalls++;'fixture local help'}
+    function script:Get-ADRootDSE {$script:DirectoryCalls++;throw 'Unexpected directory read during help'}
+    function script:Get-ADDomain {$script:DirectoryCalls++;throw 'Unexpected domain read during help'}
+}
+'BEFORE legacy help'
+if($Mode -eq 'Help'){$null=Get-ADEnvironment -Help}else{$null=Get-ADEnvironment}
+$counts=& $module {[pscustomobject]@{Help=$script:HelpCalls;Directory=$script:DirectoryCalls}}
+if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain local and read-only'}
+'PASS caller continued after legacy help'
+'@
+    foreach($mode in @('Help','NoClass')){
+        Invoke-Test ('legacy '+$mode+' returns to its caller without directory access') {
+            $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $helpFixture -Root $RepositoryRoot -Mode $mode)
+            Assert-Equal 0 $LASTEXITCODE
+            Assert-True (($output -join ' ') -match 'BEFORE legacy help') 'Child did not import the actual module and reach help'
+            Assert-True (($output -join ' ') -match 'PASS caller continued after legacy help') 'Legacy help terminated the caller'
+        }
+    }
     . (Join-Path $RepositoryRoot 'bin/ADProfile.ps1')
     $before=(Get-Location).Path
     $Credential='caller credential sentinel';$Operation='caller operation sentinel'
