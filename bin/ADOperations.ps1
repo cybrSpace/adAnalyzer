@@ -484,6 +484,20 @@ function Assert-ADAnalyzerOperationInactivity {
     # it is not an authoritative all-DC lastLogon sweep.
 }
 
+function Enter-ADAnalyzerJournalLease {
+    param([Parameter(Mandatory)][string]$Path)
+    $full=[IO.Path]::GetFullPath($Path)
+    if(Test-Path -LiteralPath $full -PathType Container){throw 'JournalPath must name a file'}
+    $directory=[IO.Path]::GetDirectoryName($full)
+    if(-not [IO.Directory]::Exists($directory)){$null=[IO.Directory]::CreateDirectory($directory)}
+    try {
+        # Keep the marker: unlinking after close can race the next owner.
+        return [IO.File]::Open(($full+'.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+    }catch{
+        throw [IO.IOException]::new(('Unable to acquire journal lock for '+$full+'. Another run may be active or the filesystem may be unavailable.'),$_.Exception)
+    }
+}
+
 function Get-ADAnalyzerOperationJournal {
     param($Plan,[string]$Server,[string]$Path)
     if(Test-Path -LiteralPath $Path) {
@@ -532,14 +546,15 @@ function Invoke-ADAnalyzerRemediationPlan {
     $connection=Get-ADAnalyzerOperationConnection $Server $Credential
     $reviewedServer=[string](Get-ADAnalyzerOperationValue (Get-ADAnalyzerOperationValue $planObject @('Context')) @('Server'))
     if($reviewedServer -and $reviewedServer -ine $Server){throw 'Server differs from the DC recorded in the reviewed assessment'}
-    $journal=$null
+    $journal=$null;$lease=$null
+    try {
     foreach($action in @($planObject.Actions)) {
         if($null -eq $action){continue}
         if(-not $PSCmdlet.ShouldProcess($action.DistinguishedName,'Disable account from explicit reviewed plan')) {
             [pscustomobject]@{ActionId=$action.ActionId;ObjectGuid=$action.ObjectGuid;Status='Skipped';JournalPath=$null}
             continue
         }
-        if($null -eq $journal){$journal=Get-ADAnalyzerOperationJournal $planObject $Server $JournalPath}
+        if($null -eq $journal){$lease=Enter-ADAnalyzerJournalLease $JournalPath;$journal=Get-ADAnalyzerOperationJournal $planObject $Server $JournalPath}
         if(@($journal.Entries | Where-Object {$_.ActionId -eq $action.ActionId -and $_.Status -in @('Succeeded','Undone')}).Count){throw 'This plan action has already been applied; create a fresh assessment and plan'}
         $entry=[pscustomobject][ordered]@{
             EntryId=[guid]::NewGuid().ToString('D');ActionId=$action.ActionId;Action='DisableAccount'
@@ -563,7 +578,6 @@ function Invoke-ADAnalyzerRemediationPlan {
             if($entry.After.ObjectGuid -ne $entry.Before.ObjectGuid -or $entry.After.SID -ne $entry.Before.SID -or $entry.After.DistinguishedName -ine $entry.Before.DistinguishedName -or $entry.After.Enabled -isnot [bool] -or $entry.After.Enabled -or -not $entry.After.WhenChanged){throw 'Unable to verify the account disable result'}
             $entry.Status='Succeeded'
             Save-ADAnalyzerOperationJournal $journal $JournalPath
-            ConvertTo-ADAnalyzerSafeData $entry
         }
         catch {
             $failure=$_
@@ -574,7 +588,9 @@ function Invoke-ADAnalyzerRemediationPlan {
             catch {throw ('Journal persistence failed; no further changes were attempted. Inspect the durable journal before retrying. '+$failure.Exception.Message+'; '+$_.Exception.Message)}
             throw $failure
         }
+        ConvertTo-ADAnalyzerSafeData $entry
     }
+    }finally{if($null -ne $lease){$lease.Dispose()}}
 }
 
 function Undo-ADAnalyzerRemediation {
@@ -583,12 +599,23 @@ function Undo-ADAnalyzerRemediation {
     $journal=Read-ADAnalyzerOperationDocument $JournalPath 'Journal'
     if($journal.JournalType -ne 'ADAnalyzerRemediationJournal' -or $journal.Server -ine $Server){throw 'Journal type/server does not match this undo request'}
     $connection=Get-ADAnalyzerOperationConnection $Server $Credential
-    $plan=[pscustomobject]@{Remediation=$journal.Remediation;PrivilegedSids=$journal.PrivilegedSids;AccountClassification=$journal.AccountClassification}
-    foreach($entry in @($journal.Entries | Where-Object {$_.Action -eq 'DisableAccount' -and $_.Status -eq 'Succeeded'})) {
-        if(-not $PSCmdlet.ShouldProcess($entry.DistinguishedName,'Undo a journaled account disable')) {
-            [pscustomobject]@{EntryId=$entry.EntryId;ObjectGuid=$entry.ObjectGuid;Status='Skipped'}
+    $lease=$null
+    try {
+    foreach($candidate in @($journal.Entries | Where-Object {$_.Action -eq 'DisableAccount' -and $_.Status -eq 'Succeeded'})) {
+        if(-not $PSCmdlet.ShouldProcess($candidate.DistinguishedName,'Undo a journaled account disable')) {
+            [pscustomobject]@{EntryId=$candidate.EntryId;ObjectGuid=$candidate.ObjectGuid;Status='Skipped'}
             continue
         }
+        if($null -eq $lease){
+            $lease=Enter-ADAnalyzerJournalLease $JournalPath
+            $journal=Read-ADAnalyzerOperationDocument $JournalPath 'Journal'
+            if($journal.JournalType -ne 'ADAnalyzerRemediationJournal' -or $journal.Server -ine $Server){throw 'Journal type/server does not match this undo request'}
+            $plan=[pscustomobject]@{Remediation=$journal.Remediation;PrivilegedSids=$journal.PrivilegedSids;AccountClassification=$journal.AccountClassification}
+        }
+        $matching=@($journal.Entries | Where-Object {$_.EntryId -eq $candidate.EntryId})
+        if(-not $candidate.EntryId -or $matching.Count -ne 1){throw 'Journal entry identity is missing or ambiguous'}
+        $entry=$matching[0]
+        if($entry.Action -ne 'DisableAccount' -or $entry.Status -ne 'Succeeded'){continue}
         try {
             if($entry.Before.Enabled -ne $true -or $entry.After.Enabled -ne $false){throw 'Journal does not contain a reversible enabled-to-disabled transition'}
             $approved=@(foreach($value in @($journal.Remediation.ApprovedObjectGuids)){ConvertTo-ADAnalyzerOperationGuid $value})
@@ -604,7 +631,6 @@ function Undo-ADAnalyzerRemediation {
             if($entry.Undo.After.ObjectGuid -ne $entry.Before.ObjectGuid -or $entry.Undo.After.SID -ne $entry.Before.SID -or $entry.Undo.After.DistinguishedName -ine $entry.Before.DistinguishedName -or $entry.Undo.After.Enabled -isnot [bool] -or -not $entry.Undo.After.Enabled){throw 'Unable to verify the account enable result'}
             $entry.Undo.Status='Succeeded';$entry.Status='Undone'
             Save-ADAnalyzerOperationJournal $journal $JournalPath
-            ConvertTo-ADAnalyzerSafeData $entry
         }
         catch {
             $failure=$_
@@ -614,5 +640,7 @@ function Undo-ADAnalyzerRemediation {
             catch {throw ('Undo journal persistence failed; no further changes were attempted. '+$failure.Exception.Message+'; '+$_.Exception.Message)}
             throw $failure
         }
+        ConvertTo-ADAnalyzerSafeData $entry
     }
+    }finally{if($null -ne $lease){$lease.Dispose()}}
 }

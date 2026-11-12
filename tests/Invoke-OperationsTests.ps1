@@ -72,6 +72,46 @@ function Enable-ADAccount {
 }
 function New-FixturePlan {New-ADAnalyzerRemediationPlan -Assessment $script:Assessment -Profile $script:Profile}
 function Apply-FixturePlan {param($Plan=(New-FixturePlan));Invoke-ADAnalyzerRemediationPlan -Plan $Plan -Server dc.example.invalid -JournalPath $script:Journal -Confirm:$false}
+function Test-ConcurrentJournal([string]$Operation){
+    $plan=New-FixturePlan
+    if($Operation -eq 'Undo'){$null=Apply-FixturePlan $plan}
+    $directory=Join-Path $script:Temporary ([guid]::NewGuid().ToString('N'));$null=New-Item -Path $directory -ItemType Directory
+    $script:Current | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $directory 'state.json') -Encoding UTF8
+    $plan | ConvertTo-Json -Depth 50 | Set-Content -LiteralPath (Join-Path $directory 'plan.json') -Encoding UTF8
+    $engine=(Get-Process -Id $PID).Path;$fixture=Join-Path $RepositoryRoot 'tests/JournalConcurrencyFixture.ps1';$processes=@()
+    function Wait-ConcurrentStage($Process,[string]$File){
+        $watch=[Diagnostics.Stopwatch]::StartNew()
+        while(-not $Process.HasExited -and -not (Test-Path -LiteralPath $File)){
+            if($watch.Elapsed.TotalSeconds -gt 20){throw 'Concurrent fixture timed out'}
+            Start-Sleep -Milliseconds 25
+        }
+    }
+    try{
+        foreach($role in @('First','Second')){
+            $arguments='-NoLogo -NoProfile -NonInteractive -File "{0}" -RepositoryRoot "{1}" -Coordination "{2}" -JournalPath "{3}" -Role {4} -Operation {5}' -f $fixture,$RepositoryRoot,$directory,$script:Journal,$role,$Operation
+            $process=Start-Process -FilePath $engine -ArgumentList $arguments -PassThru -RedirectStandardOutput (Join-Path $directory ($role+'.out')) -RedirectStandardError (Join-Path $directory ($role+'.err'))
+            $processes+=,$process
+            Wait-ConcurrentStage $process (Join-Path $directory ($role+'-ready'))
+            if($role -eq 'First' -and $process.HasExited){throw (Get-Content -LiteralPath (Join-Path $directory 'First.err') -Raw)}
+        }
+        Set-Content -LiteralPath (Join-Path $directory 'First-release') -Value release
+        Assert-True ($processes[0].WaitForExit(20000)) 'First writer did not complete'
+        $processes[0].WaitForExit()
+        Set-Content -LiteralPath (Join-Path $directory 'Second-release') -Value release
+        Assert-True ($processes[1].WaitForExit(20000)) 'Second writer did not complete'
+        $processes[1].WaitForExit()
+        Assert-Equal 0 $processes[0].ExitCode
+        Assert-True ($processes[1].ExitCode -ne 0) 'Competing writer unexpectedly completed'
+        $journal=Get-Content -LiteralPath $script:Journal -Raw | ConvertFrom-Json
+        $expected=if($Operation -eq 'Undo'){'Undone'}else{'Succeeded'}
+        Assert-Equal 1 @($journal.Entries | Where-Object Status -eq $expected).Count
+        Assert-Equal 1 @(Get-Content -LiteralPath (Join-Path $directory 'mutations.txt')).Count
+        Assert-True ((Get-Content -LiteralPath (Join-Path $directory 'Second.err') -Raw) -match 'journal.*lock') 'Competing writer did not fail at the journal lease'
+        Assert-Equal $false (Test-Path -LiteralPath (Join-Path $directory 'Second-reads.txt'))
+    }finally{
+        foreach($process in $processes){if(-not $process.HasExited){$process.Kill();$null=$process.WaitForExit(5000)};$process.Dispose()}
+    }
+}
 
 try {
     Invoke-Test 'safe projection is a deep copy and preserves policy thresholds' {
@@ -134,6 +174,26 @@ try {
     Invoke-Test 'empty snapshots compare deterministically' {
         $comparison=Compare-ADAnalyzerAssessment @{SchemaVersion=1;Findings=@()} @{SchemaVersion=1;Findings=@()}
         Assert-Equal 0 @($comparison.Changes).Count
+    }
+    Invoke-Test 'concurrent apply preserves the successful journal and blocks the stale writer before AD reads' {Test-ConcurrentJournal Apply}
+    Invoke-Test 'concurrent undo preserves the successful undo and blocks the stale writer before AD reads' {Test-ConcurrentJournal Undo}
+    Invoke-Test 'journal ownership is released after a failed mutation and a successful retry' {
+        $plan=New-FixturePlan;$script:FailMutation=$true
+        Assert-Throws {Apply-FixturePlan $plan}
+        $lease=[IO.File]::Open(($script:Journal+'.lock'),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);$lease.Dispose()
+        $script:FailMutation=$false;$null=Apply-FixturePlan $plan
+        $lease=[IO.File]::Open(($script:Journal+'.lock'),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);$lease.Dispose()
+        Assert-Equal 1 $script:Disables
+    }
+    Invoke-Test 'early result selection preserves successful evidence and releases journal ownership' {
+        $plan=New-FixturePlan;$second=$plan.Actions[0] | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+        $second.ActionId=[guid]::NewGuid().ToString('D');$second.ObjectGuid='22222222-2222-2222-2222-222222222222';$second.Preconditions.ObjectGuid=$second.ObjectGuid
+        $plan.Actions=@($plan.Actions[0],$second);$plan.Remediation.ApprovedObjectGuids+=,$second.ObjectGuid
+        $result=Invoke-ADAnalyzerRemediationPlan -Plan $plan -Server dc.example.invalid -JournalPath $script:Journal -Confirm:$false | Select-Object -First 1
+        Assert-Equal Succeeded $result.Status;Assert-Equal 1 $script:Disables
+        $journal=Get-Content -LiteralPath $script:Journal -Raw | ConvertFrom-Json
+        Assert-Equal Succeeded $journal.Entries[0].Status
+        $lease=[IO.File]::Open(($script:Journal+'.lock'),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);$lease.Dispose()
     }
     Invoke-Test 'named XML secret payloads become idempotent boolean presence without losing normal settings' {
         $fixtures=@(
@@ -256,6 +316,7 @@ try {
         $null=Invoke-ADAnalyzerRemediationPlan -Plan (New-FixturePlan) -Server dc.example.invalid -JournalPath $script:Journal -WhatIf
         Assert-Equal 0 $script:Reads;Assert-Equal 0 $script:GroupReads;Assert-Equal 0 $script:Disables
         Assert-Equal $false (Test-Path -LiteralPath $script:Journal)
+        Assert-Equal $false (Test-Path -LiteralPath ($script:Journal+'.lock'))
     }
     Invoke-Test 'reviewed server context cannot be silently changed at execution' {
         $script:Assessment|Add-Member NoteProperty Context ([pscustomobject]@{Server='reviewed.example.invalid';Domain='example.invalid'})
@@ -338,7 +399,8 @@ try {
     Invoke-Test 'undo WhatIf performs no read mutation or journal update' {
         $null=Apply-FixturePlan;$script:Reads=0
         $before=Get-Content -LiteralPath $script:Journal -Raw
-        $null=Undo-ADAnalyzerRemediation -JournalPath $script:Journal -Server dc.example.invalid -WhatIf
+        $lease=[IO.File]::Open(($script:Journal+'.lock'),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        try{$null=Undo-ADAnalyzerRemediation -JournalPath $script:Journal -Server dc.example.invalid -WhatIf}finally{$lease.Dispose()}
         Assert-Equal 0 $script:Reads;Assert-Equal 0 $script:Enables
         Assert-Equal $before (Get-Content -LiteralPath $script:Journal -Raw)
     }
