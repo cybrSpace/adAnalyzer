@@ -84,16 +84,29 @@ using System.Threading.Tasks;
 namespace ADAnalyzer {
  public sealed class TestTlsServer : IDisposable {
   TcpListener listener; X509Certificate2 cert; RSA key; Task server;
-  public int Port;
+  public int Port; public Exception Error;
   public TestTlsServer() {
    key=RSA.Create(2048);
    CertificateRequest request=new CertificateRequest("CN=localhost",key,HashAlgorithmName.SHA256,RSASignaturePadding.Pkcs1);
-   cert=request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1),DateTimeOffset.UtcNow.AddDays(1));
+   // Schannel needs an importable key container for server authentication.
+   // Do not install the fixture certificate in a trusted certificate store.
+   X509Certificate2 generated=request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1),DateTimeOffset.UtcNow.AddDays(1));
+   if(Environment.OSVersion.Platform==PlatformID.Win32NT) {
+    using(generated) {
+     // Select the framework-compatible import API without a modern-runtime
+     // obsolete-constructor compile warning in this shared test source.
+     cert=(X509Certificate2)typeof(X509Certificate2).GetConstructor(new Type[] {typeof(byte[]),typeof(string),typeof(X509KeyStorageFlags)}).Invoke(new object[] {generated.Export(X509ContentType.Pfx),null,X509KeyStorageFlags.UserKeySet});
+    }
+   } else {cert=generated;}
    listener=new TcpListener(IPAddress.Loopback,0);listener.Start();Port=((IPEndPoint)listener.LocalEndpoint).Port;
    server=Task.Run(delegate {
-    using(TcpClient client=listener.AcceptTcpClient()) using(SslStream stream=new SslStream(client.GetStream(),false)) {
-     stream.AuthenticateAsServer(cert,false,SslProtocols.Tls12,false);
-    }
+    try {
+     using(TcpClient client=listener.AcceptTcpClient()) using(SslStream stream=new SslStream(client.GetStream(),false)) {
+      stream.AuthenticateAsServer(cert,false,SslProtocols.Tls12,false);
+      stream.ReadTimeout=5000;
+      try {stream.ReadByte();} catch(System.IO.IOException) {}
+     }
+    } catch(Exception error) {Error=error;throw;}
    });
   }
   public void Dispose() {listener.Stop();try{server.Wait(5000);}catch{}cert.Dispose();key.Dispose();}
@@ -106,6 +119,9 @@ namespace ADAnalyzer {
             Assert-Equal $false $record.NameValid;Assert-Equal $false $record.ChainValid
             Assert-Equal Tls12 $record.Protocol
             Assert-True (-not [string]::IsNullOrWhiteSpace($record.Thumbprint)) 'Missing inspected certificate'
+        } catch {
+            if($server.Error){throw ('TLS fixture server failed: '+$server.Error.ToString())}
+            throw
         } finally {$server.Dispose()}
     }
 }
