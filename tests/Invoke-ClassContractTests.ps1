@@ -270,6 +270,50 @@ $during=$script:FixtureDrives.Count; [ADEnvironment]::Close()
     Assert-ClassEqual 'Script' $result.Scope
 }
 
+foreach($mode in @('Restore','Remove','Both')){
+    Invoke-ClassTest ('owned AD drive cleanup preserves failures and retry state: '+$mode) {
+        $source=@'
+$setLocation=(Get-Command Set-Location).ScriptBlock;$removeDrive=(Get-Command Remove-PSDrive).ScriptBlock
+$callerNames=@($script:FixtureDrives | ForEach-Object Name);$owned=$null
+try{
+    $credential=[pscredential]::new('fixture',(ConvertTo-SecureString 'fixture-only' -AsPlainText -Force))
+    $target=[ADTarget]::new('target.example.invalid',$credential);$owned=[ADTarget]::ConnectionDrive
+    $script:BreakRestore='__MODE__' -in 'Restore','Both';$script:BreakRemoval='__MODE__' -in 'Remove','Both'
+    $script:CleanupAttempts=[Collections.ArrayList]::new()
+    function script:Set-Location {param($Path,$LiteralPath,$ErrorAction) if($LiteralPath -and $script:BreakRestore){throw 'fixture restoration failure'}}
+    function script:Remove-PSDrive {
+        param($Name,$ErrorAction,[switch]$WhatIf,[switch]$Confirm,[switch]$Force)
+        $null=$script:CleanupAttempts.Add([pscustomobject]@{Name=$Name;Force=[bool]$Force})
+        if($script:BreakRemoval){throw 'fixture removal failure'}
+        foreach($drive in @($script:FixtureDrives | Where-Object Name -eq $Name)){$script:FixtureDrives.Remove($drive)}
+    }
+    $caught=$null;try{[ADTarget]::Disconnect()}catch{$caught=$_}
+    $firstOwned=[ADTarget]::ConnectionDrive;$firstExists=$owned -in @($script:FixtureDrives | ForEach-Object Name)
+    $firstAttempts=$script:CleanupAttempts.Count;$firstForce=$firstAttempts -eq 1 -and $script:CleanupAttempts[0].Force
+    $secondary='';$exception=$caught.Exception
+    while($null -ne $exception){if($exception.Data.Contains('ADAnalyzerDriveRemovalError')){$secondary=[string]$exception.Data['ADAnalyzerDriveRemovalError']};$exception=$exception.InnerException}
+    $script:BreakRestore=$false;$script:BreakRemoval=$false
+    [ADTarget]::Disconnect()
+    [pscustomobject]@{Attempts=$firstAttempts;Force=$firstForce;FirstExists=$firstExists;Retained=($firstOwned -eq $owned);Primary=$caught.Exception.Message;Secondary=$secondary;RetryGone=($owned -notin @($script:FixtureDrives | ForEach-Object Name));Cleared=[string]::IsNullOrEmpty([ADTarget]::ConnectionDrive);CallerPreserved=(($callerNames -join ',') -ceq (($script:FixtureDrives | ForEach-Object Name) -join ','))}
+}finally{
+    Set-Item Function:script:Set-Location $setLocation;Set-Item Function:script:Remove-PSDrive $removeDrive
+    [ADTarget]::Close()
+    foreach($drive in @($script:FixtureDrives | Where-Object Name -eq $owned)){$script:FixtureDrives.Remove($drive)}
+}
+'@
+        $r=Invoke-ClassScope ($source.Replace('__MODE__',$mode))
+        Assert-ClassEqual 1 $r.Attempts;Assert-ClassEqual $true $r.Force
+        if($mode -eq 'Restore'){
+            Assert-ClassEqual $false $r.FirstExists;Assert-ClassEqual $false $r.Retained
+        }else{
+            Assert-ClassEqual $true $r.FirstExists;Assert-ClassEqual $true $r.Retained
+        }
+        $primary=if($mode -eq 'Remove'){'fixture removal failure'}else{'fixture restoration failure'}
+        Assert-ClassTrue ($r.Primary.Contains($primary)) 'Original cleanup failure was replaced'
+        if($mode -eq 'Both'){Assert-ClassTrue ($r.Secondary.Contains('fixture removal failure')) 'Secondary removal failure was hidden'}
+        Assert-ClassEqual $true $r.RetryGone;Assert-ClassEqual $true $r.Cleared;Assert-ClassEqual $true $r.CallerPreserved
+    }
+}
 Invoke-ClassTest 'failed directory authentication never creates a connection drive' {
     $result=Invoke-ClassScope @'
 $script:FailDomainQuery=$true; $before=$script:FixtureDrives.Count; $failed=$false

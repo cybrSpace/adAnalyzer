@@ -2807,14 +2807,21 @@ class ADTarget {
     static [void]Disconnect() {
 
         if (-not [String]::IsNullOrEmpty([ADTarget]::ConnectionDrive)) {
-            try {
-                Set-Location -LiteralPath ([ADTarget]::PreviousLocation) -ErrorAction Stop
-                Remove-PSDrive -Name ([ADTarget]::ConnectionDrive) -ErrorAction Stop -WhatIf:$false -Confirm:$false
-            }
-            finally {
+            $restorationError = $null
+            $removalError = $null
+            try { Set-Location -LiteralPath ([ADTarget]::PreviousLocation) -ErrorAction Stop }
+            catch { $restorationError = $_ }
+            try { Remove-PSDrive -Name ([ADTarget]::ConnectionDrive) -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false }
+            catch { $removalError = $_ }
+            if ($null -eq $removalError) {
                 [ADTarget]::ConnectionDrive = $null
                 [ADTarget]::PreviousLocation = $null
             }
+            if ($null -ne $restorationError) {
+                if ($null -ne $removalError) { $restorationError.Exception.Data['ADAnalyzerDriveRemovalError'] = $removalError.Exception.Message }
+                throw $restorationError
+            }
+            if ($null -ne $removalError) { throw $removalError }
         }
 
     }
