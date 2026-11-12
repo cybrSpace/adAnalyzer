@@ -1,15 +1,17 @@
 [CmdletBinding()]
 param(
-    [string]$RepositoryRoot=(Split-Path -Parent $PSScriptRoot),
+    [string]$RepositoryRoot,
     [string]$ExpectedVersion,
     [ValidateSet('Regression','Quality','All')][string]$Mode='Regression'
 )
 $ErrorActionPreference='Stop'
+if(-not $RepositoryRoot){$RepositoryRoot=Split-Path -Parent $PSScriptRoot}
 $engine=(Get-Process -Id $PID).Path
 Write-Host ('Test executable: '+$engine)
 $PSVersionTable | Format-List | Out-String | Write-Host
 Write-Host ('64-bit process: '+[Environment]::Is64BitProcess)
-Write-Host ('Runtime: '+[Runtime.InteropServices.RuntimeInformation]::FrameworkDescription)
+$runtime=if('System.Runtime.InteropServices.RuntimeInformation' -as [type]){[Runtime.InteropServices.RuntimeInformation]::FrameworkDescription}else{'CLR '+[Environment]::Version}
+Write-Host ('Runtime: '+$runtime)
 if($ExpectedVersion) {
     if($ExpectedVersion -eq '5.1') {
         if($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1 -or $PSVersionTable.PSEdition -ne 'Desktop') {
