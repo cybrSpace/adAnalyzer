@@ -279,10 +279,11 @@ try {
         $old=[pscustomobject]@{SchemaVersion=1;RunId='old';Findings=@(
             [pscustomobject]@{RuleId='same';Target='a';Timestamp='old';Evidence=@{Members=@('one','two');Count=2}},
             [pscustomobject]@{RuleId='changed';Target='b';Evidence=@{Value=1}},
-            [pscustomobject]@{RuleId='resolved';Target='c';Evidence=@{Value=1}})}
+            [pscustomobject]@{RuleId='resolved';Target='c';Status='Fail';Evidence=@{Value=1}})}
         $new=[pscustomobject]@{SchemaVersion=1;RunId='new';Findings=@(
             [pscustomobject]@{RuleId='same';Target='a';Timestamp='new';Evidence=@{Count=2;Members=@('two','one')}},
             [pscustomobject]@{RuleId='changed';Target='b';Evidence=@{Value=2}},
+            [pscustomobject]@{RuleId='resolved';Target='c';Status='Pass';Evidence=@{Value=2}},
             [pscustomobject]@{RuleId='new';Target='d';Evidence=@{Value=1}})}
         $comparison=Compare-ADAnalyzerAssessment $old $new
         Assert-Equal 1 $comparison.Summary.Unchanged;Assert-Equal 1 $comparison.Summary.Changed
@@ -466,6 +467,29 @@ try {
         Assert-Equal Resolved (Compare-ADAnalyzerAssessment $a $b).Changes[0].Change
         $b.Checks[0].Status='Unknown'
         Assert-Equal Changed (Compare-ADAnalyzerAssessment $a $b).Changes[0].Change
+    }
+    Invoke-Test 'missing observations never establish resolution regardless of state or prior status' {
+        foreach($state in @('Partial','Complete')){foreach($status in @('Fail','Invalid','Pass','Unknown',$null)){
+            $a=@{SchemaVersion=1;Target='example.invalid';Checks=@(@{RuleId='GPO.Fixture';Target='one';Status=$status})}
+            $b=@{SchemaVersion=1;Target='example.invalid';State=$state;Checks=@();Configuration=@{Analysis=@{IncludeGpo=$false}}}
+            $comparison=Compare-ADAnalyzerAssessment $a $b
+            Assert-Equal Changed $comparison.Changes[0].Change
+            Assert-Equal NotObservedInDifference $comparison.Changes[0].Reason
+            Assert-Equal 0 $comparison.Summary.Resolved
+            Assert-True ($comparison.Changes[0].Difference -is [array])
+            Assert-Equal 0 $comparison.Changes[0].Difference.Count
+        }}
+        $new=Compare-ADAnalyzerAssessment @{Checks=@()} @{Checks=@(@{RuleId='new';Target='one';Status='Fail'})}
+        Assert-True ($new.Changes[0].Reference -is [array]);Assert-Equal 0 $new.Changes[0].Reference.Count
+    }
+    Invoke-Test 'observed resolution survives unrelated partial coverage but unknown evidence does not resolve' {
+        foreach($oldStatus in @('Fail','Invalid')){foreach($newStatus in @('Pass','NotApplicable','Unknown','Unreadable','NotConfigured')){
+            $a=@{Checks=@(@{RuleId='Fixture';Target='one';Status=$oldStatus})}
+            $b=@{State='Partial';Checks=@(@{RuleId='Fixture';Target='one';Status=$newStatus})}
+            $change=(Compare-ADAnalyzerAssessment $a $b).Changes[0]
+            $expected=if($newStatus -in 'Pass','NotApplicable'){'Resolved'}else{'Changed'}
+            Assert-Equal $expected $change.Change;Assert-Equal $null $change.Reason
+        }}
     }
     Invoke-Test 'different targets or collection scopes cannot imply resolved findings' {
         $a=[pscustomobject]@{Target='a.invalid';Checks=@();Context=[pscustomobject]@{SearchBase='OU=People'}}

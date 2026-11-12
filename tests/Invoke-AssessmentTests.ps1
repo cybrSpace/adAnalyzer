@@ -90,6 +90,37 @@ try {
         $result=Invoke-ADAnalyzerAssessment -DirectoryData (New-AssessmentFixture) -GpoData @([pscustomobject]@{Gpo=$gpo;Policy=$policy;Error=$null})
         Assert-Equal Unknown ($result.Checks | Where-Object RuleId -eq GPO.VERSION_CONSISTENCY).Status
     }
+    Test-Assessment 'failed GPO reads and skipped GPO collection cannot resolve stored failures' {
+        $collector=(Get-Command Get-ADAnalyzerDirectoryData).ScriptBlock
+        $gpos=(Get-Command Get-ADAnalyzerGpo).ScriptBlock;$report=(Get-Command Get-ADAnalyzerGpoReport).ScriptBlock
+        $script:ComparisonReadFails=$false
+        function script:Get-ADRootDSE {param($Server,$Credential,$ErrorAction) [pscustomobject]@{DnsHostName='dc.example.invalid'}}
+        function script:Get-ADAnalyzerDirectoryData {param($Context,$Profile) New-AssessmentFixture}
+        function script:Get-ADAnalyzerGpo {param([switch]$All,$Domain,$Server,$Credential) [pscustomobject]@{Id=[guid]'11111111-1111-1111-1111-111111111111';Flags=0;Version=1;Links=@()}}
+        function script:Get-ADAnalyzerGpoReport {
+            param($Gpo,$Credential,[switch]$AsObject)
+            if($script:ComparisonReadFails){throw 'fixture GPO read denied'}
+            $policy=New-PolicyFixture;$policy.SecuritySettings=@([pscustomobject]@{Scope='Computer';Kind='Account';Name='MinimumPasswordLength';Value=0;Source='Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf'})
+            [pscustomobject]@{Policy=$policy}
+        }
+        try{
+            $before=Get-ADAnalyzerAssessment -Domain example.invalid
+            Assert-True (@($before.Checks | Where-Object {$_.RuleId -like 'GPO.*' -and $_.Status -eq 'Fail'}).Count -gt 0) 'Missing failing GPO baseline'
+            $script:ComparisonReadFails=$true;$failed=Get-ADAnalyzerAssessment -Domain example.invalid
+            Assert-Equal Partial $failed.State
+            $skipped=Get-ADAnalyzerAssessment -Domain example.invalid -SkipGpo
+            Assert-Equal Complete $skipped.State
+            foreach($after in @($failed,$skipped)){
+                $changes=@((Compare-ADAnalyzerAssessment $before $after).Changes | Where-Object {$_.RuleId -like 'GPO.*' -and $_.Reason -eq 'NotObservedInDifference'})
+                Assert-True ($changes.Count -gt 0) 'Missing explicit unobserved policy checks'
+                Assert-Equal 0 @($changes | Where-Object Change -ne Changed).Count
+                Assert-Equal 0 @((Compare-ADAnalyzerAssessment $before $after).Changes | Where-Object {$_.RuleId -like 'GPO.*' -and $_.Change -eq 'Resolved'}).Count
+            }
+        }finally{
+            Set-Item Function:script:Get-ADAnalyzerDirectoryData $collector;Set-Item Function:script:Get-ADAnalyzerGpo $gpos;Set-Item Function:script:Get-ADAnalyzerGpoReport $report
+            Remove-Item Function:Get-ADRootDSE;$script:ComparisonReadFails=$false
+        }
+    }
     Test-Assessment 'SCT-style extracted GPO backup becomes typed baseline expectations' {
         $path=Join-Path $temp 'baseline/DomainSysvol/GPO';$machine=Join-Path $path 'Machine/Microsoft/Windows NT/SecEdit';$null=New-Item -Path $machine -ItemType Directory -Force
         Set-Content -LiteralPath (Join-Path $path 'GPT.INI') -Value "[General]`nVersion=1"

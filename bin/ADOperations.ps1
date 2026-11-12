@@ -226,9 +226,9 @@ function Compare-ADAnalyzerAssessment {
         }
     }
     $changes=@(foreach($key in @(@($maps[0].Keys)+@($maps[1].Keys) | Sort-Object -Unique)) {
-        $old=@($maps[0][$key]);$new=@($maps[1][$key]);$status='Unchanged'
+        $old=@(if($maps[0].ContainsKey($key)){$maps[0][$key]});$new=@(if($maps[1].ContainsKey($key)){$maps[1][$key]});$status='Unchanged';$reason=$null
         if(-not $maps[0].ContainsKey($key)){$status='New'}
-        elseif(-not $maps[1].ContainsKey($key)){$status='Resolved'}
+        elseif(-not $maps[1].ContainsKey($key)){$status='Changed';$reason='NotObservedInDifference'}
         else {
             $oldJson=ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerComparableValue $old) -Depth 100 -Compress
             $newJson=ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerComparableValue $new) -Depth 100 -Compress
@@ -240,7 +240,7 @@ function Compare-ADAnalyzerAssessment {
             if($oldFail -and $newGood){$status='Resolved'}elseif($oldGood -and $newFail){$status='New'}
         }
         $sample=if($new.Count -and $null -ne $new[0]){$new[0]}else{$old[0]}
-        [pscustomobject]@{RuleId=$key.Split([char]0)[0];Target=Get-ADAnalyzerOperationValue $sample @('Target','DistinguishedName','ObjectGuid','SID');Change=$status;Reference=$old;Difference=$new}
+        [pscustomobject]@{RuleId=$key.Split([char]0)[0];Target=Get-ADAnalyzerOperationValue $sample @('Target','DistinguishedName','ObjectGuid','SID');Change=$status;Reason=$reason;Reference=$old;Difference=$new}
     })
     [pscustomobject][ordered]@{SchemaVersion=1;ComparisonType='ADAnalyzerAssessmentComparison';ReferenceRunId=Get-ADAnalyzerOperationValue $before @('RunId');DifferenceRunId=Get-ADAnalyzerOperationValue $after @('RunId');Timestamp=[datetimeoffset]::UtcNow.ToString('o');Changes=$changes;Summary=[pscustomobject]@{New=@($changes|Where-Object Change -eq 'New').Count;Resolved=@($changes|Where-Object Change -eq 'Resolved').Count;Changed=@($changes|Where-Object Change -eq 'Changed').Count;Unchanged=@($changes|Where-Object Change -eq 'Unchanged').Count}}
 }
