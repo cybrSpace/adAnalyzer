@@ -221,7 +221,7 @@ function ConvertTo-ADAnalyzerProvidedGpoPolicy {
         Path=$Policy.Path;SysvolVersion=$Policy.SysvolVersion;Files=@($Policy.Files);UnparsedFiles=@($Policy.UnparsedFiles)
         SecuritySettings=@($Policy.SecuritySettings | Where-Object {$null -ne $_} | ForEach-Object {ConvertTo-ADAnalyzerSecretRecord $_})
         RegistrySettings=@($Policy.RegistrySettings | Where-Object {$null -ne $_} | ForEach-Object {
-            $record=ConvertTo-ADAnalyzerSecretRecord $_
+            $record=ConvertTo-ADAnalyzerSecretRecord $_.PSObject.Copy()
             if($record.Type -notin @(1,2,4,5,7,11) -and $record.Value -is [array]){$record.Value=[byte[]]$record.Value}
             $record
         })

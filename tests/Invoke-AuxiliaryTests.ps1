@@ -282,12 +282,19 @@ try {
         $policy.RegistrySettings=@([pscustomobject]@{Scope='Computer';Hive='HKLM';Key='Software\Fixture';ValueName='Bytes';Type=3;Value=[byte[]]@(1,2);Source='Machine/Registry.pol';KeyOnly=$false})
         $provided=[pscustomobject]@{Gpo=$script:ReportA.Gpo;Policy=$policy}
         $json=$provided | ConvertTo-Json -Depth 100 | ConvertFrom-Json
+        $originalValue=$json.Policy.RegistrySettings[0].Value;$originalType=$originalValue.GetType()
+        $before=ConvertTo-Json -InputObject $json -Depth 100 -Compress
         $native=[xml](Get-ADAnalyzerGpoXml -InputObject $provided);$roundtrip=[xml](Get-ADAnalyzerGpoXml -InputObject $json)
+        Assert-Equal $originalType $json.Policy.RegistrySettings[0].Value.GetType()
+        Assert-True ([object]::ReferenceEquals($originalValue,$json.Policy.RegistrySettings[0].Value)) 'XML replaced the caller binary array'
         $xpath='//Record[Name="HKLM\Software\Fixture\Bytes"]/Value'
         Assert-Equal 'AQI=' $native.SelectSingleNode($xpath).InnerText
         Assert-Equal $native.SelectSingleNode($xpath).InnerText $roundtrip.SelectSingleNode($xpath).InnerText
         $a=@(Get-ADAnalyzerLocalAdminGpo -InputObject $provided);$b=@(Get-ADAnalyzerLocalAdminGpo -InputObject $json)
         Assert-Equal ($a.CheckId -join ',') ($b.CheckId -join ',');Assert-NoSecret $b
+        Assert-Equal $originalType $json.Policy.RegistrySettings[0].Value.GetType()
+        Assert-True ([object]::ReferenceEquals($originalValue,$json.Policy.RegistrySettings[0].Value)) 'Inventory replaced the caller binary array'
+        Assert-Equal $before (ConvertTo-Json -InputObject $json -Depth 100 -Compress)
     }
     Invoke-AuxiliaryTest 'unsupported dictionary rows and unreadable provided XML fail before replacing bytes' {
         foreach($policy in @(
