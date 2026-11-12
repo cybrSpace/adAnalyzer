@@ -119,6 +119,7 @@ function Import-ADAnalyzerBaseline {
         }
         $securityGroups=@($policy.SecuritySettings | Where-Object { $_.Kind -in 'Account','SecurityOptions' -and -not (Test-ADAnalyzerSecretName $_.Name) } | Group-Object Scope,Kind,Name)
         foreach($group in $securityGroups) {
+            if(@($group.Group | Where-Object {-not (Test-ADAnalyzerPolicyValueValid $_)}).Count){throw 'Baseline contains an invalid stored policy value'}
             $row=$group.Group[0];$aggregate=$group.Count -gt 1
             $expected=if($aggregate){,@($group.Group | ForEach-Object Value | Sort-Object)}else{$row.Value}
             $key=('{0}|{1}|{2}' -f $row.Scope,$row.Kind,$row.Name).ToLowerInvariant();$value=ConvertTo-Json -InputObject $expected -Compress -Depth 20

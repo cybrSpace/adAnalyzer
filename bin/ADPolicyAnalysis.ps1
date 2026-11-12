@@ -12,6 +12,11 @@ function Get-ADAnalyzerPolicyProfileValue {
     param([hashtable]$Profile,[string]$Name,$Default)
     Get-ADAnalyzerPolicyValue (Get-ADAnalyzerPolicyValue $Profile Policy @{}) $Name $Default
 }
+function Test-ADAnalyzerPolicyValueValid {
+    param($Record)
+    $marker=Get-ADAnalyzerPolicyValue $Record ValueValid $null
+    return $null -eq $marker -or ($marker -is [bool] -and $marker)
+}
 
 function Get-ADAnalyzerXmlAttribute {
     param([Xml.XmlNode]$Node,[string]$Name,[string]$Default='')
@@ -286,7 +291,8 @@ function Test-ADAnalyzerGpoPolicy {
         if(-not $rows.Count){New-ADAnalyzerCheck -RuleId ('GPO.Account.'+$rule[0]) -Status NotConfigured -Severity High -Category AccountPolicy -Target ($target+'/Account/'+$rule[0]) -Observed $null -Expected $expected -Evidence $null -Message 'This setting is absent from this GPO; inherited or effective policy has not been determined.' -Applicability Unknown;continue}
         foreach($row in $rows){
             $valid=$true;$pass=$false;$semantic=$null
-            if($rule[3] -eq 'Boolean'){$value=ConvertTo-ADAnalyzerPolicyBoolean $row.Value;$valid=$value.Valid;$pass=$value.Value -eq $expected}
+            if(-not (Test-ADAnalyzerPolicyValueValid $row)){$valid=$false}
+            elseif($rule[3] -eq 'Boolean'){$value=ConvertTo-ADAnalyzerPolicyBoolean $row.Value;$valid=$value.Valid;$pass=$value.Value -eq $expected}
             else{
                 $value=ConvertTo-ADAnalyzerPolicyNumber $row.Value;$valid=$value.Valid -and $value.Value -ge $rule[4] -and $value.Value -le $rule[5]
                 if($valid){switch($rule[3]){
@@ -310,13 +316,14 @@ function Test-ADAnalyzerGpoPolicy {
             foreach($ini in @($Policy.IniSettings | Where-Object {$_.Section -eq 'Registry Values' -and $_.Scope -eq $setting.Scope -and $_.Source -eq $setting.Source -and ($_.Name -replace '^(?i)MACHINE\\','') -ieq ($spec.Key+'\'+$spec.ValueName)})){
                 try{$parts=Split-AnalyzerPolicyCsv $ini.Value;$type=[int]$parts[0];$rawValue=if($type -eq 7){,$parts[1..($parts.Count-1)]}else{$parts[1..($parts.Count-1)] -join ','};$raw=$true}catch{$type=-1}
             }
-            $rows+=[pscustomobject]@{Scope=$setting.Scope;Source=$setting.Source;Value=$rawValue;Type=$type;Raw=$raw;Deleted=$false}
+            $rows+=[pscustomobject]@{Scope=$setting.Scope;Source=$setting.Source;Value=$rawValue;Type=$type;Raw=$raw;Deleted=$false;ValueValid=(Get-ADAnalyzerPolicyValue $setting ValueValid $null)}
         }
         if(-not $rows.Count){New-ADAnalyzerCheck -RuleId ('GPO.Security.'+$spec.Id) -Status NotConfigured -Severity High -Category SecurityOptions -Target ($target+'/Security/'+$spec.Id) -Observed $null -Expected $spec.Expected -Evidence @{Name=$spec.Name} -Message 'This GPO does not configure this supported baseline setting.' -Applicability Unknown;continue}
         $ordinal=0
         foreach($row in $rows){
             $ordinal++;$status='Unknown';$valid=$true;$pass=$false;$observed=$row.Value
-            if($row.Deleted){$status='NotConfigured'}
+            if(-not (Test-ADAnalyzerPolicyValueValid $row)){$status='Invalid'}
+            elseif($row.Deleted){$status='NotConfigured'}
             elseif($null -ne $row.Type -and $null -ne $spec.Type -and $row.Type -ne $spec.Type){$status='Invalid'}
             else{
                 if($spec.Kind -eq 'Boolean'){$value=ConvertTo-ADAnalyzerPolicyBoolean $row.Value;$valid=$value.Valid;$pass=$value.Value -eq $spec.Expected}
@@ -387,6 +394,7 @@ function Test-ADAnalyzerGpoPolicy {
                 $sample=$group.Group[0];$observed=@($group.Group | ForEach-Object { $_.Value })
                 $checkTarget=$target+'/Expected/'+$id+'/Aggregate/'+$sample.Scope+'/'+([string]$sample.Source).Replace('\','/')
                 try {
+                    if(@($group.Group | Where-Object {-not (Test-ADAnalyzerPolicyValueValid $_)}).Count){throw 'The stored value is invalid'}
                     if($kind -eq 'Registry' -and $null -ne $expectedType) {
                         $declared=ConvertTo-ADAnalyzerPolicyNumber $expectedType
                         foreach($record in $group.Group) {$actual=ConvertTo-ADAnalyzerPolicyNumber $record.Type;if(-not $declared.Valid -or -not $actual.Valid -or $declared.Value -ne $actual.Value){throw 'The registry data type does not match the baseline'}}
@@ -410,6 +418,7 @@ function Test-ADAnalyzerGpoPolicy {
             $checkTarget=$target+'/Expected/'+$id+'/'+$rowIdentity
             if($identities[$rowIdentity] -gt 1){$checkTarget+='/duplicate/'+$occurrences[$rowIdentity]}
             try{
+                if(-not (Test-ADAnalyzerPolicyValueValid $row)){throw 'The stored value is invalid'}
                 if($kind -eq 'Registry' -and $null -ne $expectedType){
                     $declared=ConvertTo-ADAnalyzerPolicyNumber $expectedType;$actual=ConvertTo-ADAnalyzerPolicyNumber $row.Type
                     if(-not $declared.Valid -or -not $actual.Valid -or $declared.Value -ne $actual.Value){throw 'The registry data type does not match the baseline'}

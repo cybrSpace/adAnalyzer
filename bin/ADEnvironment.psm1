@@ -890,6 +890,13 @@ class PasswordPolicyObject : OrderedDictionary {
             elseif ($null -ne $item.SettingBoolean) {
                 $object[$item.Name] = [Convert]::ToBoolean($item.SettingBoolean)
             }
+            elseif ($null -ne $item.SelectSingleNode('./*[local-name()="SettingString"]')) {
+                $object[$item.Name] = $item.SelectSingleNode('./*[local-name()="SettingString"]').InnerText
+            }
+            $validityKey = [string]$item.Name + '.ValueValid'
+            $validityNode = $item.SelectSingleNode('./*[local-name()="ValueValid"]')
+            if ($null -ne $validityNode) { $object[$validityKey] = [System.Convert]::ToBoolean($validityNode.InnerText) }
+            elseif ($object.Contains($validityKey)) { $object[$validityKey] = $null }
         }
 
         return $object
@@ -899,6 +906,11 @@ class PasswordPolicyObject : OrderedDictionary {
 
         $list = [Finding]::New()
         $policy = (Get-ADAnalyzerLegacyProfile).Policy
+        if ($value.'property.setting.valid' -is [bool] -and -not $value.'property.setting.valid') {
+            $list.AddFinding($value, 'Validate - Invalid stored policy value')
+            return $list
+        }
+
 
         if ($value.'ext.property.name' -eq 'Account') {
 
@@ -944,6 +956,8 @@ class PasswordPolicyObject : OrderedDictionary {
                 'LockoutBadCount', 'LockoutDuration', 'ResetLockoutCount'
                 'ClearTextPassword', 'MaximumPasswordAge', 'MinimumPasswordAge', 'MinimumPasswordLength', 'PasswordComplexity', 'PasswordHistorySize', 'ResetLockoutCount'
                 'MaxClockSkew', 'MaxRenewAge', 'MaxServiceAge', 'MaxTicketAge', 'MaxTicketAgeForRenew', 'TicketValidateClient'
+                'ForceLogoffWhenHourExpire', 'RequireLogonToChangePassword'
+                'PasswordComplexity.ValueValid', 'ClearTextPassword.ValueValid', 'TicketValidateClient.ValueValid', 'ForceLogoffWhenHourExpire.ValueValid'
 
             )
         )
@@ -2238,6 +2252,11 @@ class GroupPolicyObject : OrderedDictionary {
 
         $list = [Finding]::New()
         $policy = (Get-ADAnalyzerLegacyProfile).Policy
+        if ($value.'property.setting.valid' -is [bool] -and -not $value.'property.setting.valid') {
+            $list.AddFinding($value, 'Validate - Invalid stored policy value')
+            return $list
+        }
+
 
         if ($value.'ext.property.name' -eq 'Account') {
 
@@ -2380,12 +2399,15 @@ class GroupPolicyObject : OrderedDictionary {
                 $object.Record['ext.property.type'] = $item.type
 
                 $object.Record['property.setting.name'] = $item.name
+                $object.Record['property.setting.valid'] = $null
+                $validityNode = $item.SelectSingleNode('./*[local-name()="ValueValid"]')
+                if ($null -ne $validityNode) { $object.Record['property.setting.valid'] = [System.Convert]::ToBoolean($validityNode.InnerText) }
 
                 switch ($item) {
 
                     { $item.SettingNumber } { $object.Record['property.setting.value'] = [bigint]$item.SettingNumber }
                     { $item.SettingBoolean } { $object.Record['property.setting.value'] = [Convert]::ToBoolean($item.SettingBoolean) }
-                    { $null -ne $item.SelectSingleNode('./*[local-name()="SettingString"]') } { $object.Record['property.setting.value'] = [String]$item.SettingString }
+                    { $null -ne $item.SelectSingleNode('./*[local-name()="SettingString"]') } { $object.Record['property.setting.value'] = $item.SelectSingleNode('./*[local-name()="SettingString"]').InnerText }
 
                 }
 
@@ -2422,10 +2444,13 @@ class GroupPolicyObject : OrderedDictionary {
                     $object.Record['ext.property.type'] = $null
 
                     $object.Record['property.setting.name'] = $item.Display.Name
+                    $object.Record['property.setting.valid'] = $null
+                    $validityNode = $item.SelectSingleNode('./*[local-name()="ValueValid"]')
+                    if ($null -ne $validityNode) { $object.Record['property.setting.valid'] = [System.Convert]::ToBoolean($validityNode.InnerText) }
 
                     switch ($item) {
 
-                        { $item.Display.DisplayString } { $object.Record['property.setting.value'] = $item.Display.DisplayString }
+                        { $null -ne $item.SelectSingleNode('./*[local-name()="Display"]/*[local-name()="DisplayString"]') } { $object.Record['property.setting.value'] = $item.SelectSingleNode('./*[local-name()="Display"]/*[local-name()="DisplayString"]').InnerText }
                         { $item.Display.DisplayBoolean } { $object.Record['property.setting.value'] = [Convert]::ToBoolean($item.Display.DisplayBoolean) }
 
                     }
@@ -2637,6 +2662,7 @@ class GroupPolicyObject : OrderedDictionary {
                 'property.setting.name', 'property.setting.value', 'property.setting.parameter'
                 'ext.property.parameter', 'ext.property.filter'
                 'property.setting.right', 'property.setting.sid', 'property.setting.empty'
+                'property.setting.valid'
             )
 
         )

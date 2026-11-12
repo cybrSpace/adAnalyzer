@@ -73,6 +73,31 @@ Test-Policy 'invalid account types are not coerced to compliance values' {
     $policy=New-PolicyFixture;$policy.SecuritySettings=@([pscustomobject]@{Kind='Account';Name='MinimumPasswordLength';Value='twelve';Scope='Computer'})
     Assert-Policy (((Get-PolicyChecks $policy) | Where-Object RuleId -eq GPO.Account.MinimumPasswordLength).Status -eq 'Invalid') 'Invalid length did not remain Invalid'
 }
+Test-Policy 'real INF invalid flags cannot pass and valid neighboring settings remain assessed' {
+    $root=Join-Path ([IO.Path]::GetTempPath()) ('ad-invalid-flags-'+[guid]::NewGuid().ToString('N'))
+    try{
+        $directory=Join-Path $root 'Machine/Microsoft/Windows NT/SecEdit';$null=[IO.Directory]::CreateDirectory($directory)
+        foreach($token in @('-1','65537','true','')){
+            $text="[System Access]`nPasswordComplexity=$token`nClearTextPassword=$token`nLSAAnonymousNameLookup=$token`nMinimumPasswordLength=16"
+            [IO.File]::WriteAllText((Join-Path $directory 'GptTmpl.inf'),$text,[Text.Encoding]::Unicode)
+            $checks=Get-PolicyChecks (Read-ADAnalyzerGpo $root)
+            foreach($id in @('GPO.Account.PasswordComplexity','GPO.Account.ClearTextPassword','GPO.Security.LSAAnonymousNameLookup')){
+                Assert-Policy (($checks | Where-Object RuleId -eq $id).Status -eq 'Invalid') ($id+' incorrectly classified a malformed flag')
+            }
+            Assert-Policy (($checks | Where-Object RuleId -eq GPO.Account.MinimumPasswordLength).Status -eq 'Pass') 'Valid neighbor was lost'
+        }
+    }finally{if([IO.Directory]::Exists($root)){[IO.Directory]::Delete($root,$true)}}
+}
+Test-Policy 'explicit invalid metadata overrides default and custom value comparisons' {
+    $policy=New-PolicyFixture;$policy.SecuritySettings=@([pscustomobject]@{Kind='Account';Name='PasswordComplexity';Value='true';ValueValid=$false;Scope='Computer';Source='Machine/GptTmpl.inf'})
+    $profile=Get-ADAnalyzerDefaultProfile;$profile.ExpectedGpoSettings=@(@{Id='single-invalid';Kind='Account';Name='PasswordComplexity';Expected='true'},@{Id='aggregate-invalid';Kind='Account';Name='PasswordComplexity';Expected=@('true');Aggregate=$true})
+    $checks=Get-PolicyChecks $policy $profile
+    foreach($id in @('GPO.Account.PasswordComplexity','GPO.Expected.single-invalid','GPO.Expected.aggregate-invalid')){
+        Assert-Policy (($checks | Where-Object RuleId -eq $id).Status -eq 'Invalid') 'Invalid source passed a configured comparison'
+    }
+    $policy.SecuritySettings[0].Value=$true;$policy.SecuritySettings[0].PSObject.Properties.Remove('ValueValid')
+    Assert-Policy (((Get-PolicyChecks $policy) | Where-Object RuleId -eq GPO.Account.PasswordComplexity).Status -eq 'Pass') 'Unmarked existing DTO behavior changed'
+}
 Test-Policy 'cpassword is detected in disabled stored content without leaking it' {
     $policy=New-PolicyFixture;$policy.XmlFiles=@([pscustomobject]@{Scope='Computer';Path='Machine/Preferences/Groups/Groups.xml';Xml='<Groups><User disabled="1" uid="id1"><Properties action="U" userName="fixture" cpassword="DO_NOT_OUTPUT_THIS_SECRET" /></User></Groups>'})
     $gpo=[pscustomobject]@{Id=$script:Gpo.Id;Flags=3;Links=@()}

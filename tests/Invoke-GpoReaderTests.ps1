@@ -103,6 +103,48 @@ try {
         Assert-Equal $false ($parsed.SecuritySettings | Where-Object Name -eq 'TicketValidateClient').Value
         Assert-Equal 'Renamed, Admin' ($parsed.SecuritySettings | Where-Object Name -eq 'NewAdministratorName').Value
     }
+    Test-Gpo 'documented flag domains preserve nonzero values without int32 narrowing' {
+        foreach($case in @(
+            @('ForceLogoffWhenHourExpire','2147483648',$true),
+            @('PasswordComplexity','0',$false),@('PasswordComplexity','2',$true),@('PasswordComplexity','65536',$true)
+            @('ClearTextPassword','2',$true),@('ClearTextPassword','65536',$true)
+            @('LSAAnonymousNameLookup','2',$true),@('LSAAnonymousNameLookup','9',$true)
+            @('TicketValidateClient','99999',$true),@('ForceLogoffWhenHourExpire','2147483648',$true),@('ForceLogoffWhenHourExpire','9999999999',$true)
+        )){
+            $root=Join-Path $temp ([guid]::NewGuid().ToString('N'))
+            $section=if($case[0] -eq 'TicketValidateClient'){'Kerberos Policy'}else{'System Access'}
+            $text='['+$section+']'+[Environment]::NewLine+$case[0]+'='+$case[1]
+            $path=Join-Path $root 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf';Write-Text $path $text ([Text.Encoding]::Unicode)
+            $data=Read-ADAnalyzerGpo $root
+            $name=if($case[0] -eq 'LSAAnonymousNameLookup'){'Network access: Allow anonymous SID/Name translation'}else{$case[0]}
+            $row=@($data.SecuritySettings | Where-Object Name -eq $name)[0]
+            Assert-True ($row.Value -is [bool]) ('Expected typed flag for '+$case[0])
+            Assert-Equal $case[2] $row.Value;Assert-Equal $true $row.ValueValid
+            Assert-Equal $text (Get-Content -LiteralPath $path -Raw)
+        }
+    }
+    Test-Gpo 'invalid flag tokens remain raw and do not hide valid neighboring settings' {
+        foreach($case in @(
+            @('PasswordComplexity','-1'),@('PasswordComplexity','65537'),@('PasswordComplexity','true'),@('PasswordComplexity','false'),@('PasswordComplexity','')
+            @('PasswordComplexity','-0'),@('PasswordComplexity','+0'),@('PasswordComplexity','0e0'),@('PasswordComplexity','"0"'),@('PasswordComplexity','00000000000')
+            @('ClearTextPassword','999999999999999999999999'),@('LSAAnonymousNameLookup','10'),@('LSAAnonymousNameLookup','-1')
+            @('TicketValidateClient','100000'),@('TicketValidateClient','text'),@('ForceLogoffWhenHourExpire','-1'),@('ForceLogoffWhenHourExpire','10000000000')
+        )){
+            $root=Join-Path $temp ([guid]::NewGuid().ToString('N'))
+            $section=if($case[0] -eq 'TicketValidateClient'){'Kerberos Policy'}else{'System Access'}
+            $text="[System Access]`nMinimumPasswordLength=16`n"+'['+$section+']'+[Environment]::NewLine+$case[0]+'='+$case[1]
+            Write-Text (Join-Path $root 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf') $text ([Text.Encoding]::Unicode)
+            $data=Read-ADAnalyzerGpo $root
+            $name=if($case[0] -eq 'LSAAnonymousNameLookup'){'Network access: Allow anonymous SID/Name translation'}else{$case[0]}
+            $row=@($data.SecuritySettings | Where-Object Name -eq $name)[0]
+            Assert-True ($row.Value -is [string]) 'Invalid flag lost its raw token'
+            Assert-Equal $case[1] $row.Value;Assert-Equal $false $row.ValueValid
+            Assert-Equal 16 ($data.SecuritySettings | Where-Object Name -eq MinimumPasswordLength).Value
+        }
+        $ignoredRoot=Join-Path $temp 'ignored-flag';Write-Text (Join-Path $ignoredRoot 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf') "[System Access]`nRequireLogonToChangePassword=opaque" ([Text.Encoding]::Unicode)
+        $ignored=(Read-ADAnalyzerGpo $ignoredRoot).SecuritySettings[0]
+        Assert-Equal 'opaque' $ignored.Value;Assert-Equal $null $ignored.PSObject.Properties['ValueValid']
+    }
     Test-Gpo 'named registry preference secrets are absent from reader and canonical XML values' {
         $namedRoot=Join-Path $temp 'named-xml-secret';$path=Join-Path $namedRoot 'Machine/Preferences/Registry/Registry.xml'
         $xml='<RegistrySettings><Registry uid="item" name="DefaultPassword"><Properties name="DefaultPassword" key="Software\Fixture" value="unit2-reader-secret"/></Registry></RegistrySettings>'

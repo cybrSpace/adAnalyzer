@@ -270,3 +270,63 @@ try{[pscustomobject]@{Strict=$strict;ConfiguredLm=[GroupPolicyObject]::Analyze($
     Assert-ClassEqual 0 $r.ConfiguredLm
     Assert-ClassEqual 0 $r.ConfiguredLdap
 }
+
+Invoke-ClassTest 'invalid flag metadata and raw values survive canonical flat and aggregate reports' {
+    $results=Invoke-ClassScope @'
+foreach($token in @('true','')){
+    $null=[PasswordPolicy]::Initialize()
+    $id='11111111-1111-1111-1111-111111111111'
+    $gpo=[pscustomobject]@{Id=[guid]$id;Flags=0;Links=@();Version=1}
+    $policy=[pscustomobject]@{SysvolVersion=1;Files=@();IniSettings=@();RegistrySettings=@();XmlFiles=@();SecuritySettings=@(
+        [pscustomobject]@{Scope='Computer';Kind='Account';Name='PasswordComplexity';Value=$token;ValueValid=$false}
+        [pscustomobject]@{Scope='Computer';Kind='Account';Name='MinimumPasswordLength';Value=16L}
+        [pscustomobject]@{Scope='Computer';Kind='Account';Name='ClearTextPassword';Value=$false;ValueValid=$true}
+        [pscustomobject]@{Scope='Computer';Kind='SecurityOptions';Name='Network access: Allow anonymous SID/Name translation';Value='';ValueValid=$false}
+    )}
+    $xml=[xml](ConvertTo-AnalyzerGpoXml -Gpo $gpo -Parsed $policy)
+    $owner=[GroupPolicyObject]::SetDefault();$owner.Record=[GroupPolicyObject]::SetDefault();$owner.Record['gpo.name']='Flag fixture';$owner.Record['gpo.id']=$id
+    $owner.Record['property.setting.valid']=$false
+    $rows=[List]::new();foreach($extension in $xml.GPO.Computer.ExtensionData){$rows.AddItem($owner.ExpandExtensionData($extension))}
+    $bad=$rows | Where-Object 'property.setting.name' -eq PasswordComplexity
+    $neighbor=$rows | Where-Object 'property.setting.name' -eq MinimumPasswordLength
+    $anonymous=$rows | Where-Object 'property.setting.name' -eq 'Network access: Allow anonymous SID/Name translation'
+    $wide=[PasswordPolicy]::GetInstance()[$id]
+    $flat=[System.Collections.Specialized.OrderedDictionary]::new();foreach($property in $bad.PSObject.Properties){$flat[$property.Name]=$property.Value}
+    [pscustomobject]@{
+        Expected=$token;Flat=$bad.'property.setting.value';Wide=$wide.PasswordComplexity;Valid=$bad.'property.setting.valid';WideValid=$wide.'PasswordComplexity.ValueValid'
+        MarkerCount=$xml.SelectNodes('//ValueValid[.="false"]').Count
+        Finding=([GroupPolicyObject]::Analyze($bad))[0].finding
+        OtherFinding=([PasswordPolicyObject]::Analyze($flat))[0].finding
+        Neighbor=$neighbor.'property.setting.value';NeighborValid=$neighbor.'property.setting.valid'
+        EmptyType=($anonymous.'property.setting.value' -is [string]);EmptyValue=$anonymous.'property.setting.value'
+        AnonymousFinding=([GroupPolicyObject]::Analyze($anonymous))[0].finding;GoodFlag=$wide.ClearTextPassword;GoodValid=$wide.'ClearTextPassword.ValueValid'
+    }
+}
+'@
+    foreach($r in $results){
+        Assert-ClassEqual $r.Expected $r.Flat;Assert-ClassEqual $r.Expected $r.Wide
+        Assert-ClassEqual $false $r.Valid;Assert-ClassEqual $false $r.WideValid;Assert-ClassEqual 2 $r.MarkerCount
+        foreach($label in @($r.Finding,$r.OtherFinding,$r.AnonymousFinding)){Assert-ClassEqual 'Validate - Invalid stored policy value' $label}
+        Assert-ClassEqual 16 $r.Neighbor;Assert-ClassEqual $null $r.NeighborValid
+        Assert-ClassEqual $true $r.EmptyType;Assert-ClassEqual '' $r.EmptyValue
+        Assert-ClassEqual $false $r.GoodFlag;Assert-ClassEqual $true $r.GoodValid
+    }
+}
+Invoke-ClassTest 'unmarked duplicate values clear prior aggregate validity and CSV retains later validity columns' {
+    $r=Invoke-ClassScope @'
+$null=[PasswordPolicy]::Initialize()
+$xml=[xml]'<ExtensionData><Name>Security</Name><Extension><Account><Name>PasswordComplexity</Name><SettingString>bad</SettingString><ValueValid>false</ValueValid></Account><Account><Name>PasswordComplexity</Name><SettingBoolean>true</SettingBoolean></Account></Extension></ExtensionData>'
+$owner=[GroupPolicyObject]::SetDefault();$owner.Record=[GroupPolicyObject]::SetDefault();$owner.Record['gpo.name']='First';$owner.Record['gpo.id']='11111111-1111-1111-1111-111111111111'
+$rows=$owner.GetSecurityExtension($xml.DocumentElement);$wide=[PasswordPolicy]::GetInstance()['11111111-1111-1111-1111-111111111111']
+$first=[PasswordPolicyObject]::Initialize(@(([xml]'<Account><Name>MinimumPasswordLength</Name><SettingNumber>16</SettingNumber></Account>').DocumentElement),$owner.Record)
+$invalid=[PasswordPolicyObject]::Initialize(@(([xml]'<Account><Name>PasswordComplexity</Name><SettingString>bad</SettingString><ValueValid>false</ValueValid></Account>').DocumentElement),$owner.Record)
+$path=Join-Path ([IO.Path]::GetTempPath()) ('ad-validity-csv-'+[guid]::NewGuid().ToString('N')+'.csv')
+try{
+    [Export]::CSV(@([pscustomobject]$first,[pscustomobject]$invalid),$path);$csv=@(Import-Csv -LiteralPath $path)
+    [pscustomobject]@{Value=$wide.PasswordComplexity;Valid=$wide.'PasswordComplexity.ValueValid';FirstValid=$rows[0].'property.setting.valid';SecondValid=$rows[1].'property.setting.valid';CsvRaw=$csv[1].PasswordComplexity;CsvValid=$csv[1].'PasswordComplexity.ValueValid'}
+}finally{if([IO.File]::Exists($path)){[IO.File]::Delete($path)}}
+'@
+    Assert-ClassEqual $true $r.Value;Assert-ClassEqual $null $r.Valid
+    Assert-ClassEqual $false $r.FirstValid;Assert-ClassEqual $null $r.SecondValid
+    Assert-ClassEqual 'bad' $r.CsvRaw;Assert-ClassEqual 'False' $r.CsvValid
+}

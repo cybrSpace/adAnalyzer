@@ -146,6 +146,15 @@ try {
         function script:Read-ADAnalyzerGpo {param($Path) $script:BaselinePolicy}
         try{$profile=Import-ADAnalyzerBaseline -GpoPath fixture -Version one;Assert-Equal 0 $profile.RegistryRules.Count;Assert-Equal 0 $profile.ExpectedGpoSettings.Count}finally{Set-Item Function:script:Read-ADAnalyzerGpo $reader}
     }
+    Test-Assessment 'invalid marked policy values cannot become baseline expectations' {
+        $reader=(Get-Command Read-ADAnalyzerGpo).ScriptBlock
+        function script:Read-ADAnalyzerGpo {param($Path)
+            $policy=New-PolicyFixture;$policy.Files=@([pscustomobject]@{Path='Machine/GptTmpl.inf'})
+            $policy.SecuritySettings=@([pscustomobject]@{Scope='Computer';Kind='Account';Name='PasswordComplexity';Value='true';ValueValid=$false;Source='Machine/GptTmpl.inf'})
+            $policy
+        }
+        try{Assert-Throws {Import-ADAnalyzerBaseline -GpoPath fixture -Version one}}finally{Set-Item Function:script:Read-ADAnalyzerGpo $reader}
+    }
     Test-Assessment 'baseline replay uses final writes and omits deleted registry values' {
         $reader=(Get-Command Read-ADAnalyzerGpo).ScriptBlock
         $script:BaselinePolicy=New-PolicyFixture;$script:BaselinePolicy.Files=@([pscustomobject]@{Path='Machine/Registry.pol'})

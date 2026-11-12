@@ -116,6 +116,21 @@ function ConvertTo-AnalyzerSecurityOption {
     foreach($entry in @($Value)) {[pscustomobject]@{Name=$Name;Value=$entry}}
 }
 
+function ConvertFrom-ADAnalyzerInfFlag {
+    param([string]$Name,[AllowEmptyString()][string]$RawValue)
+    # MS-GPSB flag domains are numeric and are not uniformly limited to 0/1.
+    $domains=@{
+        PasswordComplexity=@(10,65536);ClearTextPassword=@(10,65536)
+        LSAAnonymousNameLookup=@(1,9);TicketValidateClient=@(5,99999)
+        ForceLogoffWhenHourExpire=@(10,9999999999)
+    }
+    if(-not $domains.ContainsKey($Name)){return $null}
+    [uint64]$number=0
+    $domain=$domains[$Name];$pattern='^[0-9]{1,'+$domain[0]+'}$'
+    $valid=$RawValue -cmatch $pattern -and [uint64]::TryParse($RawValue,[ref]$number) -and $number -le $domain[1]
+    [pscustomobject]@{Value=$(if($valid){$number -ne 0}else{$RawValue});ValueValid=[bool]$valid}
+}
+
 function Read-ADAnalyzerGpo {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
@@ -156,15 +171,18 @@ function Read-ADAnalyzerGpo {
                 foreach($section in @('System Access','Kerberos Policy')) {
                     if(-not $ini.Contains($section)){continue}
                     foreach($entry in $ini[$section].GetEnumerator()) {
+                        $flag=ConvertFrom-ADAnalyzerInfFlag -Name $entry.Key -RawValue $entry.Value
                         $value=$entry.Value
-                        if($value -match '^-?\d+$'){$value=[long]$value}
-                        if($entry.Key -in 'PasswordComplexity','ClearTextPassword','RequireLogonToChangePassword','ForceLogoffWhenHourExpire','TicketValidateClient'){$value=[bool][int]$value}
-                        if($entry.Key -eq 'LSAAnonymousNameLookup') {
-                            $null=$security.Add([pscustomobject]@{Scope=$scope;Kind='SecurityOptions';Name='Network access: Allow anonymous SID/Name translation';Value=[bool][int]$value;Source=$relative})
-                        } else {
+                        if($null -ne $flag){$value=$flag.Value}
+                        elseif($entry.Key -ne 'RequireLogonToChangePassword'){
+                            if($value -match '^-?\d+$'){$value=[long]$value}
                             if($value -is [string] -and $value.StartsWith('"')){$value=(Split-AnalyzerPolicyCsv $value)[0]}
-                            $null=$security.Add([pscustomobject]@{Scope=$scope;Kind='Account';Name=$entry.Key;Value=$value;Source=$relative})
                         }
+                        $name=$entry.Key;$settingKind='Account'
+                        if($entry.Key -eq 'LSAAnonymousNameLookup'){$name='Network access: Allow anonymous SID/Name translation';$settingKind='SecurityOptions'}
+                        $record=[ordered]@{Scope=$scope;Kind=$settingKind;Name=$name;Value=$value;Source=$relative}
+                        if($null -ne $flag){$record.ValueValid=$flag.ValueValid}
+                        $null=$security.Add([pscustomobject]$record)
                     }
                 }
                 if($ini.Contains('Privilege Rights')) {
@@ -293,6 +311,10 @@ function ConvertTo-AnalyzerGpoXml {
             $ext=Add-AnalyzerGpoXmlNode $doc $side 'ExtensionData';$null=Add-AnalyzerGpoXmlNode $doc $ext 'Name' 'Security';$body=Add-AnalyzerGpoXmlNode $doc $ext 'Extension'
             foreach($setting in $settings) {
                 $node=Add-AnalyzerGpoXmlNode $doc $body $setting.Kind
+                if($null -ne $setting.PSObject.Properties['ValueValid'] -and $null -ne $setting.ValueValid){
+                    $valid=$setting.ValueValid -is [bool] -and $setting.ValueValid
+                    $null=Add-AnalyzerGpoXmlNode $doc $node 'ValueValid' ([string]$valid).ToLowerInvariant()
+                }
                 if($null -ne $setting.PSObject.Properties['SecretPresent']){
                     $null=Add-AnalyzerGpoXmlNode $doc $node 'Name' $setting.Name
                     $null=Add-AnalyzerGpoXmlNode $doc $node 'SecretPresent' ([string]$setting.SecretPresent).ToLowerInvariant()
