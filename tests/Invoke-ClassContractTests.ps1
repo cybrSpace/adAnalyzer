@@ -345,6 +345,58 @@ try{
 '@
     Assert-ClassTrue $result 'Empty export left stale content or removed the destination'
 }
+Invoke-ClassTest 'mixed unreadable and configured GPO findings retain every per-class CSV field' {
+    $r=Invoke-ClassScope @'
+$getGpos=(Get-Command Get-ADAnalyzerGpo).ScriptBlock;$getReport=(Get-Command Get-ADAnalyzerGpoReport).ScriptBlock
+$path=Join-Path ([IO.Path]::GetTempPath()) ('ad-mixed-gpo-'+[guid]::NewGuid().ToString('N')+'.csv')
+function script:Get-ADAnalyzerGpo {
+    param([switch]$All,$Domain,$Server,$Credential)
+    foreach($id in @('11111111-1111-1111-1111-111111111111','22222222-2222-2222-2222-222222222222')){
+        [pscustomobject]@{Id=[guid]$id;DisplayName=$id;CreationTime=[datetime]'2026-01-01';ModificationTime=[datetime]'2026-01-02';GPOStatus='AllSettingsEnabled'}
+    }
+}
+function script:Get-ADAnalyzerGpoReport {
+    param($Gpo,$Credential,$SidNames)
+    if([string]$Gpo.Id -eq '11111111-1111-1111-1111-111111111111'){throw 'fixture unreadable GPO'}
+    '<GPO><ReadTime>2026-01-01T00:00:00Z</ReadTime><Computer><Enabled>true</Enabled><ExtensionData><Name>Security</Name><Extension><Account><Name>MinimumPasswordLength</Name><SettingNumber>0</SettingNumber></Account></Extension></ExtensionData></Computer><User><Enabled>true</Enabled></User></GPO>'
+}
+try{
+    $environment=Get-ADEnvironment -Class GroupPolicy -FQDN target.example.invalid -WarningAction SilentlyContinue
+    $rows=@($environment.GroupPolicy.Finding);$before=ConvertTo-Json -InputObject $rows -Depth 50 -Compress
+    $environment.GroupPolicy.Finding.ExportCSV($path);$csv=@(Import-Csv -LiteralPath $path)
+    $first=@($csv | Where-Object finding -eq 'Error - GPO report unreadable')[0]
+    $second=@($csv | Where-Object finding -eq 'Defect - Minimum Password Length')[0]
+    $reverse=@($rows);[array]::Reverse($reverse);[Export]::CSV($reverse,$path)
+    $reverseCsv=@(Import-Csv -LiteralPath $path);$reverseSecond=@($reverseCsv | Where-Object finding -eq 'Defect - Minimum Password Length')[0]
+    $aggregate=@($environment.Finding);$aggregateSetting=@($aggregate | ForEach-Object {$_.object | ConvertFrom-Json} | Where-Object 'property.setting.name' -eq MinimumPasswordLength)[0]
+    [pscustomobject]@{Count=$csv.Count;ReadError=$first.ReadError;Name=$second.'property.setting.name';Value=$second.'property.setting.value';Id=$second.'gpo.id';ReverseName=$reverseSecond.'property.setting.name';Unchanged=($before -ceq (ConvertTo-Json -InputObject $rows -Depth 50 -Compress));AggregateColumns=($aggregate[0].PSObject.Properties.Name -join ',');AggregateValue=$aggregateSetting.'property.setting.value'}
+}finally{
+    Set-Item Function:script:Get-ADAnalyzerGpo $getGpos;Set-Item Function:script:Get-ADAnalyzerGpoReport $getReport
+    if([IO.File]::Exists($path)){[IO.File]::Delete($path)}
+}
+'@
+    Assert-ClassTrue ($r.Count -ge 2) 'Mixed fixture findings missing'
+    Assert-ClassEqual 'fixture unreadable GPO' $r.ReadError
+    Assert-ClassEqual MinimumPasswordLength $r.Name;Assert-ClassEqual '0' $r.Value
+    Assert-ClassEqual '22222222-2222-2222-2222-222222222222' $r.Id
+    Assert-ClassEqual MinimumPasswordLength $r.ReverseName;Assert-ClassEqual $true $r.Unchanged
+    Assert-ClassEqual 'class,finding,object' $r.AggregateColumns;Assert-ClassEqual 0 $r.AggregateValue
+}
+Invoke-ClassTest 'legacy CSV unions safe literal columns with stable case-insensitive order and skips null rows' {
+    $r=Invoke-ClassScope @'
+$rows=@([pscustomobject][ordered]@{Name='first'},$null,[pscustomobject][ordered]@{NAME='second';Secret='fixture-column-secret';Later='value';Members=[Collections.ArrayList]@('one','two');'literal[*]'='literal'})
+$before=ConvertTo-Json -InputObject $rows -Depth 20 -Compress
+$path=Join-Path ([IO.Path]::GetTempPath()) ('ad-union-csv-'+[guid]::NewGuid().ToString('N')+'.csv')
+try{
+    [Export]::CSV($rows,$path);$csv=@(Import-Csv -LiteralPath $path);$text=[IO.File]::ReadAllText($path)
+    [pscustomobject]@{Count=$csv.Count;Columns=($csv[0].PSObject.Properties.Name -join ',');Name=$csv[1].Name;Present=$csv[1].SecretPresent;Later=$csv[1].Later;Members=$csv[1].Members;Literal=$csv[1].'literal[*]';Safe=($text -notmatch 'fixture-column-secret|REDACTED');Unchanged=($before -ceq (ConvertTo-Json -InputObject $rows -Depth 20 -Compress))}
+}finally{if([IO.File]::Exists($path)){[IO.File]::Delete($path)}}
+'@
+    Assert-ClassEqual 2 $r.Count;Assert-ClassEqual 'Name,SecretPresent,Later,Members,literal[*]' $r.Columns
+    Assert-ClassEqual second $r.Name;Assert-ClassEqual 'True' $r.Present
+    Assert-ClassEqual value $r.Later;Assert-ClassEqual 'one;two' $r.Members;Assert-ClassEqual literal $r.Literal
+    Assert-ClassEqual $true $r.Safe;Assert-ClassEqual $true $r.Unchanged
+}
 if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){
     Invoke-ClassTest 'legacy CSV locked destinations fail without silently choosing another filename' {
         $result=Invoke-ClassScope @'

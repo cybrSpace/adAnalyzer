@@ -268,18 +268,34 @@ class Export {
 
                     $item = $_
 
-                    $item | ForEach-Object { $list.Add([Convert]::ToExport($_)) > $null }
+                    $item | ForEach-Object { if ($null -ne $_) { $list.Add([Convert]::ToExport($_)) > $null } }
 
                 }
                 else {
 
-                    $list.Add([Convert]::ToExport([PSCustomObject]$_)) > $null
+                    if ($null -ne $_) { $list.Add([Convert]::ToExport([PSCustomObject]$_)) > $null }
 
                 }
             
             }
 
-            $content = if ($list.Count) { ($list | ConvertTo-Csv -NoTypeInformation -ErrorAction Stop) -join [Environment]::NewLine } else { '' }
+            $columns = [ArrayList]::New()
+            $seen = [System.Collections.Generic.HashSet[string]]::New([StringComparer]::OrdinalIgnoreCase)
+            foreach ($record in $list) {
+                foreach ($property in $record.PSObject.Properties) {
+                    if ($seen.Add($property.Name)) { $null = $columns.Add($property.Name) }
+                }
+            }
+            $rows = [ArrayList]::New()
+            foreach ($record in $list) {
+                $row = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
+                foreach ($column in $columns) {
+                    $property = $record.PSObject.Properties[$column]
+                    $row[$column] = if ($null -ne $property) { $property.Value } else { $null }
+                }
+                $null = $rows.Add([PSCustomObject]$row)
+            }
+            $content = if ($rows.Count) { ($rows | ConvertTo-Csv -NoTypeInformation -ErrorAction Stop) -join [Environment]::NewLine } else { '' }
             $null = Write-ADAnalyzerFile -Path $value -Content $content
 
         }
