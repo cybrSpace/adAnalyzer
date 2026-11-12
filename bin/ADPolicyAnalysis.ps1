@@ -86,10 +86,17 @@ function ConvertFrom-ADAnalyzerPolicyPrincipal {
     [pscustomobject]@{Sid=$sid;Name=$(if(-not $sid){$token}else{$null});Valid=$valid}
 }
 
+function Test-ADAnalyzerSecurityTemplateSource {
+    param([string]$Scope,[string]$Source)
+    $relative=([string]$Source).Replace('\','/')
+    ($Scope -ieq 'Computer' -and $relative -ieq 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf') -or
+    ($Scope -ieq 'User' -and $relative -ieq 'User/Microsoft/Windows NT/SecEdit/GptTmpl.inf')
+}
+
 function ConvertFrom-ADAnalyzerRestrictedGroups {
     [CmdletBinding()]
     param([object[]]$IniSettings)
-    foreach($setting in @($IniSettings | Where-Object {$_.Section -ieq 'Group Membership'})){
+    foreach($setting in @($IniSettings | Where-Object {$_.Section -ieq 'Group Membership' -and (Test-ADAnalyzerSecurityTemplateSource -Scope $_.Scope -Source $_.Source)})){
         $match=[regex]::Match([string]$setting.Name,'^(?<group>.+)__(?<mode>Members|Memberof)$',[Text.RegularExpressions.RegexOptions]::IgnoreCase)
         $valid=$match.Success;$group=$null;$members=@();$errorText=$null
         try {
@@ -430,8 +437,7 @@ function Test-ADAnalyzerGpoPolicy {
     }
     $unsupportedInf=@($Policy.IniSettings | Where-Object {
         $_.Analyzed -is [bool] -and -not $_.Analyzed -and $_.Section -in 'System Access','Kerberos Policy' -and
-        (($_.Scope -eq 'Computer' -and ([string]$_.Source).Replace('\','/') -ieq 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf') -or
-         ($_.Scope -eq 'User' -and ([string]$_.Source).Replace('\','/') -ieq 'User/Microsoft/Windows NT/SecEdit/GptTmpl.inf'))
+        (Test-ADAnalyzerSecurityTemplateSource -Scope $_.Scope -Source $_.Source)
     })
     if($unsupportedInf.Count){New-ADAnalyzerCheck -RuleId 'GPO.Coverage.UnsupportedInfSettings' -Status Unknown -Severity Information -Category PolicyCoverage -Target ($target+'/UnsupportedInfSettings') -Observed @($unsupportedInf | Select-Object Scope,Source,Section,Name) -Expected 'Known setting in its authoritative section' -Evidence $null -Message 'Unknown or misplaced account-template entries remain inventoried; their policy behavior was not assessed.' -Applicability Unknown}
     if(@($Policy.UnparsedFiles).Count){New-ADAnalyzerCheck -RuleId 'GPO.Coverage.UnsupportedFiles' -Status Unknown -Severity Information -Category PolicyCoverage -Target ($target+'/UnsupportedFiles') -Observed @($Policy.UnparsedFiles | Select-Object Scope,Path,Kind) -Expected 'Supported parsed content' -Evidence $null -Message 'Unsupported files remain inventoried; their policy behavior was not assessed.' -Applicability Unknown}

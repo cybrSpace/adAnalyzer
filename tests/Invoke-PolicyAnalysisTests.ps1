@@ -172,11 +172,41 @@ Test-Policy 'named XML secret detection keeps booleans locations and stable raw 
     $safe=@(Get-PolicyChecks $policy | Where-Object RuleId -eq GPO.StoredSecret)
     Assert-Policy ((@($raw.CheckId | Sort-Object) -join ',') -eq (@($safe.CheckId | Sort-Object) -join ',')) 'Projection changed a secret check identity'
 }
+Test-Policy 'Restricted Groups requires authoritative source and scope before parsing membership' {
+    foreach($source in @($null,'GptTmpl.inf','Other.inf','Machine/Scripts/GptTmpl.inf','Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf.bak','User/Microsoft/Windows NT/SecEdit/GptTmpl.inf')){
+        $policy=New-PolicyFixture;$policy.IniSettings=@([pscustomobject]@{Section='Group Membership';Name='*S-1-5-32-544__Members';Value='"unterminated';Scope='Computer';Source=$source})
+        $checks=@((Get-PolicyChecks $policy) | Where-Object Category -eq RestrictedGroups)
+        Assert-Policy ($checks.Count -eq 1 -and $checks[0].Status -eq 'NotConfigured') 'Auxiliary or mismatched INI became Restricted Groups policy'
+    }
+    foreach($scope in @($null,'Unknown','User')){
+        $policy=New-PolicyFixture;$policy.IniSettings=@([pscustomobject]@{Section='Group Membership';Name='*S-1-5-32-544__Members';Value='*S-1-5-21-1-2-3-1001';Scope=$scope;Source='Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf'})
+        Assert-Policy (((Get-PolicyChecks $policy) | Where-Object Category -eq RestrictedGroups).Status -eq 'NotConfigured') 'Unknown or mismatched scope became policy'
+    }
+    $policy=New-PolicyFixture;$policy.IniSettings=@([pscustomobject]@{Section='Group Membership';Name='*S-1-5-32-544__Members';Value='"unterminated';Scope='Computer';Source='Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf'})
+    Assert-Policy (((Get-PolicyChecks $policy) | Where-Object Category -eq RestrictedGroups).Status -eq 'Invalid') 'Authoritative malformed configuration was hidden'
+}
+Test-Policy 'actual reader retains auxiliary Group Membership inventory without treating it as active policy' {
+    $root=Join-Path ([IO.Path]::GetTempPath()) ('ad-restricted-source-'+[guid]::NewGuid().ToString('N'))
+    try{
+        $authoritative=Join-Path $root 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf';$auxiliary=Join-Path $root 'Machine/Scripts/backup.inf'
+        $null=[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($authoritative));$null=[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($auxiliary))
+        $valid="[Group Membership]`n*S-1-5-32-544__Members=";$raw="[Group Membership]`n*S-1-5-32-544__Members=*S-1-5-21-1-2-3-1001`nMalformed="+'"unterminated'
+        [IO.File]::WriteAllText($authoritative,$valid,[Text.Encoding]::Unicode);[IO.File]::WriteAllText($auxiliary,$raw,[Text.Encoding]::Unicode)
+        $before=@([Convert]::ToBase64String([IO.File]::ReadAllBytes($authoritative)),[Convert]::ToBase64String([IO.File]::ReadAllBytes($auxiliary)))
+        $policy=Read-ADAnalyzerGpo $root;$checks=@((Get-PolicyChecks $policy) | Where-Object Category -eq RestrictedGroups)
+        Assert-Policy ($checks.Count -eq 1 -and $checks[0].Status -eq 'Pass' -and @($checks[0].Observed.Members).Count -eq 0) 'Auxiliary content changed active membership findings'
+        Assert-Policy (@($policy.IniSettings).Count -eq 3 -and @($policy.IniSettings | Where-Object Analyzed).Count -eq 0) 'Raw Group Membership inventory changed'
+        Assert-Policy (($policy.IniSettings | Where-Object Name -eq Malformed).Value -ceq '"unterminated') 'Auxiliary value was changed'
+        [xml]$xml=ConvertTo-AnalyzerGpoXml -Gpo $script:Gpo -Parsed $policy
+        Assert-Policy ($xml.SelectNodes('//ExtensionData[Name="Ini"]/Extension/Record').Count -eq 3) 'Canonical raw INI inventory was dropped'
+        Assert-Policy ([Convert]::ToBase64String([IO.File]::ReadAllBytes($authoritative)) -ceq $before[0] -and [Convert]::ToBase64String([IO.File]::ReadAllBytes($auxiliary)) -ceq $before[1]) 'Source template bytes changed'
+    }finally{if([IO.Directory]::Exists($root)){[IO.Directory]::Delete($root,$true)}}
+}
 Test-Policy 'RestrictedGroups preserves Members versus MemberOf and empty assignments' {
     $policy=New-PolicyFixture;$policy.IniSettings=@(
-        [pscustomobject]@{Section='Group Membership';Name='*S-1-5-32-544__Members';Value='*S-1-5-21-1-2-3-1001';Scope='Computer';Source='GptTmpl.inf'}
-        [pscustomobject]@{Section='Group Membership';Name='*S-1-5-21-1-2-3-1002__Memberof';Value='*S-1-5-32-544';Scope='Computer';Source='GptTmpl.inf'}
-        [pscustomobject]@{Section='Group Membership';Name='*S-1-5-32-544__Members';Value='';Scope='User';Source='Other.inf'}
+        [pscustomobject]@{Section='Group Membership';Name='*S-1-5-32-544__Members';Value='*S-1-5-21-1-2-3-1001';Scope='Computer';Source='MACHINE\Microsoft\Windows NT\SecEdit\GPTTMPL.INF'}
+        [pscustomobject]@{Section='Group Membership';Name='*S-1-5-21-1-2-3-1002__Memberof';Value='*S-1-5-32-544';Scope='Computer';Source='Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf'}
+        [pscustomobject]@{Section='Group Membership';Name='*S-1-5-32-544__Members';Value='';Scope='User';Source='USER/Microsoft/Windows NT/SecEdit/GptTmpl.inf'}
     )
     $checks=@((Get-PolicyChecks $policy) | Where-Object Category -eq RestrictedGroups)
     Assert-Policy (@($checks | Where-Object Status -eq Fail).Count -eq 2) 'Unexpected principals were not found through both membership directions'
