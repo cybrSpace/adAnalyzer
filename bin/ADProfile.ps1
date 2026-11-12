@@ -92,6 +92,18 @@ function Merge-ADAnalyzerProfile {
     }
 }
 
+function Get-ADAnalyzerHostRuleIdentity {
+    param([Collections.IDictionary]$Rule,[string]$Target,[string[]]$Parts=@())
+    if(-not $Rule.Contains('Id')){return $Target}
+    if($Rule.Id -isnot [string] -or [string]::IsNullOrWhiteSpace($Rule.Id) -or $Rule.Id.IndexOf([char]0) -ge 0){throw 'Host rule Id must be a nonempty string without NUL characters'}
+    # Length prefixes keep literal path separators and rule IDs unambiguous.
+    $encoded=[Text.StringBuilder]::new()
+    foreach($part in @($Target)+@($Parts)+@($Rule.Id)){
+        $null=$encoded.Append($part.Length.ToString([Globalization.CultureInfo]::InvariantCulture)).Append(':').Append($part)
+    }
+    'HostRuleId'+[char]0+$encoded.ToString()
+}
+
 function Import-ADAnalyzerProfile {
     [CmdletBinding(DefaultParameterSetName='Object')]
     param([Parameter(Mandatory,ParameterSetName='Path')][string]$Path,[Parameter(ParameterSetName='Object')][AllowNull()]$Profile)
@@ -142,18 +154,24 @@ function Import-ADAnalyzerProfile {
         if(-not $rule.Attribute -or $rule.Type -notin @('User','Service') -or ($rule.Match -and $rule.Match -notin @('Equals','Regex'))){throw 'Invalid account classification attribute rule'}
     }
     foreach($value in @($result.Remediation.ApprovedObjectGuids)+@($result.Remediation.ExcludedObjectGuids)){$id=[guid]::Empty;if(-not [guid]::TryParse([string]$value,[ref]$id)){throw 'Remediation object identities must be GUIDs'}}
+    $hostServiceIds=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach($rule in @($result.Host.Services)) {
         if($rule -isnot [Collections.IDictionary] -or $rule.Name -isnot [string] -or [string]::IsNullOrWhiteSpace($rule.Name) -or $rule.State -isnot [string] -or [string]::IsNullOrWhiteSpace($rule.State)){throw 'Host service rules require nonempty string Name and State'}
+        if($rule.Name.IndexOf([char]0) -ge 0){throw 'Host service Name cannot contain NUL characters'}
         if($rule.Contains('StartMode') -and $null -ne $rule.StartMode -and $rule.StartMode -isnot [string]){throw 'Host service StartMode must be a string or null'}
+        if(-not $hostServiceIds.Add((Get-ADAnalyzerHostRuleIdentity -Rule $rule -Target $rule.Name -Parts @($rule.Name)))){throw 'Duplicate host service rule identity; use distinct Id values for separate expectations'}
     }
+    $hostRegistryIds=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach($rule in @($result.Host.RegistryRules)) {
         if($rule -isnot [Collections.IDictionary] -or $rule.Key -isnot [string] -or [string]::IsNullOrWhiteSpace($rule.Key) -or $rule.ValueName -isnot [string]){throw 'Host registry rules require a nonempty string Key and a string ValueName'}
+        if($rule.Key.IndexOf([char]0) -ge 0 -or $rule.ValueName.IndexOf([char]0) -ge 0){throw 'Host registry identities cannot contain NUL characters'}
         if($rule.Contains('Type')){
             $registryType=0
             if(-not [int]::TryParse([string]$rule.Type,[ref]$registryType) -or $registryType -notin 1,2,3,4,7,11){throw 'Host registry Type must be 1, 2, 3, 4, 7, or 11'}
             $rule.Type=$registryType
         }
         if($rule.Contains('Operator') -and $rule.Operator -notin @('Equals','NotEquals','In','NotIn','Minimum','Maximum')){throw 'Unsupported host registry operator'}
+        if(-not $hostRegistryIds.Add((Get-ADAnalyzerHostRuleIdentity -Rule $rule -Target ($rule.Key+'/'+$rule.ValueName) -Parts @($rule.Key,$rule.ValueName)))){throw 'Duplicate host registry rule identity; use distinct Id values for separate expectations'}
     }
     foreach($rule in @($result.Host.AuditRules)) {
         $id=[guid]::Empty

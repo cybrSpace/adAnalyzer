@@ -56,6 +56,51 @@ Test-HostPolicy 'declared host registry types require observed matching type evi
     $record.Registry[0].Type=4
     Assert-Equal Pass (@(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy) | Where-Object RuleId -eq HOST.REGISTRY).Status
 }
+Test-HostPolicy 'optional profile rule IDs keep shared host targets independent and stable' {
+    $copy=Get-ADAnalyzerDefaultProfile
+    $copy.Host.Services=@(@{Id='running';Name='Spooler';State='Running'},@{Id='stopped';Name='spooler';State='Stopped'})
+    $copy.Host.RegistryRules=@(@{Id='zero';Key='SYSTEM\Fixture';ValueName='Enabled';Expected=0},@{Id='one';Key='system\fixture';ValueName='enabled';Expected=1})
+    $before=ConvertTo-Json -InputObject $copy -Depth 30 -Compress
+    $checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy | Where-Object {$_.RuleId -in 'HOST.SERVICE','HOST.REGISTRY'})
+    Assert-Equal 4 $checks.Count;Assert-Equal 0 @($checks | Group-Object CheckId | Where-Object Count -gt 1).Count
+    Assert-Equal 2 @($checks | Where-Object Status -eq Pass).Count;Assert-Equal 2 @($checks | Where-Object Status -eq Fail).Count
+    Assert-Equal $before (ConvertTo-Json -InputObject $copy -Depth 30 -Compress)
+    $byId=@{};foreach($check in $checks){$byId[$check.RuleId+'/'+$check.Evidence.ProfileRuleId]=$check.CheckId}
+    [array]::Reverse($copy.Host.Services);[array]::Reverse($copy.Host.RegistryRules)
+    $copy.Host.Services[0].State='Running';$copy.Host.RegistryRules[0].Expected=0
+    foreach($check in @(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy | Where-Object {$_.RuleId -in 'HOST.SERVICE','HOST.REGISTRY'})){
+        Assert-Equal $byId[$check.RuleId+'/'+$check.Evidence.ProfileRuleId] $check.CheckId
+        Assert-True ($check.Target -notmatch 'HostRuleId' -and $check.Target.IndexOf([char]0) -lt 0) 'Internal identity escaped into readable target'
+    }
+    $copy=Get-ADAnalyzerDefaultProfile;$copy.Host.Services=@(@{Name='Spooler';State='Stopped'});$copy.Host.RegistryRules=@(@{Key='SYSTEM\Fixture';ValueName='Enabled';Expected=0})
+    $checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy)
+    Assert-Equal (New-ADAnalyzerCheck -RuleId HOST.SERVICE -Target ($hostRecord.ComputerName+'/Service/Spooler') -Status Pass).CheckId ($checks | Where-Object RuleId -eq HOST.SERVICE).CheckId
+    Assert-Equal (New-ADAnalyzerCheck -RuleId HOST.REGISTRY -Target ($hostRecord.ComputerName+'/Registry/SYSTEM\Fixture/Enabled') -Status Pass).CheckId ($checks | Where-Object RuleId -eq HOST.REGISTRY).CheckId
+    $copy.Host.Services+=@(@{Id='zero';Name='Other';State='Running'});$copy.Host.RegistryRules[0].Id='zero'
+    $null=Import-ADAnalyzerProfile -Profile $copy
+}
+Test-HostPolicy 'named registry identities distinguish literal key and value separators' {
+    $copy=Get-ADAnalyzerDefaultProfile;$copy.Host.RegistryRules=@(@{Id='shared';Key='SYSTEM\Fixture';ValueName='part/Enabled';Expected=0},@{Id='shared';Key='SYSTEM\Fixture/part';ValueName='Enabled';Expected=0})
+    $record=[pscustomobject]@{ComputerName='fixture';Services=@();Registry=@([pscustomobject]@{Path='SYSTEM\Fixture';Name='part/Enabled';Status='Observed';Value=0},[pscustomobject]@{Path='SYSTEM\Fixture/part';Name='Enabled';Status='Observed';Value=0})}
+    $checks=@(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy | Where-Object RuleId -eq HOST.REGISTRY)
+    Assert-Equal 2 $checks.Count;Assert-Equal 2 @($checks | Where-Object Status -eq Pass).Count
+    Assert-Equal 0 @($checks | Group-Object CheckId | Where-Object Count -gt 1).Count
+    Assert-Equal 2 @($checks | ForEach-Object {$_.Evidence.RegistryPath} | Select-Object -Unique).Count
+}
+Test-HostPolicy 'ambiguous or malformed host profile IDs fail before observations' {
+    foreach($kind in @('Services','RegistryRules')){
+        $base=if($kind -eq 'Services'){@{Name='Spooler';State='Running'}}else{@{Key='SYSTEM\Fixture';ValueName='Enabled';Expected=0}}
+        $cases=@(,@($base.Clone(),$base.Clone()))
+        $first=$base.Clone();$second=$base.Clone();$first.Id='same';$second.Id='SAME';$cases+=,@($first,$second)
+        foreach($invalid in @($null,'',' ',1,@('one','two'),('bad'+[char]0+'id'))){$rule=$base.Clone();$rule.Id=$invalid;$cases+=,@($rule)}
+        foreach($rules in $cases){
+            $copy=Get-ADAnalyzerDefaultProfile;$copy.Host[$kind]=@($rules);$copy.Host.AuditRules=$profile.Host.AuditRules;$copy.Host.CertificateEndpoints=$profile.Host.CertificateEndpoints
+            $audit=$script:AuditCalls;$tls=$script:TlsCalls;$caught=$false
+            try{$null=Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy}catch{$caught=$true}
+            Assert-True $caught 'Ambiguous or malformed host identity accepted';Assert-Equal $audit $script:AuditCalls;Assert-Equal $tls $script:TlsCalls
+        }
+    }
+}
 Test-HostPolicy 'numeric audit masks verify success and failure without localized text' {
     $checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile -Credential $script:Credential)
     Assert-Equal Pass ($checks | Where-Object RuleId -eq HOST.AUDIT_POLICY).Status

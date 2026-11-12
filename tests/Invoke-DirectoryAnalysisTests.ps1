@@ -287,9 +287,9 @@ function Invoke-ConfiguredHostFixture([hashtable]$Profile,[string]$Mode='Normal'
 }
 Invoke-DirectoryTest 'custom host configuration reaches bounded service and typed registry collection' {
     $profile=New-DirectoryProfile;$profile.Analysis.HostTimeoutSeconds=17
-    $service='Custom''Quoted\"Name$';$profile.Host.Services=@(@{Name=$service;State='Running';StartMode='Auto'},@{Name=$service.ToUpperInvariant();State='Running'})
+    $service='Custom''Quoted\"Name$';$profile.Host.Services=@(@{Name=$service;State='Running';StartMode='Auto'},@{Id='alternate';Name=$service.ToUpperInvariant();State='Running'})
     $profile.Host.RegistryRules=@('Text','Expand','Bytes','Flag','Multi','Wide' | ForEach-Object {@{Key='SYSTEM\Custom';ValueName=$_;Expected=$null}})
-    $profile.Host.RegistryRules+=@(@{Key='system\custom';ValueName='FLAG';Expected=0})
+    $profile.Host.RegistryRules+=@(@{Id='alternate';Key='system\custom';ValueName='FLAG';Expected=0})
     $before=ConvertTo-Json -InputObject $profile -Depth 30 -Compress;$r=Invoke-ConfiguredHostFixture $profile
     $hostData=$r.Data.Hosts[0];Assert-DirectoryEqual 1 @($hostData.Services).Count;Assert-DirectoryEqual $service $hostData.Services[0].Name
     $rows=@($hostData.Registry | Where-Object Path -ieq 'SYSTEM\Custom');Assert-DirectoryEqual 6 $rows.Count
@@ -308,18 +308,19 @@ Invoke-DirectoryTest 'actual custom host collection feeds passing failing and un
     foreach($file in @('ADGpo','ADPolicyAnalysis','ADHostAnalysis','ADOperations','ADAssessment')){. (Join-Path $RepositoryRoot ('bin/'+$file+'.ps1'))}
     $profile=New-DirectoryProfile
     $profile.Host.Services=@(@{Name='Custom''Quoted\"Name$';State='Running';StartMode='Auto'})
-    $profile.Host.RegistryRules=@(@{Key='SYSTEM\Custom';ValueName='Flag';Expected=0;Type=4},@{Key='SYSTEM\Custom';ValueName='Text';Expected='';Type=1},@{Key='SYSTEM\Custom';ValueName='Multi';Expected=@('one','two');Type=7})
+    $profile.Host.RegistryRules=@(@{Key='SYSTEM\Custom';ValueName='Flag';Expected=0;Type=4},@{Key='SYSTEM\Custom';ValueName='Text';Expected='';Type=1},@{Key='SYSTEM\Custom';ValueName='Multi';Expected=@('one','two');Type=7},@{Id='nonzero';Key='SYSTEM\Custom';ValueName='Flag';Expected=1;Type=4})
     $r=Invoke-ConfiguredHostFixture $profile
     $checks=@(Test-ADAnalyzerHostPolicy -Hosts $r.Data.Hosts -Profile $profile)
     Assert-DirectoryEqual 4 @($checks | Where-Object {$_.RuleId -in 'HOST.SERVICE','HOST.REGISTRY' -and $_.Status -eq 'Pass'}).Count
+    Assert-DirectoryEqual 1 @($checks | Where-Object {$_.RuleId -eq 'HOST.REGISTRY' -and $_.Status -eq 'Fail'}).Count
     $r.Data | Add-Member -NotePropertyName HostChecks -NotePropertyValue $checks
     $assessment=Invoke-ADAnalyzerAssessment -DirectoryData $r.Data -Profile $profile
     Assert-DirectoryEqual 4 @($assessment.Checks | Where-Object {$_.RuleId -in 'HOST.SERVICE','HOST.REGISTRY' -and $_.Status -eq 'Pass'}).Count
     $profile.Host.Services[0].State='Stopped';$profile.Host.RegistryRules[0].Expected=1
     $checks=@(Test-ADAnalyzerHostPolicy -Hosts $r.Data.Hosts -Profile $profile)
-    Assert-DirectoryEqual 2 @($checks | Where-Object {$_.RuleId -in 'HOST.SERVICE','HOST.REGISTRY' -and $_.Status -eq 'Fail'}).Count
+    Assert-DirectoryEqual 3 @($checks | Where-Object {$_.RuleId -in 'HOST.SERVICE','HOST.REGISTRY' -and $_.Status -eq 'Fail'}).Count
     $r=Invoke-ConfiguredHostFixture $profile GetterDenied;$checks=@(Test-ADAnalyzerHostPolicy -Hosts $r.Data.Hosts -Profile $profile)
-    Assert-DirectoryEqual 3 @($checks | Where-Object {$_.RuleId -eq 'HOST.REGISTRY' -and $_.Status -eq 'Unknown'}).Count
+    Assert-DirectoryEqual 4 @($checks | Where-Object {$_.RuleId -eq 'HOST.REGISTRY' -and $_.Status -eq 'Unknown'}).Count
 }
 Invoke-DirectoryTest 'unavailable custom registry observations remain Unknown and always close their session' {
     foreach($mode in @('Missing','Denied','Throw','GetterDenied')){
