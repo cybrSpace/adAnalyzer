@@ -207,7 +207,8 @@ try {
             $lease=Enter-ADAnalyzerJournalLease (Join-Path $psDirectory 'journal.json')
             try{
                 $before=$script:Reads
-                Assert-Throws {Apply-FixturePlan $plan}
+                $message='';try{$null=Apply-FixturePlan $plan}catch{$message=$_.Exception.Message}
+                Assert-True ($message -match 'journal.*lock') 'Relative and absolute paths did not contend for the same ownership'
                 Assert-Equal $before $script:Reads
             }finally{$lease.Dispose()}
         }finally{Set-Location -LiteralPath $location.Path;[Environment]::CurrentDirectory=$dotnet}
