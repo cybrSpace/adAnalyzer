@@ -51,6 +51,14 @@ if ($normalized['samaccountname'] -ne 'fixture-user' -or $normalized['enabled'] 
 }
 Write-Host 'PASS populated native ADUser attributes normalize without querying a domain'
 
+$nativeSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-21-1-2-3-1001')
+$nativeDate = [datetime]::UtcNow
+$typed = [Format]::ValueCollection([ordered]@{SID=$nativeSid;WhenChanged=$nativeDate;Password='fixture-only'}, @())
+if (-not [object]::ReferenceEquals($typed['SID'], $nativeSid) -or $typed['WhenChanged'] -isnot [datetime] -or $typed['WhenChanged'] -ne $nativeDate -or $typed.Contains('Password') -or $typed['PasswordPresent'] -ne $true) {
+    throw 'Native SID/date or secret-presence normalization contract failed'
+}
+Write-Host 'PASS native SID and date contracts survive secret-presence normalization'
+
 try {
     $environment = [ADEnvironment]::Initialize('fixture.invalid', [System.Collections.ArrayList]@('User', 'Group', 'Computer', 'GroupPolicy'))
     if ($environment -isnot [ADTarget] -or $environment.Finding -isnot [Finding]) {

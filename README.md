@@ -73,6 +73,8 @@ Extract a matching Microsoft Security Compliance Toolkit GPO backup and pass its
 
 Automatic finding-label disable/delete is retired. `Set-ADEnvironment` now creates an inert plan by default; `Start-ADAnalyzer -Operation remediate` is a plan alias. Legacy direct mutation methods reject execution. Existing `Get-ADEnvironment` class reports remain available, but independent new scans should use `Get-ADAnalyzerAssessment`; a stale legacy class instance cannot analyze another instance's target.
 
+Legacy user/group `.Data` contains analysis-required/default metadata and approved nonsecret classification attributes, rather than a wildcard LDAP inventory. Unexpected returned secret-bearing fields are reduced to boolean presence before retention. Native SID/date values remain intact for legacy consumers; secret-valued classification attributes are rejected or reported as invalid instead of queried.
+
 ```powershell
 $profile.Remediation.AllowDisable = $true
 $profile.Remediation.ApprovedObjectGuids = @('<explicit approved object GUID>')

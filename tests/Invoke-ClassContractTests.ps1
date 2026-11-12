@@ -70,10 +70,14 @@ $script:QueryServers = [System.Collections.ArrayList]::new()
 $script:FailUserQuery = $false
 $script:FixturePolicyXml = $null
 $script:FailGpoRead = $false
+$script:UnexpectedSecrets = $false
+$script:LastUserProperties = @()
+$script:LastGroupProperties = @()
+$script:UserQueryCount = 0
 $script:UserRecord = [ordered]@{
     samaccountname='adoe'; givenName='Alice'; surName='Doe'; name='Alice Doe'
     userPrincipalName='adoe@example.invalid'; distinguishedName='CN=Alice Doe,OU=People,DC=example,DC=invalid'
-    enabled=$true; userAccountControl=512; adminCount=1; memberOf=@()
+    enabled=$true; userAccountControl=512; adminCount=1; memberOf=@(); primaryGroupID=513
     passwordlastset=[datetime]::Now.AddDays(-10); lastlogondate=[datetime]::Now.AddDays(-80)
     whenCreated=[datetime]::Now.AddDays(-100); whenChanged=[datetime]::Now.AddDays(-5)
     SID=[pscustomobject]@{Value='S-1-5-21-1-2-3-1001'}
@@ -107,8 +111,16 @@ function script:Get-ADDomain {
 function script:Get-ADForest { param($Server,$ErrorAction) $forest=[Microsoft.ActiveDirectory.Management.ADEntity]::new(); $forest.RootDomain='example.invalid'; return $forest }
 function script:Get-ADOptionalFeature { param($Filter,$Properties,$Server,$ErrorAction) [pscustomobject]@{Name='Recycle Bin Feature'; EnabledScopes=@('fixture'); RequiredDomainMode='fixture'; RequiredForestMode='fixture'; DistinguishedName='CN=Feature'} }
 function script:Get-ADObject { param($Filter,$Properties,$Server,$ErrorAction) $script:UserRecord; $script:GroupRecord; $script:ComputerRecord }
-function script:Get-ADUser { param($Filter,$Properties,$Server,$ErrorAction) if($script:FailUserQuery){throw 'fixture query failure'}; return $script:UserRecord }
-function script:Get-ADGroup { param($Filter,$Properties,$Server,$ErrorAction) return $script:GroupRecord }
+function script:Select-ClassFixture($Record,$Properties) {
+    $result=[ordered]@{}
+    foreach($key in $Record.Keys){
+        if('*' -in $Properties -or $key -in $Properties -or $key -in @('samaccountname','name','distinguishedName','objectGUID','objectClass','SID','enabled')){$result[$key]=$Record[$key]}
+    }
+    if($script:UnexpectedSecrets){$result['userPassword']='unit3-secret';$result['Credential']=[pscredential]::new('fixture',(ConvertTo-SecureString 'unit3-credential' -AsPlainText -Force))}
+    return $result
+}
+function script:Get-ADUser { param($Filter,$Properties,$Server,$ErrorAction) $script:UserQueryCount++;$script:LastUserProperties=@($Properties);if($script:FailUserQuery){throw 'fixture query failure'}; Select-ClassFixture $script:UserRecord $Properties }
+function script:Get-ADGroup { param($Filter,$Properties,$Server,$ErrorAction) $script:LastGroupProperties=@($Properties);Select-ClassFixture $script:GroupRecord $Properties }
 function script:Get-ADComputer { param($Filter,$Properties,$Server,$ErrorAction) return $script:ComputerRecord }
 function script:Get-ADAnalyzerGpo { param([switch]$All,$Domain,$Server,$ErrorAction,$Credential) $script:GpoQueryCredential=$Credential; [pscustomobject]@{DisplayName='FixturePolicy';CreationTime=[datetime]::Now;ModificationTime=[datetime]::Now;GPOStatus='AllSettingsEnabled';Id=[guid]::Empty} }
 function script:Get-ADAnalyzerGpoReport { param($Gpo,$SidNames,$Credential) $script:GpoReportCredential=$Credential; if($script:FailGpoRead){throw 'fixture unreadable SYSVOL'}; if($script:FixturePolicyXml){return $script:FixturePolicyXml}; '<GPO><ReadTime>2026-01-01T00:00:00</ReadTime><Computer><Enabled>true</Enabled></Computer><User><Enabled>true</Enabled></User></GPO>' }
@@ -309,6 +321,38 @@ try {
 } finally {Remove-Item -LiteralPath $path -Force}
 '@
     Assert-ClassTrue $result 'Export changed the source or exposed a secret'
+}
+Invoke-ClassTest 'legacy queries use required metadata and retain only presence for unexpected secrets' {
+    $result=Invoke-ClassScope @'
+$user=$script:UserRecord;$group=$script:GroupRecord
+try {
+    $script:UserRecord=[ordered]@{};foreach($key in $user.Keys){$script:UserRecord[$key]=$user[$key]}
+    $script:GroupRecord=[ordered]@{};foreach($key in $group.Keys){$script:GroupRecord[$key]=$group[$key]}
+    $script:UnexpectedSecrets=$true
+    $script:UserRecord.primaryGroupID=512;$script:UserRecord.employeeType='Application'
+    $script:GroupRecord.SID=[pscustomobject]@{Value='S-1-5-21-1-2-3-512'}
+    $profile=Get-ADAnalyzerDefaultProfile;$profile.AccountClassification.AttributeRules=@(@{Attribute='employeeType';Type='Service';Value='Application'})
+    $data=Get-ADEnvironment -Class User,Group -FQDN 'target.example.invalid' -Profile $profile
+    $u=@($data.User.Data.Values)[0];$g=@($data.Group.Data.Values)[0];$report=@($data.User.Report.Values)[0]
+    $queries=@($script:LastUserProperties)+@($script:LastGroupProperties)
+    $safe=@($queries | Where-Object {$_ -eq '*' -or (Test-ADAnalyzerSecretName $_)}).Count -eq 0
+    $safe -and 'primaryGroupID' -in $script:LastUserProperties -and 'employeeType' -in $script:LastUserProperties -and
+        $u.userPasswordPresent -eq $true -and $g.userPasswordPresent -eq $true -and $u.CredentialPresent -eq $true -and
+        -not $u.Contains('userPassword') -and -not $g.Contains('Credential') -and
+        $u.SID.Value -eq $user.SID.Value -and $u.passwordlastset -is [datetime] -and
+        $report.acctType -eq 'non-personal' -and 'S-1-5-21-1-2-3-512' -in $report.privilegedGroup
+} finally {$script:UserRecord=$user;$script:GroupRecord=$group;$script:UnexpectedSecrets=$false;[ADEnvironment]::Close()}
+'@
+    Assert-ClassTrue $result 'Legacy metadata/secret retention contract failed'
+}
+Invoke-ClassTest 'legacy classification rejects secret-valued attributes before account queries' {
+    $result=Invoke-ClassScope @'
+$before=$script:UserQueryCount;$rejected=$false
+$profile=Get-ADAnalyzerDefaultProfile;$profile.AccountClassification.AttributeRules=@(@{Attribute='apiKey';Type='Service';Value='unit3-secret'})
+try{$null=Get-ADEnvironment -Class User -FQDN 'target.example.invalid' -Profile $profile}catch{$rejected=$_.Exception.Message -notmatch 'unit3-secret'}
+$rejected -and $script:UserQueryCount -eq $before
+'@
+    Assert-ClassTrue $result 'Secret classification attributes were queried'
 }
 
 $temporaryDirectory=Join-Path ([IO.Path]::GetTempPath()) ('ad-class-tests-'+[guid]::NewGuid())

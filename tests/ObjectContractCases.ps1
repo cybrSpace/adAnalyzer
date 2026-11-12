@@ -23,6 +23,20 @@ $n=[Format]::ValueCollection([pscustomobject]@{Name='Alice';Groups=@('one','two'
     Assert-ClassEqual 2 $r.Count
     Assert-ClassEqual $false $r.Hidden
 }
+Invoke-ClassTest 'legacy normalization preserves native metadata and only boolean secret presence' {
+    $r=Invoke-ClassScope @'
+$source=[ordered]@{SID=[pscustomobject]@{Value='S-1-5-21-1-2-3-1001'};WhenChanged=[datetime]::UtcNow;Password='unit3-secret';PasswordPresent=$false;apiKey=@();Xml='<Properties name="DefaultPassword" value="unit3-xml-secret"/>';PasswordHistorySize=12;Members=@('one','two')}
+$n=[Format]::ValueCollection($source,@())
+$opposite=[Format]::ValueCollection([ordered]@{PasswordPresent=$false;Password='unit3-secret'},@())
+[pscustomobject]@{Presence=$n.PasswordPresent;OtherOrder=$opposite.PasswordPresent;Empty=$n.apiKeyPresent;HasValue=$n.Contains('Password');HasUnqueried=$n.Contains('userPasswordPresent');NativeSID=[object]::ReferenceEquals($n.SID,$source.SID);NativeDate=$n.WhenChanged -is [datetime];Xml=$n.Xml;Threshold=$n.PasswordHistorySize;Members=$n.Members.Count;Original=$source.Password;OriginalFlag=$source.PasswordPresent}
+'@
+    Assert-ClassEqual $true $r.Presence;Assert-ClassEqual $true $r.OtherOrder;Assert-ClassEqual $false $r.Empty
+    Assert-ClassEqual $false $r.HasValue;Assert-ClassEqual $false $r.HasUnqueried
+    Assert-ClassTrue ($r.NativeSID -and $r.NativeDate) 'Native metadata types changed'
+    Assert-ClassTrue ($r.Xml -notmatch 'unit3-xml-secret|REDACTED') 'XML secret retained'
+    Assert-ClassEqual 12 $r.Threshold;Assert-ClassEqual 2 $r.Members
+    Assert-ClassEqual 'unit3-secret' $r.Original;Assert-ClassEqual $false $r.OriginalFlag
+}
 
 Invoke-ClassTest 'value normalization handles AD attribute value collections' {
     $r=Invoke-ClassScope @'

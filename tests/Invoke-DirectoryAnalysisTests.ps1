@@ -275,6 +275,11 @@ Invoke-DirectoryTest 'attribute classification is collected and unsafe credentia
         Assert-DirectoryEqual 'Unknown' $data.Users[0].AccountType
         Assert-DirectoryTrue ($data.Errors.Count -gt 0) 'Unsafe profile fields need explicit errors'
         Assert-DirectoryEqual 0 @($script:Queries | Where-Object {$_.Parameters.Properties -contains 'msDS-ManagedPassword'}).Count
+        $profile.AccountClassification.AttributeRules=@(@{Attribute='apiKey';Type='Service';Value='unit3-secret'})
+        $script:Queries.Clear();$data=Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile $profile
+        Assert-DirectoryEqual 'Unknown' $data.Users[0].AccountType
+        Assert-DirectoryTrue ($data.Errors.Count -gt 0) 'Generic secret fields need explicit errors'
+        Assert-DirectoryEqual 0 @($script:Queries | Where-Object {$_.Parameters.Properties -contains 'apiKey'}).Count
     }finally{$script:User.PSObject.Properties.Remove('employeeType')}
 }
 Invoke-DirectoryTest 'multiple ACL principals and identical ACEs produce unique stable checks' {

@@ -218,6 +218,27 @@ class Format {
                 elseif ($items.Count -eq 1) { $item = $items[0] }
                 else { $item = [ArrayList]$items }
             }
+            $keyName = [string]$key
+            if ((Test-ADAnalyzerSecretName $keyName) -or $item -is [pscredential] -or $item -is [Security.SecureString]) {
+                $flag = $keyName + 'Present'
+                $present = Test-ADAnalyzerSecretPresence $item
+                if ($object.Contains($flag) -and $object[$flag] -is [bool]) { $present = $present -or $object[$flag] }
+                $object[$flag] = [bool]$present
+                continue
+            }
+            if ($keyName.EndsWith('Present', [StringComparison]::OrdinalIgnoreCase) -and (Test-ADAnalyzerSecretName ($keyName.Substring(0, $keyName.Length - 7)))) {
+                $recorded = $false
+                if (-not [bool]::TryParse([string]$item, [ref]$recorded)) { $recorded = Test-ADAnalyzerSecretPresence $item }
+                if ($object.Contains($keyName) -and $object[$keyName] -is [bool]) { $recorded = $recorded -or $object[$keyName] }
+                $object[$keyName] = [bool]$recorded
+                continue
+            }
+            if ($item -is [string]) { $item = ConvertTo-ADAnalyzerSecretIndicatorText $item }
+            elseif ($item -is [ArrayList]) {
+                for ($index = 0; $index -lt $item.Count; $index++) {
+                    if ($item[$index] -is [string]) { $item[$index] = ConvertTo-ADAnalyzerSecretIndicatorText $item[$index] }
+                }
+            }
             $object[$key] = $item
         }
         return $object
@@ -987,7 +1008,15 @@ class UserData : Data {
 
             $table = [UserTable]::SetDefault()
 
-            Get-ADUser -Filter * -Properties * -Server ([ADTarget]::FQDN) -ErrorAction Stop | ForEach-Object {
+            $properties = @($table.Properties.List) + @('primaryGroupID','objectGUID','objectClass')
+            $profile = Get-ADAnalyzerLegacyProfile
+            foreach ($rule in @($profile.AccountClassification.AttributeRules)) {
+                $attribute = [string]$rule.Attribute
+                if (-not (Test-ADAnalyzerClassificationAttribute $attribute)) { throw 'Invalid or secret-valued classification attribute' }
+                $properties += $attribute
+            }
+            $properties = @($properties | Select-Object -Unique)
+            Get-ADUser -Filter * -Properties $properties -Server ([ADTarget]::FQDN) -ErrorAction Stop | ForEach-Object {
                 $table[$_.($table.Properties.Key)] = [Format]::ValueCollection($_, $table.Properties.Exclude)
             }
 
@@ -1386,7 +1415,7 @@ class GroupData : Data {
 
             $table = [GroupTable]::SetDefault()
 
-            Get-ADGroup -Filter * -Properties * -Server ([ADTarget]::FQDN) -ErrorAction Stop | ForEach-Object {
+            Get-ADGroup -Filter * -Properties @($table.Properties.List) -Server ([ADTarget]::FQDN) -ErrorAction Stop | ForEach-Object {
                 $table[$_.($table.Properties.Key)] = [Format]::ValueCollection($_, $table.Properties.Exclude)
             }
 

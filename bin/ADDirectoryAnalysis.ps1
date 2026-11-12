@@ -1,4 +1,5 @@
 # Read-only directory assessment. No managed password values are requested.
+. (Join-Path $PSScriptRoot 'ADSecret.ps1')
 function Get-ADAnalyzerDirectoryField {
     param($InputObject,[string]$Name,$Default=$null)
     if($null -eq $InputObject){return $Default}
@@ -34,7 +35,7 @@ function Get-ADAnalyzerDirectoryTarget {
 }
 function Test-ADAnalyzerClassificationAttribute {
     param([string]$Name)
-    $Name -match '^[A-Za-z][A-Za-z0-9-]*$' -and $Name -notin @('unicodePwd','userPassword','dBCSPwd','ntPwdHistory','lmPwdHistory','supplementalCredentials','msDS-ManagedPassword','msDS-ManagedPasswordId','msLAPS-Password','msLAPS-EncryptedPassword','msLAPS-EncryptedPasswordHistory','msLAPS-EncryptedDSRMPassword','msLAPS-EncryptedDSRMPasswordHistory','ms-Mcs-AdmPwd')
+    $Name -match '^[A-Za-z][A-Za-z0-9-]*$' -and -not (Test-ADAnalyzerSecretName $Name)
 }
 function New-ADAnalyzerMembershipIndex {
     param([object[]]$Groups=@())
