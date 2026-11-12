@@ -267,23 +267,48 @@ $failed -and $script:FixtureDrives.Count -eq $before
     Assert-ClassTrue $result 'A failed connection check must not be ignored'
 }
 
-Invoke-ClassTest 'approved remediation executes mocked actions against the requested target' {
+Invoke-ClassTest 'legacy automatic remediation is rejected without directory writes' {
     $result=Invoke-ClassScope @'
-$script:AllowFixtureWrites=$true; $script:FixtureWrites=0
-try {
-    $e=Set-ADEnvironment -Class User -FQDN 'target.example.invalid' -Confirm:$false
-    [pscustomobject]@{Writes=$script:FixtureWrites;Target=$script:LastMutationServer;Result=$e.User.Finding[0].result;Aggregate=$e.Finding.Count}
-} finally { $script:AllowFixtureWrites=$false }
+$script:FixtureWrites=0;$e=Get-ADEnvironment -Class User -FQDN 'target.example.invalid';$rejected=$false
+try{$e.Remediate()}catch{$rejected=$_.Exception.Message -match 'New-ADAnalyzerRemediationPlan'}
+[pscustomobject]@{Writes=$script:FixtureWrites;Rejected=$rejected}
 '@
-    Assert-ClassEqual 2 $result.Writes
-    Assert-ClassEqual 'target.example.invalid' $result.Target
-    Assert-ClassEqual $true $result.Result
-    Assert-ClassTrue ($result.Aggregate -gt 0) 'Expected refreshed aggregate results'
+    Assert-ClassEqual 0 $result.Writes
+    Assert-ClassTrue $result.Rejected 'Use the reviewed plan execution API'
 }
 
-Invoke-ClassTest 'full-module preview never executes a directory mutation' {
-    $result=Invoke-ClassScope '$before=$script:FixtureWrites; $null=Set-ADEnvironment -Class User -FQDN "target.example.invalid" -WhatIf; $script:FixtureWrites -eq $before'
-    Assert-ClassTrue $result 'Preview must never reach a mutation'
+Invoke-ClassTest 'legacy direct disable and delete methods cannot bypass plans' {
+    $result=Invoke-ClassScope @'
+$before=$script:FixtureWrites;$failures=0
+try{[Finding]::Disable([pscustomobject]@{samaccountname='fixture'})}catch{$failures++}
+try{[Finding]::Delete([pscustomobject]@{samaccountname='fixture'})}catch{$failures++}
+$failures -eq 2 -and $script:FixtureWrites -eq $before
+'@
+    Assert-ClassTrue $result 'Legacy mutation bypass remained available'
+}
+
+Invoke-ClassTest 'stale legacy environments cannot query a later target' {
+    $result=Invoke-ClassScope @'
+$a=[ADEnvironment]::Initialize('a.example.invalid',[System.Collections.ArrayList]@('User'))
+$b=[ADEnvironment]::Initialize('b.example.invalid',[System.Collections.ArrayList]@('Computer'))
+$before=$script:QueryServers.Count;$blocked=$false
+try{$a.Analyze()}catch{$blocked=$_.Exception.Message -match 'not current'}finally{[ADEnvironment]::Close()}
+$blocked -and $script:QueryServers.Count -eq $before
+'@
+    Assert-ClassTrue $result 'Stale instance crossed into the later target'
+}
+
+Invoke-ClassTest 'CSV projection does not mutate the live record or leak credential XML' {
+    $result=Invoke-ClassScope @'
+$source=[pscustomobject]@{members=[System.Collections.ArrayList]@('one','two');xml='<Item cpassword="fixture-secret" />'}
+$finding=[Finding]::new();$null=$finding.Add($source)
+$path=Join-Path ([IO.Path]::GetTempPath()) ('ad-export-'+[guid]::NewGuid().ToString('N')+'.csv')
+try {
+    $finding.ExportCSV($path);$copy=Import-Csv -LiteralPath $path
+    $source.members -is [System.Collections.ArrayList] -and $source.members.Count -eq 2 -and $copy.members -eq 'one;two' -and $copy.xml -notmatch 'fixture-secret'
+} finally {Remove-Item -LiteralPath $path -Force}
+'@
+    Assert-ClassTrue $result 'Export changed the source or exposed a secret'
 }
 
 $temporaryDirectory=Join-Path ([IO.Path]::GetTempPath()) ('ad-class-tests-'+[guid]::NewGuid())

@@ -107,7 +107,7 @@ $record=[UserObject]::Initialize($script:UserRecord)
     Assert-ClassEqual 'NORMAL_ACCOUNT' $r.Flags
     Assert-ClassTrue $r.DatePresent 'whenChanged must be normalized'
     Assert-ClassTrue ($r.ChangedDays -ge 5) 'whenChanged age must be retained'
-    Assert-ClassEqual 'personal' $r.AccountType
+    Assert-ClassEqual 'unknown' $r.AccountType
 }
 
 Invoke-ClassTest 'nested group findings retain their source record' {

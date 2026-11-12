@@ -77,6 +77,25 @@ $records=@(
 Write-Pol $pol $records
 try {
     $parsed=Read-ADAnalyzerGpo $policyRoot
+    Test-Gpo 'reader returns only boolean presence for XML registry and INI secrets' {
+        $secretRoot=Join-Path $temp 'secret-presence'
+        $secretXml=Join-Path $secretRoot 'Machine/Preferences/Groups/Groups.xml'
+        Write-Text $secretXml '<Groups><User uid="u"><Properties cpassword="fixture-xml-secret" password=""/></User></Groups>'
+        Write-Text (Join-Path $secretRoot 'User/settings.ini') "[Account]`nPassword=fixture-ini-secret"
+        Write-Text (Join-Path $secretRoot 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf') "[Registry Values]`nMACHINE\Software\Fixture\DefaultPassword=1,`"fixture-inf-secret`""
+        Write-Pol (Join-Path $secretRoot 'Machine/Registry.pol') @(@{Key='Software\Fixture';Name='DefaultPassword';Type=1;Bytes=[Text.Encoding]::Unicode.GetBytes("fixture-pol-secret`0")})
+        $data=Read-ADAnalyzerGpo $secretRoot
+        Assert-True ($data.XmlFiles[0].Xml -match 'cpasswordPresent="true"' -and $data.XmlFiles[0].Xml -match 'passwordPresent="false"') 'XML presence flags missing'
+        Assert-Equal $true $data.RegistrySettings[0].SecretPresent
+        Assert-Equal $null $data.RegistrySettings[0].PSObject.Properties['Value']
+        Assert-Equal $null $data.RegistrySettings[0].PSObject.Properties['RawData']
+        Assert-Equal $true ($data.IniSettings | Where-Object Name -eq Password).SecretPresent
+        Assert-True (($data | ConvertTo-Json -Depth 30) -notmatch 'fixture-(xml|ini|inf|pol)-secret|REDACTED') 'Reader retained a secret value'
+        Assert-True ((Get-Content -LiteralPath $secretXml -Raw) -match 'fixture-xml-secret') 'Source policy was modified'
+        $metadata=[pscustomobject]@{Id=[guid]::NewGuid();Flags=0;Links=@();Version=0}
+        $report=ConvertTo-AnalyzerGpoXml -Gpo $metadata -Parsed $data
+        Assert-True ($report -match '<SecretPresent>true</SecretPresent>' -and $report -notmatch 'fixture-(xml|ini|inf|pol)-secret|REDACTED') 'Compatibility report lost presence or retained values'
+    }
     Test-Gpo 'UTF-16 INF preserves numeric zero and boolean false' {
         Assert-Equal 0 ($parsed.SecuritySettings | Where-Object Name -eq 'MinimumPasswordLength').Value
         $value=($parsed.SecuritySettings | Where-Object Name -eq 'PasswordComplexity').Value

@@ -166,3 +166,27 @@ $count
 '@
     Assert-ClassEqual 0 $r
 }
+
+Invoke-ClassTest 'legacy account rules distinguish disabled lockout and administrator unlock' {
+    $r=Invoke-ClassScope @'
+$disabled=[pscustomobject]@{'ext.property.name'='Account';'property.setting.name'='LockoutBadCount';'property.setting.value'=0}
+$manual=[pscustomobject]@{'ext.property.name'='Account';'property.setting.name'='LockoutDuration';'property.setting.value'=-1}
+[pscustomobject]@{Disabled=[GroupPolicyObject]::Analyze($disabled).Count;Manual=[GroupPolicyObject]::Analyze($manual).Count}
+'@
+    Assert-ClassEqual 1 $r.Disabled
+    Assert-ClassEqual 0 $r.Manual
+}
+
+Invoke-ClassTest 'legacy policy analysis honors configurable LM and LDAP requirements' {
+    $r=Invoke-ClassScope @'
+$lm=[pscustomobject]@{'ext.property.name'='SecurityOptions';'property.setting.name'='Network security: LAN Manager authentication level';'property.setting.value'='Send NTLMv2 response only'}
+$ldap=[pscustomobject]@{'ext.property.name'='SecurityOptions';'property.setting.name'='Network security: LDAP client signing requirements';'property.setting.value'='Negotiate signing'}
+$strict=[GroupPolicyObject]::Analyze($lm).Count
+$script:ADAnalyzerLegacyProfile=Get-ADAnalyzerDefaultProfile
+$script:ADAnalyzerLegacyProfile.Policy.MinimumLmCompatibilityLevel=3;$script:ADAnalyzerLegacyProfile.Policy.RequireLdapClientSigning=$false
+try{[pscustomobject]@{Strict=$strict;ConfiguredLm=[GroupPolicyObject]::Analyze($lm).Count;ConfiguredLdap=[GroupPolicyObject]::Analyze($ldap).Count}}finally{$script:ADAnalyzerLegacyProfile=$null}
+'@
+    Assert-ClassEqual 1 $r.Strict
+    Assert-ClassEqual 0 $r.ConfiguredLm
+    Assert-ClassEqual 0 $r.ConfiguredLdap
+}

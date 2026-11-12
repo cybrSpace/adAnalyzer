@@ -1,4 +1,5 @@
 # Package-owned GPO collection. No GroupPolicy module or GPMC COM objects.
+. (Join-Path $PSScriptRoot 'ADSecret.ps1')
 function Read-AnalyzerPolicyIni {
     param([Parameter(Mandatory)][string]$Path)
     $sections=[ordered]@{}; $section=''
@@ -57,7 +58,7 @@ function Read-AnalyzerRegistryPolicy {
                 11 {if($size -ne 8){throw 'Invalid QWORD length'};[BitConverter]::ToUInt64($bytes,0)}
                 default {,$bytes}
             }}
-            [pscustomobject]@{Scope=$Scope;Hive=$(if($Scope -eq 'Computer'){'HKLM'}else{'HKCU'});Key=$strings[0];ValueName=$strings[1];Type=$type;Value=$value;RawData=$bytes;KeyOnly=($size -eq 0 -and $strings[1] -eq '');DeletionDirective=$strings[1].StartsWith('**');Source=$Path}
+            ConvertTo-ADAnalyzerSecretRecord ([pscustomobject]@{Scope=$Scope;Hive=$(if($Scope -eq 'Computer'){'HKLM'}else{'HKCU'});Key=$strings[0];ValueName=$strings[1];Type=$type;Value=$value;RawData=$bytes;KeyOnly=($size -eq 0 -and $strings[1] -eq '');DeletionDirective=$strings[1].StartsWith('**');Source=$Path})
         }
     } catch {throw "Unable to parse '$Path': $($_.Exception.Message)"}
     finally {$reader.Dispose();$stream.Dispose()}
@@ -142,7 +143,12 @@ function Read-ADAnalyzerGpo {
                 $kind='Ini';$ini=Read-AnalyzerPolicyIni $file.FullName
                 foreach($section in $ini.Keys) {
                     foreach($entry in $ini[$section].GetEnumerator()) {
-                        $null=$iniSettings.Add([pscustomobject]@{Scope=$scope;Section=$section;Name=$entry.Key;Value=$entry.Value;Source=$relative;Analyzed=($securityTemplate -and $section -in 'System Access','Kerberos Policy','Privilege Rights','Registry Values')})
+                        $iniValue=$entry.Value
+                        if($section -eq 'Registry Values' -and (Test-ADAnalyzerSecretName $entry.Key)){
+                            $parts=Split-AnalyzerPolicyCsv $entry.Value
+                            $iniValue=if($parts.Count -ge 2){$parts[1..($parts.Count-1)] -join ','}else{''}
+                        }
+                        $null=$iniSettings.Add((ConvertTo-ADAnalyzerSecretRecord ([pscustomobject]@{Scope=$scope;Section=$section;Name=$entry.Key;Value=$iniValue;Source=$relative;Analyzed=($securityTemplate -and $section -in 'System Access','Kerberos Policy','Privilege Rights','Registry Values')})))
                     }
                 }
                 if(-not $securityTemplate) {$null=$files.Add([pscustomobject]@{Scope=$scope;Path=$relative;Kind=$kind;Length=$file.Length});continue}
@@ -183,12 +189,12 @@ function Read-ADAnalyzerGpo {
             } elseif($file.Extension -ieq '.xml') {
                 $kind='Xml';$xml=Read-AnalyzerPolicyXml $file.FullName
                 $xmlKind=if($relative -match '(^|[\\/])Preferences[\\/]'){'Preferences'}else{'Xml'}
-                $null=$xmlFiles.Add([pscustomobject]@{Scope=$scope;Kind=$xmlKind;Path=$relative;Xml=$xml.OuterXml})
+                $null=$xmlFiles.Add([pscustomobject]@{Scope=$scope;Kind=$xmlKind;Path=$relative;Xml=(ConvertTo-ADAnalyzerSecretIndicatorXml $xml).OuterXml})
             }
             $null=$files.Add([pscustomobject]@{Scope=$scope;Path=$relative;Kind=$kind;Length=$file.Length})
         }
     }
-    [pscustomobject]@{Path=$root.FullName;SysvolVersion=$sysvolVersion;SecuritySettings=$security.ToArray();RegistrySettings=$registry.ToArray();XmlFiles=$xmlFiles.ToArray();IniSettings=$iniSettings.ToArray();Files=$files.ToArray();UnparsedFiles=@($files | Where-Object Kind -eq 'Unparsed')}
+    [pscustomobject]@{Path=$root.FullName;SysvolVersion=$sysvolVersion;SecuritySettings=@($security | ForEach-Object {ConvertTo-ADAnalyzerSecretRecord $_});RegistrySettings=$registry.ToArray();XmlFiles=$xmlFiles.ToArray();IniSettings=$iniSettings.ToArray();Files=$files.ToArray();UnparsedFiles=@($files | Where-Object Kind -eq 'Unparsed')}
 }
 
 function Get-ADAnalyzerGpo {
@@ -205,24 +211,26 @@ function Get-ADAnalyzerGpo {
     $dns=[string]$domainInfo.DNSRoot
     if($dns -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$'){throw 'Invalid domain DNS name'}
     $base='CN=Policies,CN=System,'+$domainInfo.DistinguishedName
-    $objects=@(Get-ADObject -LDAPFilter '(objectClass=groupPolicyContainer)' -SearchBase $base -Properties displayName,gPCFileSysPath,flags,whenCreated,whenChanged,versionNumber @connection)
-    $links=@(Get-ADObject -LDAPFilter '(gPLink=*)' -SearchBase $domainInfo.DistinguishedName -Properties gPLink,distinguishedName @connection)
-    if($rootDse.ConfigurationNamingContext){$links+=@(Get-ADObject -LDAPFilter '(gPLink=*)' -SearchBase ('CN=Sites,'+$rootDse.ConfigurationNamingContext) -Properties gPLink,distinguishedName @connection)}
+    $objects=@(Get-ADObject -LDAPFilter '(objectClass=groupPolicyContainer)' -SearchBase $base -Properties displayName,gPCFileSysPath,flags,whenCreated,whenChanged,versionNumber,gPCWQLFilter,gPCMachineExtensionNames,gPCUserExtensionNames @connection)
+    $links=@(Get-ADObject -LDAPFilter '(gPLink=*)' -SearchBase $domainInfo.DistinguishedName -Properties gPLink,gPOptions,distinguishedName @connection)
+    if($rootDse.ConfigurationNamingContext){$links+=@(Get-ADObject -LDAPFilter '(gPLink=*)' -SearchBase ('CN=Sites,'+$rootDse.ConfigurationNamingContext) -Properties gPLink,gPOptions,distinguishedName @connection)}
     foreach($object in $objects) {
         $id=[guid]([string]$object.Name).Trim('{}')
         if($PSCmdlet.ParameterSetName -eq 'Guid' -and $id -ne $Guid){continue}
         if($PSCmdlet.ParameterSetName -eq 'Name' -and $object.displayName -ine $Name){continue}
         $policyLinks=[Collections.ArrayList]::new()
         foreach($container in $links) {
+            $storedIndex=0
             foreach($match in [regex]::Matches([string]$container.gPLink,'(?i)\[LDAP://(?<dn>[^;]+);(?<flags>\d+)\]')) {
                 if($match.Groups['dn'].Value -ieq $object.DistinguishedName) {
                     $options=[int]$match.Groups['flags'].Value
-                    $null=$policyLinks.Add([pscustomobject]@{SOMPath=$container.DistinguishedName;Enabled=($options -band 1) -eq 0;Enforced=($options -band 2) -ne 0})
+                    $null=$policyLinks.Add([pscustomobject]@{SOMPath=$container.DistinguishedName;Enabled=($options -band 1) -eq 0;Enforced=($options -band 2) -ne 0;StoredLinkIndex=$storedIndex;BlockInheritance=([int]$container.gPOptions -band 1) -ne 0})
                 }
+                $storedIndex++
             }
         }
         $flags=[int]$object.flags
-        [pscustomobject]@{Id=$id;DisplayName=$object.displayName;CreationTime=$object.whenCreated;ModificationTime=$object.whenChanged;GPOStatus=@('AllSettingsEnabled','UserSettingsDisabled','ComputerSettingsDisabled','AllSettingsDisabled')[$flags -band 3];Flags=$flags;Version=$object.versionNumber;Domain=$dns;Server=$Server;RequestedServer=$requestedServer;DistinguishedName=$object.DistinguishedName;DirectoryFilePath=$object.gPCFileSysPath;PolicyPath=('\\{0}\SYSVOL\{1}\Policies\{2}' -f $Server,$dns,$id.ToString('B'));Links=$policyLinks.ToArray()}
+        [pscustomobject]@{Id=$id;DisplayName=$object.displayName;CreationTime=$object.whenCreated;ModificationTime=$object.whenChanged;GPOStatus=@('AllSettingsEnabled','UserSettingsDisabled','ComputerSettingsDisabled','AllSettingsDisabled')[$flags -band 3];Flags=$flags;Version=$object.versionNumber;Domain=$dns;Server=$Server;RequestedServer=$requestedServer;DistinguishedName=$object.DistinguishedName;DirectoryFilePath=$object.gPCFileSysPath;PolicyPath=('\\{0}\SYSVOL\{1}\Policies\{2}' -f $Server,$dns,$id.ToString('B'));Links=$policyLinks.ToArray();WmiFilter=$object.gPCWQLFilter;MachineExtensions=$object.gPCMachineExtensionNames;UserExtensions=$object.gPCUserExtensionNames}
     }
 }
 
@@ -252,6 +260,11 @@ function ConvertTo-AnalyzerGpoXml {
             $ext=Add-AnalyzerGpoXmlNode $doc $side 'ExtensionData';$null=Add-AnalyzerGpoXmlNode $doc $ext 'Name' 'Security';$body=Add-AnalyzerGpoXmlNode $doc $ext 'Extension'
             foreach($setting in $settings) {
                 $node=Add-AnalyzerGpoXmlNode $doc $body $setting.Kind
+                if($null -ne $setting.PSObject.Properties['SecretPresent']){
+                    $null=Add-AnalyzerGpoXmlNode $doc $node 'Name' $setting.Name
+                    $null=Add-AnalyzerGpoXmlNode $doc $node 'SecretPresent' ([string]$setting.SecretPresent).ToLowerInvariant()
+                    continue
+                }
                 if($setting.Kind -eq 'SecurityOptions') {
                     $display=Add-AnalyzerGpoXmlNode $doc $node 'Display';$null=Add-AnalyzerGpoXmlNode $doc $display 'Name' $setting.Name
                     if($setting.Value -is [bool]){$null=Add-AnalyzerGpoXmlNode $doc $display 'DisplayBoolean' ([string]$setting.Value).ToLowerInvariant()}else{$null=Add-AnalyzerGpoXmlNode $doc $display 'DisplayString' $setting.Value}
@@ -291,7 +304,9 @@ function ConvertTo-AnalyzerGpoXml {
                 if($kind -eq 'Registry') {$label='{0}\{1}\{2}' -f $row.Hive,$row.Key,$row.ValueName;$value=if($row.Value -is [byte[]]){[System.Convert]::ToBase64String($row.Value)}elseif($row.Value -is [array]){ConvertTo-Json -InputObject $row.Value -Compress}else{[string]$row.Value};$null=Add-AnalyzerGpoXmlNode $doc $record 'Type' $row.Type}
                 elseif($kind -eq 'Ini') {$label='{0}: [{1}] {2}' -f $row.Source,$row.Section,$row.Name;$value=$row.Value}
                 else {$label=$row.Path;$value=$row.Xml}
-                $null=Add-AnalyzerGpoXmlNode $doc $record 'Name' $label;$null=Add-AnalyzerGpoXmlNode $doc $record 'Value' $value
+                $null=Add-AnalyzerGpoXmlNode $doc $record 'Name' $label
+                if($null -ne $row.PSObject.Properties['SecretPresent']){$null=Add-AnalyzerGpoXmlNode $doc $record 'SecretPresent' ([string]$row.SecretPresent).ToLowerInvariant()}
+                else{$null=Add-AnalyzerGpoXmlNode $doc $record 'Value' $value}
             }
         }
     }

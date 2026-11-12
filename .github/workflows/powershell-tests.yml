@@ -33,3 +33,36 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & '${{ matrix.shell }}' -NoLogo -NoProfile -NonInteractive -File ./tests/Invoke-GpoReaderTests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & '${{ matrix.shell }}' -NoLogo -NoProfile -NonInteractive -File ./tests/Invoke-PolicyAnalysisTests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & '${{ matrix.shell }}' -NoLogo -NoProfile -NonInteractive -File ./tests/Invoke-DirectoryAnalysisTests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & '${{ matrix.shell }}' -NoLogo -NoProfile -NonInteractive -File ./tests/Invoke-OperationsTests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & '${{ matrix.shell }}' -NoLogo -NoProfile -NonInteractive -File ./tests/Invoke-AssessmentTests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & '${{ matrix.shell }}' -NoLogo -NoProfile -NonInteractive -File ./tests/Invoke-HostAnalysisTests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  quality:
+    name: Pester and static security checks
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Save optional pinned development tools
+        shell: pwsh
+        run: ./etc/Install-DevelopmentTools.ps1 -Confirm:$false
+      - name: Run Pester and selected static security rules
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Import-Module ./tools/modules/Pester/6.2.0/Pester.psd1 -Force
+          Import-Module ./tools/modules/PSScriptAnalyzer/1.25.0/PSScriptAnalyzer.psd1 -Force
+          Import-Module ./ADEnvironment.psd1 -ErrorAction Stop -WarningAction SilentlyContinue
+          $result=Invoke-Pester -Path ./tests/Quality.Tests.ps1 -PassThru
+          if ($result.FailedCount -or $result.FailedBlocksCount) { exit 1 }
+          $rules=@('PSAvoidUsingInvokeExpression','PSAvoidUsingPlainTextForPassword','PSUsePSCredentialType','PSAvoidUsingConvertToSecureStringWithPlainText')
+          $diagnostics=@(Invoke-ScriptAnalyzer -Path ./bin -Recurse -IncludeRule $rules)
+          $diagnostics | Format-Table -AutoSize
+          if ($diagnostics.Count) { exit 1 }

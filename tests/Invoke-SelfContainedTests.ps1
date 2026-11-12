@@ -7,7 +7,7 @@ if(Get-Module -ListAvailable -Name ActiveDirectory,GroupPolicy){throw 'RSAT modu
 $module=Import-Module (Join-Path $RepositoryRoot 'ADEnvironment.psd1') -Force -PassThru -WarningAction SilentlyContinue
 $expected=[IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'lib/Microsoft.ActiveDirectory.Management.dll'))
 $paths=& $module {
-    foreach($name in @('Get-ADDomain','Get-ADObject','Get-ADUser','Get-ADGroup','Get-ADComputer','Set-ADObject','Disable-ADAccount','Remove-ADObject')){
+    foreach($name in @('Get-ADDomain','Get-ADRootDSE','Get-ADObject','Get-ADUser','Get-ADGroup','Get-ADComputer','Get-ADTrust','Get-ADDomainController','Get-ADServiceAccount','Get-ADDefaultDomainPasswordPolicy','Get-ADFineGrainedPasswordPolicy','Get-ADUserResultantPasswordPolicy','Set-ADObject','Disable-ADAccount','Enable-ADAccount','Remove-ADObject')){
         $command=Get-Command $name -CommandType Cmdlet -ErrorAction Stop
         $command.Module.Path
     }
@@ -15,6 +15,7 @@ $paths=& $module {
 foreach($path in $paths){if([IO.Path]::GetFullPath($path) -ne $expected){throw "External AD dependency: $path"}}
 if(-not (Get-PSProvider ActiveDirectory -ErrorAction Stop)){throw 'Bundled AD provider was not registered'}
 if(Get-Module -Name GroupPolicy){throw 'Unexpected external GroupPolicy module'}
+if($module.ExportedCmdlets.Count -or $module.ExportedVariables.Count){throw 'Internal AD commands or script variables leaked from the public package interface'}
 foreach($name in @('Get-ADAnalyzerGpo','Get-ADAnalyzerGpoReport','Read-ADAnalyzerGpo')){
     if(-not $module.ExportedFunctions.ContainsKey($name)){throw "Missing package GPO command: $name"}
 }

@@ -7,14 +7,29 @@
 
 ## Running the module
 
+Version 1.2 adds a scan-owned assessment engine, configurable rule profiles, evidence snapshots, change comparisons, and reviewed remediation plans. The main workflow is:
+
+```powershell
+Import-Module .\ADEnvironment.psd1
+$credential = Get-Credential # optional; the CLI never prompts automatically
+$profile = Import-ADAnalyzerProfile -Path .\profiles\example.psd1
+# Customize example.invalid and the account-role rules before collecting.
+$scan = Get-ADAnalyzerAssessment -Profile $profile -Credential $credential
+$scan.Coverage
+$scan.Findings | Select-Object RuleId,Target,Status,Severity,Applicability,Suppressed
+Export-ADAnalyzerAssessment -Assessment $scan -Path .\reports\current -Format All
+```
+
+The exporter writes JSON evidence, HTML with summary/check tables and expandable evidence, and CSV projections. Secret-bearing fields and policy XML return boolean presence indicators such as `SecretPresent: true` or `cpasswordPresent="true"`; the values and masked placeholders are omitted. GPO/file/item locations remain available for remediation, and unreadable content stays Unknown. Exporting copies records without modifying the returned scan. Compare saved JSON snapshots with `Compare-ADAnalyzerAssessment -Reference .\reports\previous.json -Difference $scan`. Changes are classified as New, Resolved, Changed, or Unchanged using stable rule/target identities, including changes to passing checks. A failed check becoming Pass/NotApplicable is resolved; becoming Unknown does not prove resolution. Different targets/search-base scopes are rejected as drift comparisons.
+
 Use Windows PowerShell 5.1 or PowerShell 7 on Windows. Import the package manifest so the bundled AD commands and provider are registered before the analyzer classes load:
 
 ```powershell
 Import-Module .\ADEnvironment.psd1
-Get-ADEnvironment -FQDN 'example.com' -Class User,Group,Computer,GroupPolicy
+Get-ADAnalyzerAssessment -Domain 'example.com'
 # A domain-joined client is not required when using explicit credentials.
 $credential = Get-Credential
-Get-ADEnvironment -FQDN 'example.com' -Class GroupPolicy -Credential $credential
+Get-ADAnalyzerAssessment -Domain 'example.com' -Credential $credential
 ```
 
 Live collection needs a reachable domain controller running AD Web Services, read access to directory objects, and SMB read access to SYSVOL. The package supplies its own GPO reader; it does not load the GroupPolicy module or use GPMC COM. Explicit credentials are forwarded to directory queries and a temporary SYSVOL drive, which is removed when the read finishes or fails. The reader pins metadata and SYSVOL reads to the same DC and warns if directory and GPT.INI versions differ.
@@ -32,9 +47,55 @@ $offline = Read-ADAnalyzerGpo -Path 'C:\PolicyCopies\{GPO-GUID}'
 
 This is a file-based policy reader, not a GPMC HTML report generator or an ADMX display-name engine. Scripts and other unsupported client-side extension formats are inventoried rather than interpreted; parsed settings are not a calculation of effective policy or RSoP. Offline parsing is portable; live directory/SMB integration is supported on Windows. The older GroupPolicy DLLs in `lib` are not loaded.
 
+## Profiles and assessment coverage
+
+`Import-ADAnalyzerProfile` merges a JSON or restricted PSD1 data file with fresh defaults, validates input, and rejects unknown settings. `Get-ADAnalyzerDefaultProfile` shows every supported key. Profiles control account/password/lockout thresholds, account-role evidence, approved SIDs, custom registry expectations, OS lifecycle/build rules, and remediation approvals. `profiles/default.psd1` is inert; `profiles/example.psd1` documents customization. Profile files are data and cannot contain executable PowerShell scripts.
+
+User/service classification uses configured OUs, group identities, explicit attributes, or managed-service-account schema classes. An unclassified account remains Unknown. Privileged membership uses SIDs, transitive membership and primary groups, with cycle and unresolved-membership evidence. Password age does not prove password strength.
+
+Checks expose Pass, Fail, Unknown, Unreadable, NotConfigured, Invalid, and NotApplicable. Applicability is separate: GPO checks describe stored risk and normally leave target applicability Unknown. WMI filters, disabled links/sides, and preference targeting are retained; a complete inheritance/security-filter/RSoP engine is not provided. Missing settings in one GPO do not prove effective noncompliance. A retained cpassword remains a credential exposure even when its item is disabled.
+
+The new analyzers cover cpassword using boolean presence only, Restricted Groups, Local Users and Groups preference actions, exact-SID user-right allowlists, password/lockout sentinel values, raw Registry.pol types/deletions, and custom baseline rules. Optional ADMX/ADML enrichment accepts `Analysis.TemplatePath` and `Analysis.Language`; unresolved or complex definitions stay Unknown and raw registry identity remains authoritative.
+
+Directory checks include MachineAccountQuota, Recycle Bin, default/fine-grained/resultant password policies, trusts/SID filtering, SPNs, SIDHistory, delegation including RBCD, LAPS and gMSA metadata. Managed passwords are never requested. Reader-permission and delegation checks report configured grants, not a complete effective-access calculation.
+
+Use `-IncludeAcl` for targeted domain-root/AdminSDHolder/OU/GPO security descriptors. Use `-IncludeHostChecks` for bounded CIM inventory of DC services, OS/build, installed hotfix records, DNS adapters, SMB and NTP/TLS registry overrides. These flags add collection; they do not configure hosts. Configure `Host.Services`, `Host.RegistryRules`, `Host.AuditRules` (subcategory GUID plus numeric flags), or `Host.CertificateEndpoints` for verification. Audit reads use native Windows APIs over existing WinRM; no remoting is enabled automatically. TLS certificate checks inspect explicit direct-TLS endpoints, name/chain/time validity and modern TLS negotiation. Revocation, STARTTLS, LDAP channel binding, per-user audit policy and event delivery remain explicitly unassessed.
+
+An OS lifecycle profile uses `Policy.SupportedOperatingSystems` entries such as `@{Name='Windows Server 2022*';VersionPattern='^10\.0';MinimumBuild=20348;MaximumBuild=20348;SupportedUntil='2031-10-14';RequireEsu=$false}`. Verify the lifecycle date against your organization's maintained baseline. Missing build/ESU evidence stays Unknown; an OS name alone is not a support assertion.
+
+Exceptions use `@{RuleId='RULE.ID';Target='exact identity or wildcard';Owner='team';Reason='justification';Expires='2026-12-01T00:00:00Z'}`. A current exception attaches suppression metadata while retaining the original status and evidence. Expired exceptions do not suppress a finding.
+
+## Baseline imports
+
+Extract a matching Microsoft Security Compliance Toolkit GPO backup and pass its `DomainSysvol/GPO` root (containing Machine/User) to `Import-ADAnalyzerBaseline -GpoPath <root> -Name <name> -Version <version>`. The importer replays Registry.pol directives, retains types, aggregates multi-value security settings and rejects conflicting inputs. Its returned profile can be saved as JSON. Policy Analyzer/LGPO remain optional reference tools; neither is required by the runtime. Download baselines from the [Microsoft Security Compliance Toolkit](https://www.microsoft.com/en-us/download/details.aspx?id=55319).
+
+## Reviewed remediation
+
+Automatic finding-label disable/delete is retired. `Set-ADEnvironment` now creates an inert plan by default; `Start-ADAnalyzer -Operation remediate` is a plan alias. Legacy direct mutation methods reject execution. Existing `Get-ADEnvironment` class reports remain available, but independent new scans should use `Get-ADAnalyzerAssessment`; a stale legacy class instance cannot analyze another instance's target.
+
+```powershell
+$profile.Remediation.AllowDisable = $true
+$profile.Remediation.ApprovedObjectGuids = @('<explicit approved object GUID>')
+$plan = New-ADAnalyzerRemediationPlan -Assessment $scan -Profile $profile
+$plan.Actions
+$plan | ConvertTo-Json -Depth 100 | Set-Content .\reviewed-plan.json -Encoding UTF8
+Invoke-ADAnalyzerRemediationPlan -Plan .\reviewed-plan.json -Server $scan.Context.Server -Credential $credential -JournalPath .\journal.json -WhatIf
+# After reviewing the exact plan, run the same command without -WhatIf.
+```
+
+Only explicit approved Fail inactivity findings can propose DisableAccount. Unknown/service/privileged/protected/critical/DC/well-known objects, SIDHistory, and incomplete safety/privilege evidence require exclusion/manual review; hard exclusions remain enforced during execution. Each action re-queries GUID/SID/DN/state/whenChanged, fresh privilege/classification, and known recent logon/creation evidence on the pinned DC, writes intent to the journal before the mutation, then records the outcome. This is not an authoritative all-DC lastLogon sweep, so inactivity remains an approximate signal requiring explicit object approval. WhatIf performs no directory reads, mutations, or journal writes in the executor. No deletion, description/adminCount rewrite, or general-purpose script execution is supported. `Undo-ADAnalyzerRemediation -JournalPath ... -Server ...` can enable a successfully journaled disable only after checking its post-state and current exclusions; it cannot undo deletion or arbitrary external changes. Preconditions and local journals are not an atomic AD transaction: a concurrent change, process crash, or failed post-read can leave an uncertain action that needs manual verification.
+
+## Unattended CLI and prerequisites
+
+`bin/Start-ADAnalyzer.ps1` accepts explicit Operation, Domain/FQDN, Server, SearchBase, Credential, ProfilePath, OutputPath, PlanPath, JournalPath, ReferencePath, and collection switches. It does not clear caller modules/variables, change location, or select a hardcoded domain. Dot sourcing defines the function without running a scan. Script operations are assess/report, plan/remediate, apply, undo, and prerequisites. Apply requires PlanPath and JournalPath; undo requires JournalPath. The function throws on scan/export failures. The script exits 1 on failure, 2 for partial/unreadable coverage, and optionally 3 with `-FailOnFindings`; findings and collection completeness are separate concepts.
+
+`Get-ADAnalyzerPrerequisite` reports platform/runtime, bundled DLL version/hash and optional ADWS/SMB reachability/authentication. `DependencyHashes` may pin a trusted SHA256 for `Microsoft.ActiveDirectory.Management.dll`; availability is not signature verification. `Start-ADAnalyzer -Operation prerequisites -FQDN example.com -Online` accepts the same target/profile configuration. No prerequisite command installs RSAT or changes domain/host configuration.
+
 ## Validation
 
-Run `tests/Invoke-RegressionTests.ps1`, `tests/Invoke-ClassContractTests.ps1`, `tests/Invoke-NativeClassTests.ps1`, `tests/Invoke-SelfContainedTests.ps1`, and `tests/Invoke-GpoReaderTests.ps1` in separate fresh PowerShell processes. CI exercises Windows PowerShell 5.1 and PowerShell 7 on a runner without installed RSAT modules. Fixture tests do not contact a live domain controller.
+Run every `tests/Invoke-*Tests.ps1` script in a separate fresh PowerShell process. CI exercises Windows PowerShell 5.1 and PowerShell 7 on runners without installed RSAT modules, plus native DLL/provider construction and native host adapters. Fixture tests do not contact a live domain controller or perform real AD changes; live AD/SMB/WinRM behavior still requires a representative lab.
+
+`etc/Install-DevelopmentTools.ps1` saves pinned Pester and PSScriptAnalyzer versions under ignored `tools/modules`; it does not install runtime dependencies or change trusted repositories. CI runs `tests/Quality.Tests.ps1` plus selected static security rules. These tools, ADMX/ADML templates, SCT baselines and Policy Analyzer/LGPO are optional development/reference components, not RSAT prerequisites.
  
 ## AD Tactical Hardening Playbook 
 
