@@ -47,6 +47,20 @@ $offline = Read-ADAnalyzerGpo -Path 'C:\PolicyCopies\{GPO-GUID}'
 
 This is a file-based policy reader, not a GPMC HTML report generator or an ADMX display-name engine. Scripts and other unsupported client-side extension formats are inventoried rather than interpreted; parsed settings are not a calculation of effective policy or RSoP. Offline parsing is portable; live directory/SMB integration is supported on Windows. The older GroupPolicy DLLs in `lib` are not loaded.
 
+The standalone `etc/Get-GPOXML.ps1` and `etc/Get-LocalAdminGPO.ps1` scripts also use the package reader. They require explicit targets and selection, return XML or canonical check objects, and write only when `OutputPath` is supplied. Dot sourcing defines their functions without connecting, importing native modules, prompting, or opening files:
+
+```powershell
+. .\etc\Get-GPOXML.ps1
+. .\etc\Get-LocalAdminGPO.ps1
+$xml = Get-ADAnalyzerGpoXml -Domain example.com -Guid $gpo.Id -Credential $credential -OutputPath .\reports\policy.xml
+$groups = Get-ADAnalyzerLocalAdminGpo -Domain example.com -All -Credential $credential -OutputPath .\reports\local-groups.csv
+# A prefetched package report can be analyzed offline, including on macOS:
+$groups = Get-ADAnalyzerLocalAdminGpo -InputObject $policy
+$xml = Get-ADAnalyzerGpoXml -InputObject $policy
+```
+
+Offline `InputObject` uses the `{Gpo, Policy}` shape returned by `Get-ADAnalyzerGpoReport -AsObject`, with package record objects or their JSON round-trip; dictionary-backed setting rows are rejected. Supply its actual GPO ID and enabled-side Flags rather than inventing metadata for a raw folder. Raw folder parsing remains available through `Read-ADAnalyzerGpo`. The local-group inventory preserves all selected statuses, members/actions, targeting, disabled items, source locations, and boolean credential exposure; it describes stored policy rather than effective machine membership. An unreadable selected policy produces an explicit check and prevents automatic export of the incomplete inventory. Empty inventories export CSV headers. `WhatIf` allows read-only collection and suppresses writes. File replacement stages and closes UTF-8 content beside each destination before promotion; separate output formats are separate file writes.
+
 ## Profiles and assessment coverage
 
 `Import-ADAnalyzerProfile` merges a JSON or restricted PSD1 data file with fresh defaults, validates input, and rejects unknown settings. `Get-ADAnalyzerDefaultProfile` shows every supported key. Profiles control account/password/lockout thresholds, account-role evidence, approved SIDs, custom registry expectations, OS lifecycle/build rules, and remediation approvals. `profiles/default.psd1` is inert; `profiles/example.psd1` documents customization. Profile files are data and cannot contain executable PowerShell scripts.

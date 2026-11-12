@@ -1,6 +1,7 @@
 # Assessment projections and explicit, reversible remediation. No AD query is
 # performed by the exporter, comparer, or planner.
 . (Join-Path $PSScriptRoot 'ADSecret.ps1')
+. (Join-Path $PSScriptRoot 'ADFile.ps1')
 function Get-ADAnalyzerOperationValue {
     param([AllowNull()]$Object,[string[]]$Names,[AllowNull()]$Default=$null)
     if($null -eq $Object){return $Default}
@@ -78,25 +79,11 @@ function Read-ADAnalyzerOperationDocument {
 
 function Resolve-ADAnalyzerOperationFilePath {
     param([Parameter(Mandatory)][string]$Path)
-    $provider=$null;$drive=$null
-    $full=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path,[ref]$provider,[ref]$drive)
-    if($provider.Name -ne 'FileSystem'){throw 'Assessment and journal paths must use the FileSystem provider'}
-    return $full
+    Resolve-ADAnalyzerFilePath $Path
 }
 function Write-ADAnalyzerOperationFile {
     param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][AllowEmptyString()][string]$Content)
-    $full=Resolve-ADAnalyzerOperationFilePath $Path;$directory=[IO.Path]::GetDirectoryName($full)
-    if(-not (Test-Path -LiteralPath $directory -PathType Container)) {
-        $null=Microsoft.PowerShell.Management\New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false
-    }
-    $temporary=Join-Path $directory ('.ad-analyzer-'+[guid]::NewGuid().ToString('N')+'.tmp')
-    try {
-        Microsoft.PowerShell.Management\Set-Content -LiteralPath $temporary -Value $Content -Encoding UTF8 -ErrorAction Stop -WhatIf:$false -Confirm:$false
-        Microsoft.PowerShell.Management\Move-Item -LiteralPath $temporary -Destination $full -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false
-    } finally {
-        if(Test-Path -LiteralPath $temporary){Microsoft.PowerShell.Management\Remove-Item -LiteralPath $temporary -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false}
-    }
-    return $full
+    Write-ADAnalyzerFile -Path $Path -Content $Content
 }
 
 function ConvertTo-ADAnalyzerOperationHtmlValue {

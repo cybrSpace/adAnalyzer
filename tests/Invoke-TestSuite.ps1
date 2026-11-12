@@ -36,6 +36,7 @@ if($Mode -in 'Regression','All') {
         'Invoke-OperationsTests.ps1'
         'Invoke-AssessmentTests.ps1'
         'Invoke-HostAnalysisTests.ps1'
+        'Invoke-AuxiliaryTests.ps1'
     )
     foreach($suite in $suites) {
         Write-Host ('Running '+$suite)

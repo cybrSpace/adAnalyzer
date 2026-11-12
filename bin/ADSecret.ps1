@@ -60,7 +60,7 @@ function ConvertTo-ADAnalyzerSecretRecord {
     if($Record.SecretPresent -is [bool]){$present=$Record.SecretPresent}
     foreach($property in $Record.PSObject.Properties){
         if($property.Name -in @('Value','RawData','Data','Bytes')){
-            if($property.Name -eq 'Value'){$present=Test-ADAnalyzerSecretPresence $property.Value}
+            if($property.Name -eq 'Value'){$present=$present -or (Test-ADAnalyzerSecretPresence $property.Value)}
         }else{$result[$property.Name]=$property.Value}
     }
     $result['SecretPresent']=$present

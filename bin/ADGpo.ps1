@@ -197,6 +197,39 @@ function Read-ADAnalyzerGpo {
     [pscustomobject]@{Path=$root.FullName;SysvolVersion=$sysvolVersion;SecuritySettings=@($security | ForEach-Object {ConvertTo-ADAnalyzerSecretRecord $_});RegistrySettings=$registry.ToArray();XmlFiles=$xmlFiles.ToArray();IniSettings=$iniSettings.ToArray();Files=$files.ToArray();UnparsedFiles=@($files | Where-Object Kind -eq 'Unparsed')}
 }
 
+function ConvertTo-ADAnalyzerProvidedGpoPolicy {
+    # Prefetched input uses the package DTO contract, including safe XML and
+    # typed registry values. Copy before projecting so caller data stays intact.
+    param([Parameter(Mandatory)]$Policy)
+    foreach($field in @('SecuritySettings','RegistrySettings','IniSettings','XmlFiles','Files','UnparsedFiles')){foreach($record in @($Policy.$field)){
+        if($null -ne $record -and ($record -is [Collections.IDictionary] -or $record -is [string] -or $record -is [ValueType] -or $record -isnot [pscustomobject])){
+            throw 'InputObject policy records must use package report objects or JSON objects.'
+        }
+    }}
+    $xmlFiles=@(foreach($record in @($Policy.XmlFiles)){
+        if($null -eq $record){continue}
+        $settings=[Xml.XmlReaderSettings]::new();$settings.DtdProcessing=[Xml.DtdProcessing]::Prohibit;$settings.XmlResolver=$null
+        $text=[IO.StringReader]::new([string]$record.Xml);$reader=$null
+        try{
+            $reader=[Xml.XmlReader]::Create($text,$settings);$document=[xml]::new();$document.XmlResolver=$null;$document.Load($reader)
+            $safe=ConvertTo-ADAnalyzerSecretIndicatorXml $document
+        }catch{throw 'Provided policy XML is unreadable.'}
+        finally{if($null -ne $reader){$reader.Dispose()};$text.Dispose()}
+        [pscustomobject]@{Scope=$record.Scope;Kind=$record.Kind;Path=$record.Path;Xml=$safe.OuterXml}
+    })
+    [pscustomobject]@{
+        Path=$Policy.Path;SysvolVersion=$Policy.SysvolVersion;Files=@($Policy.Files);UnparsedFiles=@($Policy.UnparsedFiles)
+        SecuritySettings=@($Policy.SecuritySettings | Where-Object {$null -ne $_} | ForEach-Object {ConvertTo-ADAnalyzerSecretRecord $_})
+        RegistrySettings=@($Policy.RegistrySettings | Where-Object {$null -ne $_} | ForEach-Object {
+            $record=ConvertTo-ADAnalyzerSecretRecord $_
+            if($record.Type -notin @(1,2,4,5,7,11) -and $record.Value -is [array]){$record.Value=[byte[]]$record.Value}
+            $record
+        })
+        IniSettings=@($Policy.IniSettings | Where-Object {$null -ne $_} | ForEach-Object {ConvertTo-ADAnalyzerSecretRecord $_})
+        XmlFiles=$xmlFiles
+    }
+}
+
 function Get-ADAnalyzerGpo {
     [CmdletBinding(DefaultParameterSetName='All')]
     param([Parameter(ParameterSetName='All')][switch]$All,[Parameter(Mandatory,ParameterSetName='Guid')][guid]$Guid,[Parameter(Mandatory,ParameterSetName='Name')][string]$Name,[Parameter(Mandatory)][string]$Domain,[string]$Server=$Domain,[pscredential]$Credential=[pscredential]::Empty)
