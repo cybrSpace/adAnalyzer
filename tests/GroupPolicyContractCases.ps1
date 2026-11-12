@@ -83,6 +83,15 @@ $cases=@(
     @{Rights=@{SeDebugPrivilege=@{Sid='S-1-5-32-544'}};Sid='S-1-5-32-544';Prefix='Validate -'}
     @{Rights=@{SeDebugPrivilege=@(@('S-1-5-32-544','S-1-5-32-545'), 'S-1-5-32-546')};Sid='S-1-5-32-544';Prefix='Validate -'}
     @{Rights=@{SeDebugPrivilege=@('S-1-*')};Sid='S-1-5-32-544';Prefix='Validate -'}
+    @{Rights=@{SeDebugPrivilege=@('S-1-5-4294967296')};Sid='S-1-5-4294967296';Prefix='Validate -'}
+    @{Rights=@{SeDebugPrivilege=@('S-1-281474976710656-1')};Sid='S-1-281474976710656-1';Prefix='Validate -'}
+    @{Rights=@{SeDebugPrivilege=@('S-1-5-32-544')};Sid='S-1-5-4294967296';Prefix='Validate -'}
+    @{Rights=@{SeDebugPrivilege=@('S-1-0xffffffffffff-4294967295')};Sid='S-1-0xffffffffffff-4294967295';Prefix=''}
+    @{Rights=@{SeDebugPrivilege=@('S-1-4294967295-4294967295')};Sid='S-1-4294967295-4294967295';Prefix=''}
+    @{Rights=@{SeDebugPrivilege=@('S-1-4294967296-1')};Sid='S-1-4294967296-1';Prefix='Validate -'}
+    @{Rights=@{SeDebugPrivilege=@('S-1-5-32-544')};Sid=('S-1-5'+('-1'*16));Prefix='Validate -'}
+    @{Rights=@{SeDebugPrivilege=@('S-1-5-32-544')};Sid=('S-1-'+[char]0x0665+'-1');Prefix='Validate -'}
+    @{Rights=@{SeDebugPrivilege=@('S-1-5-0544')};Sid='S-1-5-0544';Prefix='Validate -'}
     @{Rights=@{SeDebugPrivilege='S-1-5-32-544'};Sid='S-1-5-32-544';Prefix=''}
     @{Rights=@{SeDebugPrivilege=@()};Sid='S-1-5-32-544';Prefix='Defect -'}
 )

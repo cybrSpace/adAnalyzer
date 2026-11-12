@@ -2340,14 +2340,14 @@ class GroupPolicyObject : OrderedDictionary {
                     $approved = $rights[$right]
                     $valid = $null -ne $approved -and ($approved -is [string] -or $approved -is [Collections.IList])
                     foreach ($sid in @($approved)) {
-                        if ($sid -isnot [string] -or $sid -notmatch '^S-1-\d+(?:-\d+){1,15}$') { $valid = $false }
+                        if (-not [GroupPolicyObject]::IsUserRightSid($sid)) { $valid = $false }
                     }
                     if (-not $valid) {
                         $list.AddFinding($value, 'Validate - Invalid UserRightsAssignment Allowlist')
                     }
                     elseif ($value.'property.setting.empty' -ne $true) {
                         $memberSid = [string]$value.'property.setting.sid'
-                        if ($memberSid -notmatch '^S-1-\d+(?:-\d+){1,15}$') {
+                        if (-not [GroupPolicyObject]::IsUserRightSid($memberSid)) {
                             $list.AddFinding($value, 'Validate - UserRightsAssignment SID Required')
                         }
                         elseif (@($approved) -notcontains $memberSid) {
@@ -2361,6 +2361,21 @@ class GroupPolicyObject : OrderedDictionary {
 
         return $list
 
+    }
+
+    hidden static [bool]IsUserRightSid([object]$value) {
+        if ($value -isnot [string] -or $value -notmatch '^S-1-(?:0|[1-9][0-9]{0,9}|0x[0-9a-f]{12})(?:-(?:0|[1-9][0-9]{0,9})){1,15}$') { return $false }
+        $parts = $value.Split('-')
+        [uint64]$authority = 0
+        if ($parts[2].StartsWith('0x', [StringComparison]::OrdinalIgnoreCase)) {
+            if (-not [uint64]::TryParse($parts[2].Substring(2), [Globalization.NumberStyles]::AllowHexSpecifier, [Globalization.CultureInfo]::InvariantCulture, [ref]$authority) -or $authority -lt 4294967296) { return $false }
+        }
+        elseif (-not [uint64]::TryParse($parts[2], [ref]$authority) -or $authority -gt 4294967295) { return $false }
+        for ($index = 3; $index -lt $parts.Count; $index++) {
+            [uint32]$subauthority = 0
+            if (-not [uint32]::TryParse($parts[$index], [ref]$subauthority)) { return $false }
+        }
+        return $true
     }
 
     [List]GetAccountSettings([XmlElement]$value, [GPOExtensionProperty]$name) {
