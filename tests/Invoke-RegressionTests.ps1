@@ -98,6 +98,48 @@ try {
         $a=Get-ADAnalyzerDefaultProfile;$b=Get-ADAnalyzerDefaultProfile;$a.Policy.MinimumPasswordLength=99;$a.Policy.AllowedUserRightSids['one']=@('SID')
         Assert-Equal 12 $b.Policy.MinimumPasswordLength;Assert-Equal 0 $b.Policy.AllowedUserRightSids.Count
     }
+    Invoke-Test 'custom value baselines reject secret identities in every profile collection without changing input' {
+        foreach($section in @('RegistryRules','ExpectedGpoSettings','Host')){foreach($expected in @('unit7-secret',@('unit7-secret'),'',$null,$true)){
+            $rule=@{Id='unit7-secret-label';Key='Software\Fixture';ValueName='dEfAuLtPaSsWoRd';Name='MACHINE\Software\Fixture\DefaultPassword';Expected=$expected}
+            $inputProfile=if($section -eq 'Host'){@{Host=@{RegistryRules=@($rule)}}}else{@{$section=@($rule)}}
+            $before=ConvertTo-Json -InputObject $inputProfile -Depth 20 -Compress
+            $caught=$null;try{$null=Import-ADAnalyzerProfile -Profile $inputProfile}catch{$caught=$_}
+            Assert-True ($null -ne $caught) 'Secret value baseline accepted'
+            Assert-Equal 'Value baselines for secret-bearing settings are not supported. Use secret-presence checks.' $caught.Exception.Message
+            Assert-True (([string]$caught.TargetObject) -notmatch 'unit7-secret') 'Secret rule leaked through error target'
+            Assert-Equal $before (ConvertTo-Json -InputObject $inputProfile -Depth 20 -Compress)
+        }}
+    }
+    Invoke-Test 'JSON and PSD1 custom secret baselines are rejected for all profile collections' {
+        foreach($section in @('RegistryRules','ExpectedGpoSettings','Host')){
+            $rule=@{ValueName='DefaultPassword';Expected='unit7-file-secret'}
+            $inputProfile=if($section -eq 'Host'){@{Host=@{RegistryRules=@($rule)}}}else{@{$section=@($rule)}}
+            $json=Join-Path $temporary 'secret-profile.json';$inputProfile | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $json
+            $literal="@{ValueName='DefaultPassword';Expected='unit7-file-secret'}"
+            $text=if($section -eq 'Host'){"@{Host=@{RegistryRules=@($literal)}}"}else{"@{$section=@($literal)}"}
+            $psd1=Join-Path $temporary 'secret-profile.psd1';Set-Content -LiteralPath $psd1 -Value $text
+            foreach($path in @($json,$psd1)){
+                $caught=$null;try{$null=Import-ADAnalyzerProfile -Path $path}catch{$caught=$_}
+                Assert-True ($null -ne $caught) 'Secret value file baseline accepted'
+                Assert-Equal 'Value baselines for secret-bearing settings are not supported. Use secret-presence checks.' $caught.Exception.Message
+            }
+        }
+    }
+    Invoke-Test 'standalone profile loading rejects secret baselines and retains ordinary typed settings' {
+        $fixture=Join-Path $temporary 'profile-only.ps1'
+        Set-Content -LiteralPath $fixture -Value @'
+param([string]$Root)
+$ErrorActionPreference='Stop'
+. (Join-Path $Root 'bin/ADProfile.ps1')
+$profile=Import-ADAnalyzerProfile -Profile @{Policy=@{PasswordComplexity=$true;MinimumPasswordLength=14};RegistryRules=@(@{Key='Software\Password';ValueName='Enabled';Expected=0})}
+if($profile.Policy.MinimumPasswordLength -ne 14 -or $profile.RegistryRules[0].Expected -isnot [int]){throw 'Ordinary typed baseline changed'}
+$caught=$null
+try{$null=Import-ADAnalyzerProfile -Profile @{ExpectedGpoSettings=@(@{Kind='SecurityOptions';Name='MACHINE\Software\Fixture\DefaultPassword';Expected='fixture-only'})}}catch{$caught=$_}
+if($null -eq $caught -or $caught.Exception.Message -ne 'Value baselines for secret-bearing settings are not supported. Use secret-presence checks.'){throw 'Standalone profile guard did not run'}
+'@
+        & (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $fixture -Root $RepositoryRoot
+        Assert-Equal 0 $LASTEXITCODE
+    }
     Invoke-Test 'profile conversion preserves sorted scalar collections and typed values' {
         $profile=Import-ADAnalyzerProfile -Profile @{Policy=@{ApprovedLocalAdminSids=@('S-1-5-32-545','S-1-5-32-544' | Sort-Object)}}
         Assert-True ($profile.Policy.ApprovedLocalAdminSids[0] -is [string]) 'Pipeline-wrapped string became a property dictionary'

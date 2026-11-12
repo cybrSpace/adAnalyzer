@@ -1,4 +1,5 @@
 # Shared configuration and result contracts. No external modules are required.
+. (Join-Path $PSScriptRoot 'ADSecret.ps1')
 function ConvertTo-ADAnalyzerHashtable {
     param([AllowNull()]$InputObject)
     if($null -eq $InputObject){return $null}
@@ -103,6 +104,7 @@ function Import-ADAnalyzerProfile {
         }
     }
     if($null -ne $Profile){$overrides=ConvertTo-ADAnalyzerHashtable $Profile;if($overrides -isnot [hashtable]){throw 'Profile must be a dictionary'};Merge-ADAnalyzerProfile $result $overrides}
+    Assert-ADAnalyzerValueBaseline -Profile $result
     if(($result.SchemaVersion -isnot [int] -and $result.SchemaVersion -isnot [long]) -or $result.SchemaVersion -ne 1){throw 'Unsupported profile SchemaVersion'}
     if([string]::IsNullOrWhiteSpace($result.Name) -or [string]::IsNullOrWhiteSpace($result.Version)){throw 'Profile Name and Version are required'}
     foreach($name in @('MinimumPasswordLength','MinimumPasswordAgeDays','MaximumPasswordAgeDays','UserPasswordAgeDays','ServicePasswordAgeDays','PasswordHistorySize','LockoutThreshold','LockoutDurationMinutes','ResetLockoutMinutes','UserInactivityDays','ComputerInactivityDays','MachineAccountQuota','MinimumLmCompatibilityLevel')) {

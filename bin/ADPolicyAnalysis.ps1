@@ -224,6 +224,7 @@ function Test-ADAnalyzerGpoPolicy {
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Gpo,[Parameter(Mandatory)]$Policy,[Parameter(Mandatory)][hashtable]$Profile)
+    Assert-ADAnalyzerValueBaseline -Profile $Profile
     $identity=[string](Get-ADAnalyzerPolicyValue $Gpo Id (Get-ADAnalyzerPolicyValue $Gpo DisplayName 'offline'))
     $target='GPO:'+ $identity
     $xmlRecords=@(Get-ADAnalyzerPolicyXmlRecords $Policy.XmlFiles)

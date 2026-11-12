@@ -8,6 +8,31 @@ function Test-ADAnalyzerSecretName {
     $leaf=($Name -split '[\\/]')[-1]
     $leaf -match ('(?i)^(?:'+(Get-ADAnalyzerSecretNames)+')$')
 }
+function Assert-ADAnalyzerValueBaseline {
+    param([hashtable]$Profile)
+    if($null -eq $Profile){return}
+    $collections=@(
+        [pscustomobject]@{Rules=$Profile.RegistryRules;Registry=$false}
+        [pscustomobject]@{Rules=$Profile.ExpectedGpoSettings;Registry=$false}
+        [pscustomobject]@{Rules=$Profile.Host.RegistryRules;Registry=$true}
+    )
+    foreach($collection in $collections){foreach($rule in @($collection.Rules)){
+        if($null -eq $rule){continue}
+        $kind='Registry'
+        if($rule -is [Collections.IDictionary]){if($rule.Contains('Kind')){$kind=$rule['Kind']}}
+        elseif($null -ne $rule.PSObject.Properties['Kind']){$kind=$rule.Kind}
+        # A registry key named Password can contain ordinary values such as Enabled.
+        # Evaluate the actual value/setting name before using a full-key fallback.
+        $identity=if($collection.Registry -or $kind -eq 'Registry'){
+            if($rule.ValueName){$rule.ValueName}elseif($rule.Name){$rule.Name}else{$rule.Key}
+        }else{
+            if($rule.Name){$rule.Name}elseif($rule.ValueName){$rule.ValueName}else{$rule.Key}
+        }
+        if(Test-ADAnalyzerSecretName ([string]$identity)){
+            throw 'Value baselines for secret-bearing settings are not supported. Use secret-presence checks.'
+        }
+    }}
+}
 function Test-ADAnalyzerSecretPresence {
     param([AllowNull()]$Value)
     if($null -eq $Value){return $false}

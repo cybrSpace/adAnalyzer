@@ -14,6 +14,23 @@ function Get-PolicyChecks($Policy,$Profile=$script:Profile,$Gpo=$script:Gpo){@(T
 $script:Profile=Get-ADAnalyzerDefaultProfile
 $script:Gpo=[pscustomobject]@{Id=[guid]'11111111-1111-1111-1111-111111111111';Flags=0;Links=@()}
 
+Test-Policy 'direct raw profiles reject secret-value rules before emitting any policy checks' {
+    foreach($section in @('RegistryRules','ExpectedGpoSettings')){foreach($rule in @(
+        @{Kind='Registry';Key='Software\Fixture';ValueName='DefaultPassword';Expected='unit7-policy-secret'}
+        @{Kind='SecurityOptions';Name='MACHINE\Software\Fixture\DefaultPassword';Expected='unit7-policy-secret'}
+        @{Kind='SecurityOptions';Key='MACHINE\Software\Fixture\DefaultPassword';Expected='unit7-policy-secret'}
+        @{Name='Friendly label';ValueName='DefaultPassword';Expected='unit7-policy-secret'}
+        @{Kind='SecurityOptions';Name='MACHINE\Software\Fixture\DefaultPassword';ValueName='Enabled';Expected='unit7-policy-secret'}
+    )){
+        $profile=Get-ADAnalyzerDefaultProfile;$profile[$section]=@($rule)
+        $emitted=[Collections.ArrayList]::new();$caught=$null
+        try{Test-ADAnalyzerGpoPolicy -Gpo $script:Gpo -Policy (New-PolicyFixture) -Profile $profile | ForEach-Object {$null=$emitted.Add($_)}}catch{$caught=$_}
+        Assert-Policy ($null -ne $caught) 'Raw profile secret baseline accepted'
+        Assert-Policy ($emitted.Count -eq 0) 'Policy emitted checks before rejecting a secret rule'
+        Assert-Policy ($caught.Exception.Message -eq 'Value baselines for secret-bearing settings are not supported. Use secret-presence checks.') 'Unexpected error contract'
+        Assert-Policy (([string]$caught.TargetObject) -notmatch 'unit7-policy-secret') 'Secret in error target'
+    }}
+}
 Test-Policy 'missing settings are NotConfigured with unknown applicability' {
     $checks=Get-PolicyChecks (New-PolicyFixture)
     $length=$checks | Where-Object RuleId -eq 'GPO.Account.MinimumPasswordLength'
