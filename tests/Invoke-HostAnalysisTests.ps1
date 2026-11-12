@@ -47,6 +47,15 @@ Test-HostPolicy 'host services and explicit registry overrides are evaluated fro
     Assert-Equal Pass ($checks | Where-Object RuleId -eq HOST.SERVICE).Status
     Assert-Equal Pass ($checks | Where-Object RuleId -eq HOST.REGISTRY).Status
 }
+Test-HostPolicy 'declared host registry types require observed matching type evidence' {
+    $copy=Get-ADAnalyzerDefaultProfile;$copy.Host.RegistryRules=@(@{Key='SYSTEM\Fixture';ValueName='Enabled';Expected=0;Type=4})
+    $record=[pscustomobject]@{ComputerName='fixture';Services=@();Registry=@([pscustomobject]@{Path='SYSTEM\Fixture';Name='Enabled';Status='Observed';Value=0})}
+    Assert-Equal Unknown (@(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy) | Where-Object RuleId -eq HOST.REGISTRY).Status
+    $record.Registry[0] | Add-Member -NotePropertyName Type -NotePropertyValue 1
+    Assert-Equal Invalid (@(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy) | Where-Object RuleId -eq HOST.REGISTRY).Status
+    $record.Registry[0].Type=4
+    Assert-Equal Pass (@(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy) | Where-Object RuleId -eq HOST.REGISTRY).Status
+}
 Test-HostPolicy 'numeric audit masks verify success and failure without localized text' {
     $checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile -Credential $script:Credential)
     Assert-Equal Pass ($checks | Where-Object RuleId -eq HOST.AUDIT_POLICY).Status

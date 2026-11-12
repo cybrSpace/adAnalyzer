@@ -142,6 +142,19 @@ function Import-ADAnalyzerProfile {
         if(-not $rule.Attribute -or $rule.Type -notin @('User','Service') -or ($rule.Match -and $rule.Match -notin @('Equals','Regex'))){throw 'Invalid account classification attribute rule'}
     }
     foreach($value in @($result.Remediation.ApprovedObjectGuids)+@($result.Remediation.ExcludedObjectGuids)){$id=[guid]::Empty;if(-not [guid]::TryParse([string]$value,[ref]$id)){throw 'Remediation object identities must be GUIDs'}}
+    foreach($rule in @($result.Host.Services)) {
+        if($rule -isnot [Collections.IDictionary] -or $rule.Name -isnot [string] -or [string]::IsNullOrWhiteSpace($rule.Name) -or $rule.State -isnot [string] -or [string]::IsNullOrWhiteSpace($rule.State)){throw 'Host service rules require nonempty string Name and State'}
+        if($rule.Contains('StartMode') -and $null -ne $rule.StartMode -and $rule.StartMode -isnot [string]){throw 'Host service StartMode must be a string or null'}
+    }
+    foreach($rule in @($result.Host.RegistryRules)) {
+        if($rule -isnot [Collections.IDictionary] -or $rule.Key -isnot [string] -or [string]::IsNullOrWhiteSpace($rule.Key) -or $rule.ValueName -isnot [string]){throw 'Host registry rules require a nonempty string Key and a string ValueName'}
+        if($rule.Contains('Type')){
+            $registryType=0
+            if(-not [int]::TryParse([string]$rule.Type,[ref]$registryType) -or $registryType -notin 1,2,3,4,7,11){throw 'Host registry Type must be 1, 2, 3, 4, 7, or 11'}
+            $rule.Type=$registryType
+        }
+        if($rule.Contains('Operator') -and $rule.Operator -notin @('Equals','NotEquals','In','NotIn','Minimum','Maximum')){throw 'Unsupported host registry operator'}
+    }
     foreach($rule in @($result.Host.AuditRules)) {
         $id=[guid]::Empty
         if(-not [guid]::TryParse([string]$rule.SubcategoryGuid,[ref]$id) -or [int]$rule.Flags -notin 1,2,3){throw 'Host audit rules require SubcategoryGuid and Flags 1, 2, or 3'}

@@ -180,7 +180,16 @@ function ConvertTo-ADAnalyzerDirectoryObject {
     [pscustomobject]$result
 }
 function Get-ADAnalyzerHostData {
-    param([string[]]$ComputerNames,[pscredential]$Credential=[pscredential]::Empty,$Errors,[ValidateRange(1,3600)][uint32]$TimeoutSeconds=30)
+    param([string[]]$ComputerNames,[pscredential]$Credential=[pscredential]::Empty,$Errors,[ValidateRange(1,3600)][uint32]$TimeoutSeconds=30,[hashtable]$Profile)
+    $configuration=Import-ADAnalyzerProfile -Profile $Profile
+    $serviceNames=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $serviceFilters=[Collections.Generic.List[string]]::new()
+    foreach($name in @('Spooler','W32Time')+@($configuration.Host.Services | ForEach-Object Name)){
+        if($serviceNames.Add($name)){
+            $escaped=$name.Replace('\','\\').Replace("'","\'").Replace('"','\"')
+            $serviceFilters.Add("Name='$escaped'")
+        }
+    }
     foreach($computer in @($ComputerNames | Where-Object {$_} | Select-Object -Unique)){
         $session=$null;$initialErrorCount=$Errors.Count
         $data=[ordered]@{ComputerName=$computer;Status='Unknown';Services=@();OperatingSystem=$null;Patches=@();Dns=@();Smb=$null;Registry=@();AuditPolicy=[pscustomobject]@{Status='Unknown';Reason='Effective audit policy is not available from this CIM inventory'};Certificates=[pscustomobject]@{Status='Unknown';Reason='Certificate validation requires explicit endpoints and trust policy'}}
@@ -189,7 +198,7 @@ function Get-ADAnalyzerHostData {
             if($null -ne $Credential -and $Credential -ne [pscredential]::Empty){$arguments['Credential']=$Credential}
             $session=New-CimSession @arguments
             foreach($query in @(
-                @{Key='Services';ClassName='Win32_Service';Filter="Name='Spooler' OR Name='W32Time'"},
+                @{Key='Services';ClassName='Win32_Service';Filter=($serviceFilters -join ' OR ')},
                 @{Key='OperatingSystem';ClassName='Win32_OperatingSystem'},
                 @{Key='Patches';ClassName='Win32_QuickFixEngineering'},
                 @{Key='Dns';ClassName='Win32_NetworkAdapterConfiguration';Filter='IPEnabled=True'},
@@ -204,16 +213,37 @@ function Get-ADAnalyzerHostData {
             }
             $registry=[System.Collections.Generic.List[object]]::new()
             $settings=@(
-                @{Path='SYSTEM\CurrentControlSet\Services\W32Time\Parameters';Name='NtpServer';Method='GetStringValue'},
-                @{Path='SYSTEM\CurrentControlSet\Services\W32Time\Parameters';Name='Type';Method='GetStringValue'},
-                @{Path='SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters';Name='SMB1';Method='GetDWORDValue'}
+                @{Path='SYSTEM\CurrentControlSet\Services\W32Time\Parameters';Name='NtpServer';Method='GetStringValue';Type=1},
+                @{Path='SYSTEM\CurrentControlSet\Services\W32Time\Parameters';Name='Type';Method='GetStringValue';Type=1},
+                @{Path='SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters';Name='SMB1';Method='GetDWORDValue';Type=4}
             )
-            foreach($version in @('TLS 1.0','TLS 1.1','TLS 1.2','TLS 1.3')){foreach($side in @('Client','Server')){$settings+=@{Path=('SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\'+$version+'\'+$side);Name='Enabled';Method='GetDWORDValue'}}}
+            foreach($version in @('TLS 1.0','TLS 1.1','TLS 1.2','TLS 1.3')){foreach($side in @('Client','Server')){$settings+=@{Path=('SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\'+$version+'\'+$side);Name='Enabled';Method='GetDWORDValue';Type=4}}}
+            foreach($rule in @($configuration.Host.RegistryRules)){$settings+=@{Path=$rule.Key;Name=$rule.ValueName;Type=$rule.Type;Method=$null}}
+            $seenSettings=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase);$typeCache=@{}
+            $getters=@{1='GetStringValue';2='GetExpandedStringValue';3='GetBinaryValue';4='GetDWORDValue';7='GetMultiStringValue';11='GetQWORDValue'}
             foreach($setting in $settings){
+                if(-not $seenSettings.Add($setting.Path+[char]0+$setting.Name)){continue}
+                $type=$setting.Type;$method=$setting.Method
                 try {
-                    $value=Invoke-CimMethod -CimSession $session -Namespace root/default -ClassName StdRegProv -MethodName $setting.Method -Arguments @{hDefKey=[uint32]2147483650;sSubKeyName=$setting.Path;sValueName=$setting.Name} -OperationTimeoutSec $TimeoutSeconds -ErrorAction Stop
-                    $registry.Add([pscustomobject]@{Path=$setting.Path;Name=$setting.Name;Status=if($value.ReturnValue -eq 0){'Observed'}else{'Unknown'};Value=if($setting.Method -eq 'GetStringValue'){$value.sValue}else{$value.uValue};ReturnValue=$value.ReturnValue})
-                }catch{$registry.Add([pscustomobject]@{Path=$setting.Path;Name=$setting.Name;Status='Unknown';Value=$null;Message=$_.Exception.Message})}
+                    if(-not $method){
+                        if(-not $typeCache.ContainsKey($setting.Path)){$typeCache[$setting.Path]=Invoke-CimMethod -CimSession $session -Namespace root/default -ClassName StdRegProv -MethodName EnumValues -Arguments @{hDefKey=[uint32]2147483650;sSubKeyName=$setting.Path} -OperationTimeoutSec $TimeoutSeconds -ErrorAction Stop}
+                        $metadata=$typeCache[$setting.Path]
+                        if($metadata.ReturnValue -ne 0){throw 'Registry value type metadata is unavailable'}
+                        $names=@($metadata.sNames);$types=@($metadata.Types);$found=$false
+                        for($index=0;$index -lt $names.Count;$index++){
+                            if($names[$index] -ieq $setting.Name -and $index -lt $types.Count){$type=[int]$types[$index];$found=$true;break}
+                        }
+                        # StdRegProv can omit its arrays when only the default
+                        # value exists. A declared type can select its getter.
+                        if(-not $found -and -not ($setting.Name -eq '' -and $null -ne $setting.Type)){throw 'Registry value type is unavailable'}
+                        if(-not $getters.ContainsKey([int]$type)){throw 'Registry value type is unsupported'}
+                        $method=$getters[[int]$type]
+                    }
+                    $value=Invoke-CimMethod -CimSession $session -Namespace root/default -ClassName StdRegProv -MethodName $method -Arguments @{hDefKey=[uint32]2147483650;sSubKeyName=$setting.Path;sValueName=$setting.Name} -OperationTimeoutSec $TimeoutSeconds -ErrorAction Stop
+                    $record=[pscustomobject]@{Path=$setting.Path;Name=$setting.Name;Type=$type;Status=if($value.ReturnValue -eq 0){'Observed'}else{'Unknown'};Value=$null;ReturnValue=$value.ReturnValue}
+                    if($value.ReturnValue -eq 0){if($type -in 1,2,7){$record.Value=$value.sValue}else{$record.Value=$value.uValue}}
+                    $registry.Add($record)
+                }catch{$registry.Add([pscustomobject]@{Path=$setting.Path;Name=$setting.Name;Type=$type;Status='Unknown';Value=$null;Message=$_.Exception.Message})}
             }
             $data['Registry']=$registry.ToArray();$data['Status']=if($Errors.Count -gt $initialErrorCount){'Partial'}else{'Observed'}
         }catch{$Errors.Add([pscustomobject]@{Collector='Host';Target=$computer;Status='Unknown';Message=$_.Exception.Message}) > $null}
@@ -370,7 +400,7 @@ function Get-ADAnalyzerDirectoryData {
     $hosts=@();$includeHosts=[bool](Get-ADAnalyzerDirectoryField $Context 'IncludeHostChecks' (Get-ADAnalyzerDirectoryField $analysis 'IncludeHostChecks' $false))
     if($includeHosts){
         $names=@($controllers | ForEach-Object {[string](Get-ADAnalyzerDirectoryField $_ 'HostName')})
-        $hosts=@(Get-ADAnalyzerHostData -ComputerNames $names -Credential $credential -Errors $errors -TimeoutSeconds (Get-ADAnalyzerDirectoryField $analysis 'HostTimeoutSeconds' 30))
+        $hosts=@(Get-ADAnalyzerHostData -ComputerNames $names -Credential $credential -Errors $errors -TimeoutSeconds (Get-ADAnalyzerDirectoryField $analysis 'HostTimeoutSeconds' 30) -Profile $Profile)
         $coverage['Hosts']=if(@($hosts | Where-Object Status -ne 'Observed').Count){'Partial'}elseif($hosts.Count){'Collected'}else{'Unreadable'}
     }else{$coverage['Hosts']='NotConfigured'}
     $domainDto=[pscustomobject]@{DistinguishedName=$domainDn;DNSRoot=Get-ADAnalyzerDirectoryField $domain 'DNSRoot';SID=$domainSid;RootDomainSID=$rootDomainSid;DomainMode=Get-ADAnalyzerDirectoryField $domain 'DomainMode';ForestMode=Get-ADAnalyzerDirectoryField $forest 'ForestMode';MachineAccountQuota=Get-ADAnalyzerDirectoryField $settings 'ms-DS-MachineAccountQuota';OptionalFeatures=$optional;FeatureSchema=$available;PrivilegedSids=@($privilegedSids | Select-Object -Unique)}

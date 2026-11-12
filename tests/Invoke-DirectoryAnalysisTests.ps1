@@ -234,6 +234,120 @@ Invoke-DirectoryTest 'missing LAPS schema is Unknown and never queries managed p
     $checks=@(Test-ADAnalyzerDirectoryPolicy -Data $data -Profile $profile)
     Assert-DirectoryEqual 'Unknown' (Select-DirectoryCheck $checks 'LAPS.ROTATION_METADATA').Status
 }
+function Invoke-ConfiguredHostFixture([hashtable]$Profile,[string]$Mode='Normal',[switch]$Direct) {
+    $saved=@{};foreach($name in @('New-CimSession','Get-CimInstance','Invoke-CimMethod','Remove-CimSession')){$saved[$name]=(Get-Command $name).ScriptBlock}
+    $script:ConfiguredCalls=[Collections.Generic.List[object]]::new();$script:ConfiguredClosed=0;$script:ConfiguredMode=$Mode
+    $script:ConfiguredTimeout=$Profile.Analysis.HostTimeoutSeconds
+    $script:ConfiguredServiceName='Custom''Quoted\"Name$'
+    $script:ConfiguredRegistry=[ordered]@{
+        Text=@{Type=1;Value=''};Expand=@{Type=2;Value='%SystemRoot%'};Bytes=@{Type=3;Value=[byte[]]@(0,255)}
+        Flag=@{Type=4;Value=[uint32]0};Multi=@{Type=7;Value=[string[]]@('one','two')};Wide=@{Type=11;Value=[uint64]::MaxValue}
+        Unsupported=@{Type=99;Value=$null};''=@{Type=1;Value='default'}
+    }
+    function script:New-CimSession {param($ComputerName,$Credential,$OperationTimeoutSec,$ErrorAction)
+        $script:ConfiguredCalls.Add([pscustomobject]@{Command='Session';Parameters=$PSBoundParameters})
+        if($Credential -ne $script:Credential -or $OperationTimeoutSec -ne $script:ConfiguredTimeout){throw 'Session credential/timeout mismatch'}
+        [pscustomobject]@{ComputerName=$ComputerName}
+    }
+    function script:Get-CimInstance {param($CimSession,$ClassName,$Filter,$Namespace,$OperationTimeoutSec,$ErrorAction)
+        $script:ConfiguredCalls.Add([pscustomobject]@{Command='Class';Parameters=$PSBoundParameters})
+        if($OperationTimeoutSec -ne $script:ConfiguredTimeout){throw 'Query timeout mismatch'}
+        if($ClassName -eq 'Win32_Service'){
+            $pattern="Name='((?:\\.|[^'\\])*)'";$parts=[regex]::Matches($Filter,$pattern)
+            if(([regex]::Replace($Filter,$pattern,'') -replace ' OR ','') -ne ''){throw 'Unsafe WQL literal syntax'}
+            $names=@($parts | ForEach-Object {[regex]::Replace($_.Groups[1].Value,'\\(.)','$1')})
+            if(@($names | Where-Object {$_ -ieq $script:ConfiguredServiceName}).Count -gt 1){throw 'Duplicate service request'}
+            if($script:ConfiguredServiceName -in $names){[pscustomobject]@{Name=$script:ConfiguredServiceName;State='Running';StartMode='Auto'}}
+        }else{[pscustomobject]@{ClassName=$ClassName;Observed=$true}}
+    }
+    function script:Invoke-CimMethod {param($CimSession,$Namespace,$ClassName,$MethodName,$Arguments,$OperationTimeoutSec,$ErrorAction)
+        $script:ConfiguredCalls.Add([pscustomobject]@{Command='Registry';Parameters=$PSBoundParameters})
+        if($OperationTimeoutSec -ne $script:ConfiguredTimeout -or $Namespace -ne 'root/default' -or $ClassName -ne 'StdRegProv' -or $Arguments.hDefKey -ne [uint32]2147483650){throw 'Registry contract mismatch'}
+        if($Arguments.sSubKeyName -ine 'SYSTEM\Custom'){return [pscustomobject]@{ReturnValue=2;uValue=$null;sValue=$null}}
+        if($script:ConfiguredMode -eq 'Throw'){throw 'fixture registry exception'}
+        if($script:ConfiguredMode -eq 'Denied'){return [pscustomobject]@{ReturnValue=5}}
+        if($MethodName -eq 'EnumValues'){
+            if($script:ConfiguredMode -eq 'DefaultOnly'){return [pscustomobject]@{ReturnValue=0;sNames=$null;Types=$null}}
+            $names=@($script:ConfiguredRegistry.Keys | Where-Object {$_ -ne '' -and -not ($script:ConfiguredMode -eq 'Missing' -and $_ -eq 'Flag')})
+            return [pscustomobject]@{ReturnValue=0;sNames=$names;Types=@($names | ForEach-Object {$script:ConfiguredRegistry[$_].Type})}
+        }
+        if($script:ConfiguredMode -eq 'GetterDenied'){return [pscustomobject]@{ReturnValue=5;uValue=999;sValue='must not be treated as observed'}}
+        $row=$script:ConfiguredRegistry[$Arguments.sValueName]
+        $expected=@{1='GetStringValue';2='GetExpandedStringValue';3='GetBinaryValue';4='GetDWORDValue';7='GetMultiStringValue';11='GetQWORDValue'}[[int]$row.Type]
+        if($MethodName -ne $expected){throw 'Wrong registry getter'}
+        $result=[pscustomobject]@{ReturnValue=0;uValue=$null;sValue=$null}
+        if($row.Type -in 1,2,7){$result.sValue=$row.Value}else{$result.uValue=$row.Value};$result
+    }
+    function script:Remove-CimSession {param($CimSession,$ErrorAction) $script:ConfiguredClosed++}
+    try{
+        if($Direct){$errors=[Collections.Generic.List[object]]::new();$data=[pscustomobject]@{Hosts=@(Get-ADAnalyzerHostData -ComputerNames 'dc.example.invalid' -Credential $script:Credential -Errors $errors -Profile $Profile -TimeoutSeconds $Profile.Analysis.HostTimeoutSeconds)}}
+        else{$data=Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext $false $true) -Profile $Profile}
+        [pscustomobject]@{Data=$data;Calls=$script:ConfiguredCalls.ToArray();Closed=$script:ConfiguredClosed}
+    }finally{foreach($name in $saved.Keys){Set-Item ('Function:script:'+$name) $saved[$name]}}
+}
+Invoke-DirectoryTest 'custom host configuration reaches bounded service and typed registry collection' {
+    $profile=New-DirectoryProfile;$profile.Analysis.HostTimeoutSeconds=17
+    $service='Custom''Quoted\"Name$';$profile.Host.Services=@(@{Name=$service;State='Running';StartMode='Auto'},@{Name=$service.ToUpperInvariant();State='Running'})
+    $profile.Host.RegistryRules=@('Text','Expand','Bytes','Flag','Multi','Wide' | ForEach-Object {@{Key='SYSTEM\Custom';ValueName=$_;Expected=$null}})
+    $profile.Host.RegistryRules+=@(@{Key='system\custom';ValueName='FLAG';Expected=0})
+    $before=ConvertTo-Json -InputObject $profile -Depth 30 -Compress;$r=Invoke-ConfiguredHostFixture $profile
+    $hostData=$r.Data.Hosts[0];Assert-DirectoryEqual 1 @($hostData.Services).Count;Assert-DirectoryEqual $service $hostData.Services[0].Name
+    $rows=@($hostData.Registry | Where-Object Path -ieq 'SYSTEM\Custom');Assert-DirectoryEqual 6 $rows.Count
+    Assert-DirectoryEqual '' ($rows | Where-Object Name -eq Text).Value
+    Assert-DirectoryEqual '%SystemRoot%' ($rows | Where-Object Name -eq Expand).Value
+    Assert-DirectoryEqual '0,255' (($rows | Where-Object Name -eq Bytes).Value -join ',')
+    Assert-DirectoryEqual 0 ($rows | Where-Object Name -eq Flag).Value
+    Assert-DirectoryEqual 'one,two' (($rows | Where-Object Name -eq Multi).Value -join ',')
+    Assert-DirectoryEqual ([uint64]::MaxValue) ($rows | Where-Object Name -eq Wide).Value
+    Assert-DirectoryEqual 0 @($rows | Where-Object Status -ne Observed).Count
+    Assert-DirectoryEqual 1 @($r.Calls | Where-Object {$_.Command -eq 'Registry' -and $_.Parameters.MethodName -eq 'EnumValues' -and $_.Parameters.Arguments.sSubKeyName -ieq 'SYSTEM\Custom'}).Count
+    Assert-DirectoryEqual 6 @($r.Calls | Where-Object {$_.Command -eq 'Registry' -and $_.Parameters.MethodName -ne 'EnumValues' -and $_.Parameters.Arguments.sSubKeyName -ieq 'SYSTEM\Custom'}).Count
+    Assert-DirectoryEqual 1 $r.Closed;Assert-DirectoryEqual $before (ConvertTo-Json -InputObject $profile -Depth 30 -Compress)
+}
+Invoke-DirectoryTest 'actual custom host collection feeds passing failing and unknown assessment checks' {
+    foreach($file in @('ADGpo','ADPolicyAnalysis','ADHostAnalysis','ADOperations','ADAssessment')){. (Join-Path $RepositoryRoot ('bin/'+$file+'.ps1'))}
+    $profile=New-DirectoryProfile
+    $profile.Host.Services=@(@{Name='Custom''Quoted\"Name$';State='Running';StartMode='Auto'})
+    $profile.Host.RegistryRules=@(@{Key='SYSTEM\Custom';ValueName='Flag';Expected=0;Type=4},@{Key='SYSTEM\Custom';ValueName='Text';Expected='';Type=1},@{Key='SYSTEM\Custom';ValueName='Multi';Expected=@('one','two');Type=7})
+    $r=Invoke-ConfiguredHostFixture $profile
+    $checks=@(Test-ADAnalyzerHostPolicy -Hosts $r.Data.Hosts -Profile $profile)
+    Assert-DirectoryEqual 4 @($checks | Where-Object {$_.RuleId -in 'HOST.SERVICE','HOST.REGISTRY' -and $_.Status -eq 'Pass'}).Count
+    $r.Data | Add-Member -NotePropertyName HostChecks -NotePropertyValue $checks
+    $assessment=Invoke-ADAnalyzerAssessment -DirectoryData $r.Data -Profile $profile
+    Assert-DirectoryEqual 4 @($assessment.Checks | Where-Object {$_.RuleId -in 'HOST.SERVICE','HOST.REGISTRY' -and $_.Status -eq 'Pass'}).Count
+    $profile.Host.Services[0].State='Stopped';$profile.Host.RegistryRules[0].Expected=1
+    $checks=@(Test-ADAnalyzerHostPolicy -Hosts $r.Data.Hosts -Profile $profile)
+    Assert-DirectoryEqual 2 @($checks | Where-Object {$_.RuleId -in 'HOST.SERVICE','HOST.REGISTRY' -and $_.Status -eq 'Fail'}).Count
+    $r=Invoke-ConfiguredHostFixture $profile GetterDenied;$checks=@(Test-ADAnalyzerHostPolicy -Hosts $r.Data.Hosts -Profile $profile)
+    Assert-DirectoryEqual 3 @($checks | Where-Object {$_.RuleId -eq 'HOST.REGISTRY' -and $_.Status -eq 'Unknown'}).Count
+}
+Invoke-DirectoryTest 'unavailable custom registry observations remain Unknown and always close their session' {
+    foreach($mode in @('Missing','Denied','Throw','GetterDenied')){
+        $profile=New-DirectoryProfile;$profile.Host.RegistryRules=@(@{Key='SYSTEM\Custom';ValueName='Flag';Expected=0})
+        $r=Invoke-ConfiguredHostFixture $profile $mode;$row=@($r.Data.Hosts[0].Registry | Where-Object Path -eq 'SYSTEM\Custom')[0]
+        Assert-DirectoryEqual Unknown $row.Status;Assert-DirectoryEqual $null $row.Value;Assert-DirectoryEqual 1 $r.Closed
+    }
+    $profile=New-DirectoryProfile;$profile.Host.RegistryRules=@(@{Key='SYSTEM\Custom';ValueName='Unsupported';Expected=0})
+    $r=Invoke-ConfiguredHostFixture $profile;$row=@($r.Data.Hosts[0].Registry | Where-Object Path -eq 'SYSTEM\Custom')[0]
+    Assert-DirectoryEqual Unknown $row.Status;Assert-DirectoryEqual $null $row.Value;Assert-DirectoryEqual 1 $r.Closed
+}
+Invoke-DirectoryTest 'default registry values require known type evidence and support an explicit getter type' {
+    $profile=New-DirectoryProfile;$profile.Host.RegistryRules=@(@{Key='SYSTEM\Custom';ValueName='';Expected='default'})
+    $r=Invoke-ConfiguredHostFixture $profile DefaultOnly;$row=@($r.Data.Hosts[0].Registry | Where-Object Path -eq 'SYSTEM\Custom')[0];Assert-DirectoryEqual Unknown $row.Status
+    $profile.Host.RegistryRules[0].Type=1;$r=Invoke-ConfiguredHostFixture $profile DefaultOnly;$row=@($r.Data.Hosts[0].Registry | Where-Object Path -eq 'SYSTEM\Custom')[0]
+    Assert-DirectoryEqual Observed $row.Status;Assert-DirectoryEqual default $row.Value;Assert-DirectoryEqual 1 $row.Type;Assert-DirectoryEqual 1 $r.Closed
+}
+Invoke-DirectoryTest 'invalid or secret host rules reject before any CIM access' {
+    foreach($case in @(
+        @{Services=@(@{Name='';State='Running'})},@{Services=@(@{Name=@('one','two');State='Running'})},
+        @{RegistryRules=@(@{Key='';ValueName='Enabled';Expected=0})},@{RegistryRules=@(@{Key='SYSTEM\Custom';ValueName='Flag';Type=99;Expected=0})},
+        @{RegistryRules=@(@{Key='SYSTEM\Custom';ValueName='DefaultPassword';Expected='unit14-not-requested'})}
+    )){
+        $profile=New-DirectoryProfile;foreach($key in $case.Keys){$profile.Host[$key]=$case[$key]}
+        $caught=$false;try{$null=Invoke-ConfiguredHostFixture $profile -Direct}catch{$caught=$true}
+        Assert-DirectoryTrue $caught 'Invalid host rule was accepted';Assert-DirectoryEqual 0 $script:ConfiguredCalls.Count
+    }
+}
 Invoke-DirectoryTest 'CIM host inventory uses credentials and keeps unsupported observations Unknown' {
     $script:RemovedSession=$false
     $profile=New-DirectoryProfile;$data=Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext $false $true) -Profile $profile

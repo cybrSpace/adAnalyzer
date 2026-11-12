@@ -98,7 +98,12 @@ function Test-ADAnalyzerHostPolicy {
         foreach($rule in @($rules.RegistryRules)) {
             $record=@($hostRecord.Registry | Where-Object { $_.Path -ieq $rule.Key -and $_.Name -ieq $rule.ValueName })
             $status='Unknown';$observed=$null
-            if($record.Count -eq 1 -and $record[0].Status -eq 'Observed'){$observed=$record[0].Value;$operator=if($rule.Operator){$rule.Operator}else{'Equals'};try{$status=if(Test-ADAnalyzerPolicyComparison $observed $rule.Expected $operator){'Pass'}else{'Fail'}}catch{$status='Invalid'}}
+            if($record.Count -eq 1 -and $record[0].Status -eq 'Observed'){
+                $observed=$record[0].Value;$operator=if($rule.Operator){$rule.Operator}else{'Equals'}
+                if($rule.Contains('Type') -and $null -eq $record[0].Type){$status='Unknown'}
+                elseif($rule.Contains('Type') -and $record[0].Type -ne $rule.Type){$status='Invalid'}
+                else{try{$status=if(Test-ADAnalyzerPolicyComparison $observed $rule.Expected $operator){'Pass'}else{'Fail'}}catch{$status='Invalid'}}
+            }
             New-ADAnalyzerCheck -RuleId 'HOST.REGISTRY' -Status $status -Severity Medium -Category Host -Target ($name+'/Registry/'+$rule.Key+'/'+$rule.ValueName) -Observed $observed -Expected $rule.Expected -Message 'An absent registry override does not establish the operating-system default or effective protocol behavior' -Applicability Configured
         }
         if(@($rules.AuditRules).Count) {
