@@ -28,7 +28,11 @@ $profile.Host.RegistryRules=@(@{Key='SYSTEM\Fixture';ValueName='Enabled';Expecte
 $profile.Host.AuditRules=@(@{SubcategoryGuid='0cce9215-69ae-11d9-bed3-505054503030';Flags=3})
 $profile.Host.CertificateEndpoints=@(@{HostName='dc.example.invalid';Port=636;ServerName='dc.example.invalid';MinimumRemainingDays=30})
 Test-HostPolicy 'secret registry baselines fail before any host check audit or TLS observation' {
-    $copy=Get-ADAnalyzerDefaultProfile;$copy.Host.RegistryRules=@(@{Kind='Account';Key='Software\Fixture';ValueName='DefaultPassword';Expected='unit7-host-secret'})
+    foreach($rule in @(
+        @{Kind='Account';Name='Friendly label';Key='Software\Fixture';ValueName='DefaultPassword';Expected='unit7-host-secret'}
+        @{Name='Friendly label';Key='Software\Fixture\DefaultPassword';Expected='unit7-host-secret'}
+    )){
+    $copy=Get-ADAnalyzerDefaultProfile;$copy.Host.RegistryRules=@($rule)
     $copy.Host.AuditRules=$profile.Host.AuditRules;$copy.Host.CertificateEndpoints=$profile.Host.CertificateEndpoints
     $audit=$script:AuditCalls;$tls=$script:TlsCalls;$emitted=[Collections.ArrayList]::new();$caught=$null
     try{Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy | ForEach-Object {$null=$emitted.Add($_)}}catch{$caught=$_}
@@ -36,6 +40,7 @@ Test-HostPolicy 'secret registry baselines fail before any host check audit or T
     Assert-Equal 'Value baselines for secret-bearing settings are not supported. Use secret-presence checks.' $caught.Exception.Message
     Assert-True (([string]$caught.TargetObject) -notmatch 'unit7-host-secret') 'Secret error target'
     Assert-Equal 0 $emitted.Count;Assert-Equal $audit $script:AuditCalls;Assert-Equal $tls $script:TlsCalls
+    }
 }
 Test-HostPolicy 'host services and explicit registry overrides are evaluated from observations' {
     $checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile -Credential $script:Credential)

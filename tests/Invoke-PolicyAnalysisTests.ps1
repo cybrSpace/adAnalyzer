@@ -20,6 +20,7 @@ Test-Policy 'direct raw profiles reject secret-value rules before emitting any p
         @{Kind='SecurityOptions';Name='MACHINE\Software\Fixture\DefaultPassword';Expected='unit7-policy-secret'}
         @{Kind='SecurityOptions';Key='MACHINE\Software\Fixture\DefaultPassword';Expected='unit7-policy-secret'}
         @{Name='Friendly label';ValueName='DefaultPassword';Expected='unit7-policy-secret'}
+        @{Name='Friendly label';Key='Software\Fixture\DefaultPassword';Expected='unit7-policy-secret'}
         @{Kind='SecurityOptions';Name='MACHINE\Software\Fixture\DefaultPassword';ValueName='Enabled';Expected='unit7-policy-secret'}
     )){
         $profile=Get-ADAnalyzerDefaultProfile;$profile[$section]=@($rule)

@@ -23,13 +23,15 @@ function Assert-ADAnalyzerValueBaseline {
         elseif($null -ne $rule.PSObject.Properties['Kind']){$kind=$rule.Kind}
         # A registry key named Password can contain ordinary values such as Enabled.
         # Evaluate the actual value/setting name before using a full-key fallback.
-        $identity=if($collection.Registry -or $kind -eq 'Registry'){
-            if($rule.ValueName){$rule.ValueName}elseif($rule.Name){$rule.Name}else{$rule.Key}
+        $identities=if($collection.Registry -or $kind -eq 'Registry'){
+            if($rule.ValueName){@($rule.ValueName)}else{@($rule.Name,$rule.Key)}
         }else{
             if($rule.Name){$rule.Name}elseif($rule.ValueName){$rule.ValueName}else{$rule.Key}
         }
-        if(Test-ADAnalyzerSecretName ([string]$identity)){
-            throw 'Value baselines for secret-bearing settings are not supported. Use secret-presence checks.'
+        foreach($identity in @($identities)){
+            if(Test-ADAnalyzerSecretName ([string]$identity)){
+                throw 'Value baselines for secret-bearing settings are not supported. Use secret-presence checks.'
+            }
         }
     }}
 }
