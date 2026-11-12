@@ -90,6 +90,8 @@ function Test-ConcurrentJournal([string]$Operation){
         foreach($role in @('First','Second')){
             $arguments='-NoLogo -NoProfile -NonInteractive -File "{0}" -RepositoryRoot "{1}" -Coordination "{2}" -JournalPath "{3}" -Role {4} -Operation {5}' -f $fixture,$RepositoryRoot,$directory,$script:Journal,$role,$Operation
             $process=Start-Process -FilePath $engine -ArgumentList $arguments -PassThru -RedirectStandardOutput (Join-Path $directory ($role+'.out')) -RedirectStandardError (Join-Path $directory ($role+'.err'))
+            # Windows PowerShell 5.1 requires the handle cached before exit to retain ExitCode.
+            $null=$process.Handle
             $processes+=,$process
             Wait-ConcurrentStage $process (Join-Path $directory ($role+'-ready'))
             if($role -eq 'First' -and $process.HasExited){throw (Get-Content -LiteralPath (Join-Path $directory 'First.err') -Raw)}
