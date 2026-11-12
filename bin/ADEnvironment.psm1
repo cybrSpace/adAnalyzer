@@ -820,10 +820,22 @@ class FindingData : Finding {
 
         foreach ($item in $list) {
 
+            # Windows PowerShell 5.1 serializes BigInteger as its CLR metadata.
+            # Project flat finding fields without changing the live record.
+            $jsonRecord = [ordered]@{}
+            foreach ($property in $item.PSObject.Properties) {
+                $field = $property.Value
+                if ($field -is [bigint]) {
+                    if ($field -ge [long]::MinValue -and $field -le [long]::MaxValue) { $field = [long]$field }
+                    elseif ($field -ge 0 -and $field -le [uint64]::MaxValue) { $field = [uint64]$field }
+                    else { $field = $field.ToString([Globalization.CultureInfo]::InvariantCulture) }
+                }
+                $jsonRecord[$property.Name] = $field
+            }
             $object = [ordered]@{
                 'class'   = $value
                 'finding' = $item.'finding'
-                'object'  = ($item | ConvertTo-Json)
+                'object'  = ([PSCustomObject]$jsonRecord | ConvertTo-Json)
             }
 
             [FindingData]::GetInstance().Add([PSCustomObject]$object) > $null

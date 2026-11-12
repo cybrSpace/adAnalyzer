@@ -397,6 +397,25 @@ try{
     Assert-ClassEqual value $r.Later;Assert-ClassEqual 'one;two' $r.Members;Assert-ClassEqual literal $r.Literal
     Assert-ClassEqual $true $r.Safe;Assert-ClassEqual $true $r.Unchanged
 }
+Invoke-ClassTest 'aggregate JSON preserves exact flat policy integers without changing native records' {
+    $r=Invoke-ClassScope @'
+$numbers=@('0','-9223372036854775808','9223372036854775807','18446744073709551615','18446744073709551616','-9223372036854775809')
+$list=[Finding]::new();foreach($number in $numbers){$null=$list.Add([pscustomobject]@{finding='fixture';Number=[bigint]::Parse($number,[Globalization.CultureInfo]::InvariantCulture)})}
+$before=@($list | ForEach-Object {$_.Number.ToString([Globalization.CultureInfo]::InvariantCulture)})
+try{
+    $null=[FindingData]::Initialize();[FindingData]::Add('fixture',$list)
+    $records=@([FindingData]::GetInstance());$roundtrip=@($records | ForEach-Object {$_.object | ConvertFrom-Json})
+    [pscustomobject]@{Json=@($records | ForEach-Object object);Values=@($roundtrip | ForEach-Object {[string]$_.Number});LargeStrings=($roundtrip[4].Number -is [string] -and $roundtrip[5].Number -is [string]);Native=(@($list | Where-Object {$_.Number -isnot [bigint]}).Count -eq 0);Unchanged=(($before -join ',') -ceq (($list | ForEach-Object {$_.Number.ToString([Globalization.CultureInfo]::InvariantCulture)}) -join ','))}
+}finally{[FindingData]::Close()}
+'@
+    $expected=@('0','-9223372036854775808','9223372036854775807','18446744073709551615','18446744073709551616','-9223372036854775809')
+    for($i=0;$i -lt $expected.Count;$i++){
+        Assert-ClassEqual $expected[$i] $r.Values[$i]
+        $valuePattern=if($i -lt 4){'"Number"\s*:\s*'+[regex]::Escape($expected[$i])+'\s*[,}]'}else{'"Number"\s*:\s*"'+[regex]::Escape($expected[$i])+'"'}
+        Assert-ClassTrue ($r.Json[$i] -match $valuePattern) 'Aggregate integer JSON lost numeric/text representation'
+    }
+    Assert-ClassEqual $true $r.LargeStrings;Assert-ClassEqual $true $r.Native;Assert-ClassEqual $true $r.Unchanged
+}
 if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){
     Invoke-ClassTest 'legacy CSV locked destinations fail without silently choosing another filename' {
         $result=Invoke-ClassScope @'
