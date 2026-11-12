@@ -89,6 +89,8 @@ Only explicit approved Fail inactivity findings can propose DisableAccount. Unkn
 
 Apply and undo hold an exclusive `<JournalPath>.lock` file handle while reading and updating a journal. A competing writer for the same path fails explicitly before AD queries or mutations; undo re-reads entries under that ownership. The empty marker file remains after use to avoid unlink races, and its presence alone does not mean a run is active. Ownership is released on completion, failure, cancellation, or process termination. This coordinates cooperating writers to one journal path; it does not make AD changes transactional or coordinate different journal paths.
 
+Journal paths resolve once against the caller's PowerShell FileSystem location and use that absolute path for ownership, reads, and writes. Relative report paths use the same PowerShell location. Non-FileSystem providers are rejected.
+
 ## Unattended CLI and prerequisites
 
 `bin/Start-ADAnalyzer.ps1` accepts explicit Operation, Domain/FQDN, Server, SearchBase, Credential, ProfilePath, OutputPath, PlanPath, JournalPath, ReferencePath, and collection switches. It does not clear caller modules/variables, change location, or select a hardcoded domain. Dot sourcing defines the function without running a scan. Script operations are assess/report, plan/remediate, apply, undo, and prerequisites. Apply requires PlanPath and JournalPath; undo requires JournalPath. The function throws on scan/export failures. The script exits 1 on failure, 2 for partial/unreadable coverage, and optionally 3 with `-FailOnFindings`; findings and collection completeness are separate concepts.

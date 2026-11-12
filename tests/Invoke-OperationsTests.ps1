@@ -177,6 +177,41 @@ try {
     }
     Invoke-Test 'concurrent apply preserves the successful journal and blocks the stale writer before AD reads' {Test-ConcurrentJournal Apply}
     Invoke-Test 'concurrent undo preserves the successful undo and blocks the stale writer before AD reads' {Test-ConcurrentJournal Undo}
+    Invoke-Test 'relative export paths follow PowerShell location rather than the process directory' {
+        $location=Get-Location;$dotnet=[Environment]::CurrentDirectory
+        $processDirectory=Join-Path $script:Temporary 'process-export';$psDirectory=Join-Path $script:Temporary 'powershell-export'
+        $null=New-Item -Path $processDirectory,$psDirectory -ItemType Directory
+        try{
+            [Environment]::CurrentDirectory=$processDirectory;Set-Location -LiteralPath $psDirectory
+            $path=Export-ADAnalyzerAssessment -Assessment $script:Assessment -Path 'report.json' -Confirm:$false
+            Assert-Equal (Join-Path $psDirectory 'report.json') $path
+            Assert-Equal $true (Test-Path -LiteralPath (Join-Path $psDirectory 'report.json'))
+            Assert-Equal $false (Test-Path -LiteralPath (Join-Path $processDirectory 'report.json'))
+            Assert-Throws {Export-ADAnalyzerAssessment -Assessment $script:Assessment -Path 'Env:\ADAnalyzerTestOutput' -Confirm:$false}
+        }finally{Set-Location -LiteralPath $location.Path;[Environment]::CurrentDirectory=$dotnet}
+    }
+    Invoke-Test 'relative journal reads writes undo and ownership bind one path and preserve unrelated files' {
+        $location=Get-Location;$dotnet=[Environment]::CurrentDirectory
+        $processDirectory=Join-Path $script:Temporary 'process-journal';$psDirectory=Join-Path $script:Temporary 'powershell-journal'
+        $null=New-Item -Path $processDirectory,$psDirectory -ItemType Directory
+        $other=Join-Path $processDirectory 'journal.json';[IO.File]::WriteAllText($other,'unrelated journal bytes')
+        try{
+            [Environment]::CurrentDirectory=$processDirectory;Set-Location -LiteralPath $psDirectory
+            $script:Journal='journal.json';$plan=New-FixturePlan
+            $null=Apply-FixturePlan $plan
+            $null=Undo-ADAnalyzerRemediation -JournalPath 'journal.json' -Server dc.example.invalid -Confirm:$false
+            Assert-Equal $true $script:Current.Enabled
+            Assert-Equal 'unrelated journal bytes' ([IO.File]::ReadAllText($other))
+            Assert-Equal $false (Test-Path -LiteralPath ($other+'.lock'))
+            Assert-Equal Undone (Get-Content -LiteralPath (Join-Path $psDirectory 'journal.json') -Raw | ConvertFrom-Json).Entries[0].Status
+            $lease=Enter-ADAnalyzerJournalLease (Join-Path $psDirectory 'journal.json')
+            try{
+                $before=$script:Reads
+                Assert-Throws {Apply-FixturePlan $plan}
+                Assert-Equal $before $script:Reads
+            }finally{$lease.Dispose()}
+        }finally{Set-Location -LiteralPath $location.Path;[Environment]::CurrentDirectory=$dotnet}
+    }
     Invoke-Test 'journal ownership is released after a failed mutation and a successful retry' {
         $plan=New-FixturePlan;$script:FailMutation=$true
         Assert-Throws {Apply-FixturePlan $plan}

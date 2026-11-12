@@ -76,9 +76,16 @@ function Read-ADAnalyzerOperationDocument {
     return $InputObject
 }
 
+function Resolve-ADAnalyzerOperationFilePath {
+    param([Parameter(Mandatory)][string]$Path)
+    $provider=$null;$drive=$null
+    $full=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path,[ref]$provider,[ref]$drive)
+    if($provider.Name -ne 'FileSystem'){throw 'Assessment and journal paths must use the FileSystem provider'}
+    return $full
+}
 function Write-ADAnalyzerOperationFile {
     param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][AllowEmptyString()][string]$Content)
-    $full=[IO.Path]::GetFullPath($Path);$directory=[IO.Path]::GetDirectoryName($full)
+    $full=Resolve-ADAnalyzerOperationFilePath $Path;$directory=[IO.Path]::GetDirectoryName($full)
     if(-not (Test-Path -LiteralPath $directory -PathType Container)) {
         $null=Microsoft.PowerShell.Management\New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false
     }
@@ -486,7 +493,7 @@ function Assert-ADAnalyzerOperationInactivity {
 
 function Enter-ADAnalyzerJournalLease {
     param([Parameter(Mandatory)][string]$Path)
-    $full=[IO.Path]::GetFullPath($Path)
+    $full=Resolve-ADAnalyzerOperationFilePath $Path
     if(Test-Path -LiteralPath $full -PathType Container){throw 'JournalPath must name a file'}
     $directory=[IO.Path]::GetDirectoryName($full)
     if(-not [IO.Directory]::Exists($directory)){$null=[IO.Directory]::CreateDirectory($directory)}
@@ -543,6 +550,7 @@ function Invoke-ADAnalyzerRemediationPlan {
     param([Parameter(Mandatory)]$Plan,[Parameter(Mandatory)][string]$Server,[pscredential]$Credential=[pscredential]::Empty,[Parameter(Mandatory)][string]$JournalPath)
     $planObject=Read-ADAnalyzerOperationDocument $Plan 'Plan'
     Assert-ADAnalyzerOperationPlan $planObject
+    $JournalPath=Resolve-ADAnalyzerOperationFilePath $JournalPath
     $connection=Get-ADAnalyzerOperationConnection $Server $Credential
     $reviewedServer=[string](Get-ADAnalyzerOperationValue (Get-ADAnalyzerOperationValue $planObject @('Context')) @('Server'))
     if($reviewedServer -and $reviewedServer -ine $Server){throw 'Server differs from the DC recorded in the reviewed assessment'}
@@ -596,6 +604,7 @@ function Invoke-ADAnalyzerRemediationPlan {
 function Undo-ADAnalyzerRemediation {
     [CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact='High')]
     param([Parameter(Mandatory)][string]$JournalPath,[Parameter(Mandatory)][string]$Server,[pscredential]$Credential=[pscredential]::Empty)
+    $JournalPath=Resolve-ADAnalyzerOperationFilePath $JournalPath
     $journal=Read-ADAnalyzerOperationDocument $JournalPath 'Journal'
     if($journal.JournalType -ne 'ADAnalyzerRemediationJournal' -or $journal.Server -ine $Server){throw 'Journal type/server does not match this undo request'}
     $connection=Get-ADAnalyzerOperationConnection $Server $Credential
