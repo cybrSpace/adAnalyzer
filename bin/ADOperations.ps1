@@ -207,6 +207,19 @@ function Compare-ADAnalyzerAssessment {
             }
             $target=[string](Get-ADAnalyzerOperationValue $row @('Target','DistinguishedName','ObjectGuid','SID'))
             if(-not $target){throw 'A snapshot finding is missing its stable target'}
+            if($rule -in 'HOST.SERVICE','HOST.REGISTRY'){
+                $evidence=Get-ADAnalyzerOperationValue $row @('Evidence')
+                $profileRuleId=Get-ADAnalyzerOperationValue $evidence @('ProfileRuleId')
+                if($null -ne $profileRuleId){
+                    $parts=@()
+                    if($rule -eq 'HOST.REGISTRY'){
+                        $path=Get-ADAnalyzerOperationValue $evidence @('RegistryPath');$valueName=Get-ADAnalyzerOperationValue $evidence @('ValueName')
+                        if($path -isnot [string] -or $valueName -isnot [string]){throw 'A named host registry snapshot is missing its literal path/value identity'}
+                        $parts=@($path,$valueName)
+                    }
+                    $target=Get-ADAnalyzerHostRuleIdentity -Rule @{Id=$profileRuleId} -Target $target -Parts $parts
+                }
+            }
             $key=$rule.ToUpperInvariant()+[char]0+$target.ToUpperInvariant()
             if(-not $maps[$pair[1]].ContainsKey($key)){$maps[$pair[1]][$key]=[Collections.ArrayList]::new()}
             $null=$maps[$pair[1]][$key].Add((ConvertTo-ADAnalyzerSafeData -InputObject $row))

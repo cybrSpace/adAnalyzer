@@ -468,6 +468,46 @@ try {
         $b.Checks[0].Status='Unknown'
         Assert-Equal Changed (Compare-ADAnalyzerAssessment $a $b).Changes[0].Change
     }
+    Invoke-Test 'named host comparisons distinguish removal ordering expectation changes and observed resolution' {
+        foreach($file in @('ADGpo','ADPolicyAnalysis','ADHostAnalysis')){. (Join-Path $RepositoryRoot ('bin/'+$file+'.ps1'))}
+        $hostRecord=[pscustomobject]@{ComputerName='fixture';Services=@([pscustomobject]@{Name='Spooler';State='Stopped';StartMode='Disabled'});Registry=@()}
+        $profile=Get-ADAnalyzerDefaultProfile;$profile.Host.Services=@(@{Id='missing';Name='Spooler';State='Running'},@{Id='observed';Name='Spooler';State='Stopped'})
+        $a=@{Checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile | Where-Object RuleId -eq HOST.SERVICE)}
+        $profile.Host.Services=@($profile.Host.Services[1])
+        $b=@{Checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile | Where-Object RuleId -eq HOST.SERVICE)}
+        $comparison=Compare-ADAnalyzerAssessment $a $b
+        Assert-Equal 2 $comparison.Changes.Count;Assert-Equal 0 $comparison.Summary.Resolved
+        $missing=@($comparison.Changes | Where-Object {$_.Reference[0].Evidence.ProfileRuleId -eq 'missing'})[0]
+        Assert-Equal Changed $missing.Change;Assert-Equal NotObservedInDifference $missing.Reason;Assert-Equal 0 $missing.Difference.Count
+        Assert-Equal 1 $comparison.Summary.Unchanged
+        $profile.Host.Services=@(@{Id='observed';Name='Spooler';State='Stopped'},@{Id='missing';Name='Spooler';State='Running'})
+        $b=@{Checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile | Where-Object RuleId -eq HOST.SERVICE)}
+        foreach($check in $b.Checks){$check.CheckId='volatile-'+$check.Evidence.ProfileRuleId}
+        Assert-Equal 2 (Compare-ADAnalyzerAssessment $a $b).Summary.Unchanged
+        $profile.Host.Services[0].StartMode='Disabled';$profile.Host.Services[1].State='Stopped'
+        $b=@{Checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile | Where-Object RuleId -eq HOST.SERVICE)}
+        $comparison=Compare-ADAnalyzerAssessment $a $b
+        Assert-Equal 1 $comparison.Summary.Resolved;Assert-Equal 1 $comparison.Summary.Changed
+    }
+    Invoke-Test 'named host registry comparison preserves literal key and value identity' {
+        foreach($file in @('ADGpo','ADPolicyAnalysis','ADHostAnalysis')){. (Join-Path $RepositoryRoot ('bin/'+$file+'.ps1'))}
+        $profile=Get-ADAnalyzerDefaultProfile;$profile.Host.RegistryRules=@(@{Id='shared';Key='SYSTEM\Fixture';ValueName='part/Enabled';Expected=1},@{Id='shared';Key='SYSTEM\Fixture/part';ValueName='Enabled';Expected=0})
+        $hostRecord=[pscustomobject]@{ComputerName='fixture';Services=@();Registry=@([pscustomobject]@{Path='SYSTEM\Fixture';Name='part/Enabled';Status='Observed';Value=0},[pscustomobject]@{Path='SYSTEM\Fixture/part';Name='Enabled';Status='Observed';Value=0})}
+        $a=@{Checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile | Where-Object RuleId -eq HOST.REGISTRY)}
+        $profile.Host.RegistryRules=@($profile.Host.RegistryRules[1]);$b=@{Checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile | Where-Object RuleId -eq HOST.REGISTRY)}
+        $comparison=Compare-ADAnalyzerAssessment $a $b
+        Assert-Equal 2 $comparison.Changes.Count;Assert-Equal 0 $comparison.Summary.Resolved
+        Assert-Equal 1 $comparison.Summary.Unchanged;Assert-Equal 1 $comparison.Summary.Changed
+        Assert-Equal NotObservedInDifference ($comparison.Changes | Where-Object Change -eq Changed).Reason
+    }
+    Invoke-Test 'malformed named host snapshot identities are rejected instead of merged' {
+        foreach($id in @('', ' ',1,('bad'+[char]0+'id'))){
+            $snapshot=@{Checks=@(@{RuleId='HOST.SERVICE';Target='fixture/Service/Spooler';Status='Fail';Evidence=@{ProfileRuleId=$id}})}
+            Assert-Throws {Compare-ADAnalyzerAssessment $snapshot $snapshot}
+        }
+        $snapshot=@{Checks=@(@{RuleId='HOST.REGISTRY';Target='fixture/Registry/Key/Name';Status='Fail';Evidence=@{ProfileRuleId='named'}})}
+        Assert-Throws {Compare-ADAnalyzerAssessment $snapshot $snapshot}
+    }
     Invoke-Test 'missing observations never establish resolution regardless of state or prior status' {
         foreach($state in @('Partial','Complete')){foreach($status in @('Fail','Invalid','Pass','Unknown',$null)){
             $a=@{SchemaVersion=1;Target='example.invalid';Checks=@(@{RuleId='GPO.Fixture';Target='one';Status=$status})}
