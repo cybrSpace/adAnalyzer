@@ -370,6 +370,7 @@ Write-Output 'PASS clean public API boundary'
     Write-FixtureText $legacyFixture @'
 param([string]$Root,[string]$Script,[string]$Mode,[string]$Work)
 $ErrorActionPreference='Stop'
+Microsoft.PowerShell.Core\Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
 . (Join-Path $Root 'bin/ADFile.ps1')
 $null=[IO.Directory]::CreateDirectory($Work);$path=Join-Path $Work 'report.csv'
 $tokens=$null;$errors=$null
