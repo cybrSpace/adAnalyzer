@@ -93,9 +93,9 @@ Only explicit approved Fail inactivity findings can propose DisableAccount. Unkn
 
 ## Validation
 
-Run every `tests/Invoke-*Tests.ps1` script in a separate fresh PowerShell process. CI exercises Windows PowerShell 5.1 and PowerShell 7 on runners without installed RSAT modules, plus native DLL/provider construction and native host adapters. Fixture tests do not contact a live domain controller or perform real AD changes; live AD/SMB/WinRM behavior still requires a representative lab.
+Run `./tests/Invoke-TestSuite.ps1` for the regression suites, each in a separate fresh PowerShell process. CI pins Windows PowerShell 5.1, PowerShell 7.6 LTS at 7.6.10, and PowerShell 7.7 at 7.7.0 on Windows Server 2025. The PowerShell 7 portable downloads are SHA256-verified against the published release digests; Windows supplies and services its 5.1 build. Each job logs `$PSVersionTable`, executable path, process architecture and .NET runtime, and rejects an unexpected version/edition/architecture before running tests. All three engines run the regression suites, native DLL/provider and host-adapter checks, Pester, and selected static security rules without installed RSAT modules. Fixture tests do not contact a live domain controller or perform real AD changes; live AD/SMB/WinRM behavior still requires a representative lab.
 
-`etc/Install-DevelopmentTools.ps1` saves pinned Pester and PSScriptAnalyzer versions under ignored `tools/modules`; it does not install runtime dependencies or change trusted repositories. CI runs `tests/Quality.Tests.ps1` plus selected static security rules. These tools, ADMX/ADML templates, SCT baselines and Policy Analyzer/LGPO are optional development/reference components, not RSAT prerequisites.
+`etc/Install-DevelopmentTools.ps1` saves pinned Pester and PSScriptAnalyzer versions under ignored `tools/modules`; it does not install runtime dependencies or change trusted repositories. After saving them, use `./tests/Invoke-TestSuite.ps1 -Mode All` to include `tests/Quality.Tests.ps1` and selected static security rules in a fresh process. These tools, ADMX/ADML templates, SCT baselines and Policy Analyzer/LGPO are optional development/reference components, not RSAT prerequisites.
  
 ## AD Tactical Hardening Playbook 
 
