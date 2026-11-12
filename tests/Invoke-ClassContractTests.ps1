@@ -487,7 +487,7 @@ try {
             Assert-ClassTrue ($rows[0].PSObject.Properties.Name -contains 'orgUnit.L0') 'Expected normalized directory hierarchy'
         }
     }
-    foreach($name in @('ObjectContractCases.ps1','GroupPolicyContractCases.ps1')) {
+    foreach($name in @('ObjectContractCases.ps1','GroupPolicyContractCases.ps1','LegacyProfileContractCases.ps1')) {
         $path=Join-Path (Join-Path $RepositoryRoot 'tests') $name
         if(-not (Test-Path -LiteralPath $path)){throw "Missing required test cases: $name"}
         . $path

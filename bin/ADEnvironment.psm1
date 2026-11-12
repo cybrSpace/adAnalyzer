@@ -972,8 +972,8 @@ class PasswordPolicyObject : OrderedDictionary {
                 { $_ -eq 'ClearTextPassword' -and $value.'property.setting.value' -eq $true } { $list.AddFinding($value, 'Defect - Reversible Encryption Enabled') }
                 { $_ -eq 'MaximumPasswordAge' -and (($value.'property.setting.value' -eq -1 -and -not $policy.AllowPasswordNeverExpires) -or $value.'property.setting.value' -gt $policy.MaximumPasswordAgeDays) } { $list.AddFinding($value, 'Defect - Max Password Age') }
                 { $_ -eq 'MinimumPasswordAge' -and $value.'property.setting.value' -lt $policy.MinimumPasswordAgeDays } { $list.AddFinding($value, 'Defect - Minimum Password Age') }
-                { $_ -eq 'MinimumPasswordLength' -and $value.'property.setting.value' -lt 12 } { $list.AddFinding($value, 'Defect - Minimum Password Length') }
-                { $_ -eq 'PasswordHistorySize' -and $value.'property.setting.value' -lt 10 } { $list.AddFinding($value, 'Defect - Password History') }
+                { $_ -eq 'MinimumPasswordLength' -and $value.'property.setting.value' -lt $policy.MinimumPasswordLength } { $list.AddFinding($value, 'Defect - Minimum Password Length') }
+                { $_ -eq 'PasswordHistorySize' -and $value.'property.setting.value' -lt $policy.PasswordHistorySize } { $list.AddFinding($value, 'Defect - Password History') }
                 { $_ -eq 'PasswordComplexity' -and $value.'property.setting.value' -eq $false } { $list.AddFinding($value, 'Defect - Password Complexity') }
 
             }
@@ -1317,6 +1317,13 @@ class UserObject : OrderedDictionary {
 
         # TODO : get source data to pull HR details for termination findings
 
+        $personalRemaining = $null
+        $serviceRemaining = $null
+        if ($null -ne $value.'days.pwdLastSet' -and $value.'days.pwdLastSet' -ge 0) {
+            if ($policy.UserPasswordAgeDays -gt 0) { $personalRemaining = $policy.UserPasswordAgeDays - $value.'days.pwdLastSet' }
+            if ($policy.ServicePasswordAgeDays -gt 0) { $serviceRemaining = $policy.ServicePasswordAgeDays - $value.'days.pwdLastSet' }
+        }
+
         if (-not $value.enabled -and -not $value.WellKnownSID -and $value.'days.whenChanged' -ge 30) {
 
             $list.AddFinding($value, 'Defect - Disabled > 30 days')
@@ -1326,23 +1333,23 @@ class UserObject : OrderedDictionary {
 
             switch ($value) {
 
-                # Personal Password Age Warning (>90d - Quarterly Rotation)
-                { $value.enabled -and $value.acctType -eq 'personal' -and $value.'days.pwdLastSet' -eq 89 } { $list.AddFinding($value, 'Warning - Personal Password Expiration - 1 Days') }
-                { $value.enabled -and $value.acctType -eq 'personal' -and $value.'days.pwdLastSet' -eq 88 } { $list.AddFinding($value, 'Warning - Personal Password Expiration - 2 Days') }
-                { $value.enabled -and $value.acctType -eq 'personal' -and $value.'days.pwdLastSet' -eq 83 } { $list.AddFinding($value, 'Warning - Personal Password Expiration - 7 Days') }
-                { $value.enabled -and $value.acctType -eq 'personal' -and $value.'days.pwdLastSet' -eq 69 } { $list.AddFinding($value, 'Warning - Personal Password Expiration - 21 Days') }
+                # Personal milestones are days remaining under the profile.
+                { $value.enabled -and $value.acctType -eq 'personal' -and $null -ne $personalRemaining -and $personalRemaining -eq 1 } { $list.AddFinding($value, 'Warning - Personal Password Expiration - 1 Days') }
+                { $value.enabled -and $value.acctType -eq 'personal' -and $null -ne $personalRemaining -and $personalRemaining -eq 2 } { $list.AddFinding($value, 'Warning - Personal Password Expiration - 2 Days') }
+                { $value.enabled -and $value.acctType -eq 'personal' -and $null -ne $personalRemaining -and $personalRemaining -eq 7 } { $list.AddFinding($value, 'Warning - Personal Password Expiration - 7 Days') }
+                { $value.enabled -and $value.acctType -eq 'personal' -and $null -ne $personalRemaining -and $personalRemaining -eq 21 } { $list.AddFinding($value, 'Warning - Personal Password Expiration - 21 Days') }
 
-                # Non-Personal Password Age Warning (>365d - Annual Rotation)
-                { $value.enabled -and $value.acctType -eq 'non-personal' -and $value.'days.pwdLastSet' -ge 335 -and $value.'days.pwdLastSet' -lt 365 } { $list.AddFinding($value, 'Warning - Non-Personal Password Expiration - 335 Days') }
-                { $value.enabled -and $value.acctType -eq 'non-personal' -and $value.'days.pwdLastSet' -ge 305 -and $value.'days.pwdLastSet' -lt 335 } { $list.AddFinding($value, 'Warning - Non-Personal Password Expiration - 305 Days') }
-                { $value.enabled -and $value.acctType -eq 'non-personal' -and $value.'days.pwdLastSet' -ge 275 -and $value.'days.pwdLastSet' -lt 305 } { $list.AddFinding($value, 'Warning - Non-Personal Password Expiration - 275 Days') }
+                # Service labels retain the lower elapsed-age boundary.
+                { $value.enabled -and $value.acctType -eq 'non-personal' -and $null -ne $serviceRemaining -and $serviceRemaining -gt 0 -and $serviceRemaining -le 30 } { $list.AddFinding($value, ('Warning - Non-Personal Password Expiration - {0} Days' -f [math]::Max(0, ($policy.ServicePasswordAgeDays - 30)))) }
+                { $value.enabled -and $value.acctType -eq 'non-personal' -and $null -ne $serviceRemaining -and $serviceRemaining -gt 30 -and $serviceRemaining -le 60 } { $list.AddFinding($value, ('Warning - Non-Personal Password Expiration - {0} Days' -f [math]::Max(0, ($policy.ServicePasswordAgeDays - 60)))) }
+                { $value.enabled -and $value.acctType -eq 'non-personal' -and $null -ne $serviceRemaining -and $serviceRemaining -gt 60 -and $serviceRemaining -le 90 } { $list.AddFinding($value, ('Warning - Non-Personal Password Expiration - {0} Days' -f [math]::Max(0, ($policy.ServicePasswordAgeDays - 90)))) }
                 
                 # Password Age Defects
-                { $value.enabled -and $value.acctType -eq 'personal' -and ($value.'days.pwdLastSet' -ge $policy.UserPasswordAgeDays -or $value.'range.pwdLastSet' -eq 'never') -and $value.'days.whenCreated' -gt 30 } { $list.AddFinding($value, 'Defect - Personal Password Age') }
-                { $value.enabled -and $value.acctType -eq 'non-personal' -and ($value.'days.pwdLastSet' -ge $policy.ServicePasswordAgeDays -or $value.'range.pwdLastSet' -eq 'never') -and $value.'days.whenCreated' -gt 30 } { $list.AddFinding($value, 'Defect - Non-Personal Password Age') }
+                { $value.enabled -and $value.acctType -eq 'personal' -and $policy.UserPasswordAgeDays -gt 0 -and ($value.'days.pwdLastSet' -ge $policy.UserPasswordAgeDays -or $value.'range.pwdLastSet' -eq 'never') -and $value.'days.whenCreated' -gt 30 } { $list.AddFinding($value, 'Defect - Personal Password Age') }
+                { $value.enabled -and $value.acctType -eq 'non-personal' -and $policy.ServicePasswordAgeDays -gt 0 -and ($value.'days.pwdLastSet' -ge $policy.ServicePasswordAgeDays -or $value.'range.pwdLastSet' -eq 'never') -and $value.'days.whenCreated' -gt 30 } { $list.AddFinding($value, 'Defect - Non-Personal Password Age') }
 
-                # Inactivity (>60d)
-                { $value.enabled -and -not $value.WellKnownSID -and ($value.'days.lastlogon' -ge 60 -or $value.'range.lastlogon' -eq 'never') -and [int]$value.'days.whenCreated' -ge 60 } { $list.AddFinding($value, 'Defect - User Inactivity') }
+                # Require known creation age before applying the profile grace.
+                { $value.enabled -and -not $value.WellKnownSID -and ($value.'days.lastlogon' -ge $policy.UserInactivityDays -or $value.'range.lastlogon' -eq 'never') -and $null -ne $value.'days.whenCreated' -and [int]$value.'days.whenCreated' -ge $policy.UserInactivityDays } { $list.AddFinding($value, 'Defect - User Inactivity') }
 
             }
 
@@ -1906,10 +1913,10 @@ class ComputerObject : OrderedDictionary {
             switch ($value) {
 
                 # last logon activity
-                { $value.enabled -and ($value.'days.lastlogon' -ge 60 -or $value.'range.lastlogon' -eq 'never') -and [int]$value.'days.whenCreated' -ge 60 } { $list.AddFinding($value, 'Defect - Computer Inactivity') }
+                { $value.enabled -and ($value.'days.lastlogon' -ge $policy.ComputerInactivityDays -or $value.'range.lastlogon' -eq 'never') -and $null -ne $value.'days.whenCreated' -and [int]$value.'days.whenCreated' -ge $policy.ComputerInactivityDays } { $list.AddFinding($value, 'Defect - Computer Inactivity') }
 
                 # password age inactivity
-                { $value.enabled -and ($value.'days.pwdLastSet' -ge 60 -or $value.'range.pwdLastSet' -eq 'never') -and [int]$value.'days.whenCreated' -ge 60 } { $list.AddFinding($value, 'Defect - Computer Inactivity') }
+                { $value.enabled -and ($value.'days.pwdLastSet' -ge $policy.ComputerInactivityDays -or $value.'range.pwdLastSet' -eq 'never') -and $null -ne $value.'days.whenCreated' -and [int]$value.'days.whenCreated' -ge $policy.ComputerInactivityDays } { $list.AddFinding($value, 'Defect - Computer Inactivity') }
 
                 # operating system
                 { $value.enabled -and -not [String]::IsNullOrEmpty($value.'OperatingSystem') } { $list.AddFinding($value, 'Unknown - Operating System Lifecycle Requires Versioned Profile') }
