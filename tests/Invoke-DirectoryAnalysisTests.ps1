@@ -345,6 +345,49 @@ Invoke-DirectoryTest 'unresolved foreign membership is Unknown rather than safe'
     Assert-DirectoryEqual 'Unknown' $m.ResolutionStatus
     Assert-DirectoryEqual 1 $m.Unresolved.Count
 }
+Invoke-DirectoryTest 'cycles remain visible when both cycle nodes are direct memberships' {
+    $groups=@(
+        [pscustomobject]@{SID=($script:DomainSid+'-2601');DistinguishedName='CN=B';MemberOf=@('CN=C')},
+        [pscustomobject]@{SID=($script:DomainSid+'-2602');DistinguishedName='CN=C';MemberOf=@('CN=B')}
+    )
+    $before=ConvertTo-Json -InputObject $groups -Depth 10 -Compress
+    foreach($roots in @(@('CN=B','CN=C'),@('CN=C','CN=B'))){
+        $m=Resolve-ADAnalyzerMembership -Object ([pscustomobject]@{MemberOf=$roots}) -Groups $groups -PrivilegedSids @($script:DomainSid+'-2601')
+        Assert-DirectoryTrue ($m.Cycles.Count -gt 0) 'Multiple direct roots hid a cycle'
+        Assert-DirectoryEqual 2 $m.DirectSids.Count;Assert-DirectoryEqual 2 $m.EffectiveSids.Count
+        Assert-DirectoryEqual (($groups.SID | Sort-Object) -join ',') (($m.EffectiveSids | Sort-Object) -join ',')
+        Assert-DirectoryTrue $m.IsPrivileged 'Cycle changed privilege closure';Assert-DirectoryEqual 0 $m.Unresolved.Count;Assert-DirectoryEqual Complete $m.ResolutionStatus
+    }
+    Assert-DirectoryTrue ($before -ceq (ConvertTo-Json -InputObject $groups -Depth 10 -Compress)) 'Traversal mutated source groups'
+}
+Invoke-DirectoryTest 'shared direct ancestors are not cycles and aliases do not duplicate self-loop evidence' {
+    $groups=@(
+        [pscustomobject]@{SID=($script:DomainSid+'-2701');DistinguishedName='CN=A';MemberOf=@('CN=C')},
+        [pscustomobject]@{SID=($script:DomainSid+'-2702');DistinguishedName='CN=B';MemberOf=@('CN=C')},
+        [pscustomobject]@{SID=($script:DomainSid+'-2703');DistinguishedName='CN=C';MemberOf=@()}
+    )
+    $m=Resolve-ADAnalyzerMembership -Object ([pscustomobject]@{MemberOf=@('CN=A','CN=B','CN=C')}) -Groups $groups
+    Assert-DirectoryEqual 0 $m.Cycles.Count;Assert-DirectoryEqual 3 $m.EffectiveSids.Count
+    $sid=$script:DomainSid+'-513'
+    $group=[pscustomobject]@{SID=$sid;DistinguishedName='CN=Self';MemberOf=@('CN=Self',$sid)}
+    $object=[pscustomobject]@{SID=($script:DomainSid+'-9000');PrimaryGroupID=513;MemberOf=@('cn=self',$sid)}
+    $m=Resolve-ADAnalyzerMembership -Object $object -Groups @($group) -DomainSid $script:DomainSid -PrivilegedSids @($sid)
+    Assert-DirectoryEqual 1 $m.DirectSids.Count;Assert-DirectoryEqual 1 $m.EffectiveSids.Count;Assert-DirectoryEqual 1 $m.Cycles.Count
+    Assert-DirectoryEqual $sid $m.Cycles[0];Assert-DirectoryTrue $m.IsPrivileged 'Aliases lost privilege';Assert-DirectoryEqual Complete $m.ResolutionStatus
+}
+Invoke-DirectoryTest 'long membership chains stay iterative with cycle and unreadable-leaf diagnostics' {
+    $groups=[Collections.Generic.List[object]]::new();$count=2048
+    for($i=0;$i -lt $count;$i++){$groups.Add([pscustomobject]@{SID=($script:DomainSid+'-'+(6000+$i));DistinguishedName=('CN=Chain'+$i);MemberOf=if($i+1 -lt $count){@('CN=Chain'+($i+1))}else{@()}})}
+    $object=[pscustomobject]@{MemberOf=@('CN=Chain0')}
+    $m=Resolve-ADAnalyzerMembership -Object $object -Groups $groups.ToArray()
+    Assert-DirectoryEqual $count $m.EffectiveSids.Count;Assert-DirectoryEqual 0 $m.Cycles.Count;Assert-DirectoryEqual Complete $m.ResolutionStatus
+    $groups[$count-1].MemberOf=@('CN=Chain1024','CN=Unavailable')
+    $before=ConvertTo-Json -InputObject $groups.ToArray() -Depth 10 -Compress
+    $m=Resolve-ADAnalyzerMembership -Object $object -Groups $groups.ToArray() -PrivilegedSids @($groups[$count-1].SID)
+    Assert-DirectoryEqual $count $m.EffectiveSids.Count;Assert-DirectoryEqual 1 $m.Cycles.Count;Assert-DirectoryEqual 1 $m.Unresolved.Count
+    Assert-DirectoryEqual 'CN=Unavailable' $m.Unresolved[0];Assert-DirectoryEqual Unknown $m.ResolutionStatus;Assert-DirectoryTrue $m.IsPrivileged 'Long-chain privilege was lost'
+    Assert-DirectoryTrue ($before -ceq (ConvertTo-Json -InputObject $groups.ToArray() -Depth 10 -Compress)) 'Long traversal mutated source groups'
+}
 Invoke-DirectoryTest 'classification defaults Unknown and records conflicting explicit evidence' {
     $profile=Get-ADAnalyzerDefaultProfile
     $object=[pscustomobject]@{DistinguishedName='CN=Alice,OU=People,DC=example,DC=invalid';SamAccountName='adoe'}

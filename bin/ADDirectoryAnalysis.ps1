@@ -52,35 +52,46 @@ function Resolve-ADAnalyzerMembership {
     param($Object,[object[]]$Groups=@(),[string]$DomainSid,[string[]]$PrivilegedSids=@(),$GroupIndex)
     if($null -eq $GroupIndex){$GroupIndex=New-ADAnalyzerMembershipIndex -Groups $Groups}
     $byDn=$GroupIndex.ByDn;$bySid=$GroupIndex.BySid
-    $queue=[System.Collections.Queue]::new()
+    $stack=[Collections.Generic.Stack[object]]::new()
     $direct=[System.Collections.Generic.List[string]]::new()
     $effective=[System.Collections.Generic.List[string]]::new()
     $unresolved=[System.Collections.Generic.List[string]]::new()
-    $cycles=[System.Collections.Generic.List[string]]::new();$visited=@{}
+    $cycles=[System.Collections.Generic.List[string]]::new()
+    $cycleSet=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $colors=[Collections.Generic.Dictionary[string,int]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach($parent in @(Get-ADAnalyzerDirectoryField $Object 'MemberOf' @())){
-        if($parent){$queue.Enqueue([pscustomobject]@{Identity=[string]$parent;Path=@()});$direct.Add([string]$parent)}
+        if($parent){$direct.Add([string]$parent)}
     }
     $primary=Get-ADAnalyzerDirectoryField $Object 'PrimaryGroupID'
     if($null -ne $primary){
         $objectSid=ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $Object 'SID' (Get-ADAnalyzerDirectoryField $Object 'objectSid'))
         $sidRoot=if($objectSid -match '^S-\d-\d+(?:-\d+)+-\d+$'){$objectSid -replace '-\d+$',''}else{$DomainSid}
-        if($sidRoot){$identity='{0}-{1}' -f $sidRoot,$primary;$queue.Enqueue([pscustomobject]@{Identity=$identity;Path=@()});$direct.Add($identity)}
+        if($sidRoot){$identity='{0}-{1}' -f $sidRoot,$primary;$direct.Add($identity)}
         else{$unresolved.Add('PrimaryGroupID:'+ $primary)}
     }
-    while($queue.Count){
-        $item=$queue.Dequeue();$identity=[string]$item.Identity
+    for($i=$direct.Count-1;$i -ge 0;$i--){$stack.Push([pscustomobject]@{Identity=$direct[$i];Exit=$false})}
+    while($stack.Count){
+        $item=$stack.Pop()
+        if($item.Exit){$colors[$item.Canonical]=2;continue}
+        $identity=[string]$item.Identity
         $group=if($byDn.ContainsKey($identity)){$byDn[$identity]}elseif($bySid.ContainsKey($identity)){$bySid[$identity]}else{$null}
         $sid=ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $group 'SID' (Get-ADAnalyzerDirectoryField $group 'objectSid'))
         $canonical=if($sid){$sid}else{$identity}
-        if($canonical -in @($item.Path)){$cycles.Add($canonical);continue}
-        if($visited.ContainsKey($canonical)){continue};$visited[$canonical]=$true
-        if($null -eq $group){
-            if($identity -match '^S-\d-' -and -not $effective.Contains($identity)){$effective.Add($identity)}
-            $unresolved.Add($identity);continue
+        if($colors.ContainsKey($canonical)){
+            # Gray nodes are active ancestors; black nodes are complete.
+            if($colors[$canonical] -eq 1 -and $cycleSet.Add($canonical)){$cycles.Add($canonical)}
+            continue
         }
-        if($sid -and -not $effective.Contains($sid)){$effective.Add($sid)}
+        $colors[$canonical]=1
+        if($null -eq $group){
+            if($identity -match '^S-\d-'){$effective.Add($identity)}
+            $unresolved.Add($identity);$colors[$canonical]=2;continue
+        }
+        if($sid){$effective.Add($sid)}
         if(-not $sid){$unresolved.Add($identity+':SID')}
-        foreach($parent in @(Get-ADAnalyzerDirectoryField $group 'MemberOf' @())){if($parent){$queue.Enqueue([pscustomobject]@{Identity=[string]$parent;Path=@($item.Path)+@($canonical)})}}
+        $stack.Push([pscustomobject]@{Canonical=$canonical;Exit=$true})
+        $parents=@(Get-ADAnalyzerDirectoryField $group 'MemberOf' @())
+        for($i=$parents.Count-1;$i -ge 0;$i--){if($parents[$i]){$stack.Push([pscustomobject]@{Identity=[string]$parents[$i];Exit=$false})}}
     }
     $privileged=@($effective | Where-Object {$_ -in $PrivilegedSids})
     [pscustomobject]@{
