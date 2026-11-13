@@ -22,17 +22,20 @@ Write-Host 'PASS bundled AD provider exposes drive server credential root and sc
 if(Get-Command Get-ADComputer -ListImported -ErrorAction SilentlyContinue){throw 'Private AD computer command was visible before the local import probe'}
 $localPaths=@(& {
     Import-Module -Name $expected -Scope Local -ErrorAction Stop
-    foreach($name in @('Get-ADComputer','Get-ADGroup','Get-ADObject')){
+    foreach($name in @('Get-ADComputer','Get-ADGroup','Get-ADObject','Get-ADUser','New-ADUser')){
         $command=Get-Command $name -CommandType Cmdlet -ListImported -ErrorAction Stop
-        foreach($parameter in @('Identity','Properties','Server','Credential')){if(-not $command.Parameters.ContainsKey($parameter)){throw ('Bundled command lacks '+$parameter)}}
+        $required=if($name -eq 'New-ADUser'){@('Name','SamAccountName','AccountPassword','Enabled','ChangePasswordAtLogon','Path','GivenName','Surname','DisplayName','Department','EmployeeID','UserPrincipalName','Server','Credential','WhatIf')}else{@('Identity','Properties','Server','Credential')}
+        foreach($parameter in $required){if(-not $command.Parameters.ContainsKey($parameter)){throw ('Bundled command lacks '+$parameter)}}
         if($name -eq 'Get-ADGroup' -and -not $command.Parameters.ContainsKey('LDAPFilter')){throw 'Bundled group command lacks literal LDAP filtering'}
+        if($name -eq 'Get-ADUser' -and (-not $command.Parameters.ContainsKey('LDAPFilter') -or -not $command.Parameters.ContainsKey('SearchBase'))){throw 'Bundled user command lacks explicit domain-scoped literal filtering'}
         $command.Module.Path
     }
 })
 foreach($localPath in $localPaths){if([IO.Path]::GetFullPath($localPath) -ne $expected){throw 'Scoped AD command came from an external dependency'}}
-foreach($name in @('Get-ADComputer','Get-ADGroup','Get-ADObject')){if(Get-Command $name -ListImported -ErrorAction SilentlyContinue){throw 'Local binary import leaked a private AD command'}}
+foreach($name in @('Get-ADComputer','Get-ADGroup','Get-ADObject','Get-ADUser','New-ADUser')){if(Get-Command $name -ListImported -ErrorAction SilentlyContinue){throw 'Local binary import leaked a private AD command'}}
 Write-Host 'PASS bundled AD computer metadata is locally scoped without invoking a directory query'
 Write-Host 'PASS bundled group and object lookup metadata is locally scoped without a directory query'
+Write-Host 'PASS bundled user creation metadata is locally scoped without account operations'
 Add-Type -AssemblyName System.DirectoryServices.AccountManagement -ErrorAction Stop
 $contextType=[System.DirectoryServices.AccountManagement.PrincipalContext]
 $machineType=[System.DirectoryServices.AccountManagement.ContextType]
