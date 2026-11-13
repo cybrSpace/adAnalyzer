@@ -20,15 +20,19 @@ foreach($parameter in @('Server','Credential','Root','Scope')){
 }
 Write-Host 'PASS bundled AD provider exposes drive server credential root and scope parameters without a live bind'
 if(Get-Command Get-ADComputer -ListImported -ErrorAction SilentlyContinue){throw 'Private AD computer command was visible before the local import probe'}
-$localPath=& {
+$localPaths=@(& {
     Import-Module -Name $expected -Scope Local -ErrorAction Stop
-    $command=Get-Command Get-ADComputer -CommandType Cmdlet -ListImported -ErrorAction Stop
-    foreach($name in @('Identity','Properties','Server','Credential')){if(-not $command.Parameters.ContainsKey($name)){throw ('Bundled computer command lacks '+$name)}}
-    $command.Module.Path
-}
-if([IO.Path]::GetFullPath($localPath) -ne $expected){throw 'Scoped computer command came from an external dependency'}
-if(Get-Command Get-ADComputer -ListImported -ErrorAction SilentlyContinue){throw 'Local binary import leaked a private AD command'}
+    foreach($name in @('Get-ADComputer','Get-ADGroup','Get-ADObject')){
+        $command=Get-Command $name -CommandType Cmdlet -ListImported -ErrorAction Stop
+        foreach($parameter in @('Identity','Properties','Server','Credential')){if(-not $command.Parameters.ContainsKey($parameter)){throw ('Bundled command lacks '+$parameter)}}
+        if($name -eq 'Get-ADGroup' -and -not $command.Parameters.ContainsKey('LDAPFilter')){throw 'Bundled group command lacks literal LDAP filtering'}
+        $command.Module.Path
+    }
+})
+foreach($localPath in $localPaths){if([IO.Path]::GetFullPath($localPath) -ne $expected){throw 'Scoped AD command came from an external dependency'}}
+foreach($name in @('Get-ADComputer','Get-ADGroup','Get-ADObject')){if(Get-Command $name -ListImported -ErrorAction SilentlyContinue){throw 'Local binary import leaked a private AD command'}}
 Write-Host 'PASS bundled AD computer metadata is locally scoped without invoking a directory query'
+Write-Host 'PASS bundled group and object lookup metadata is locally scoped without a directory query'
 Add-Type -AssemblyName System.DirectoryServices.AccountManagement -ErrorAction Stop
 $contextType=[System.DirectoryServices.AccountManagement.PrincipalContext]
 $machineType=[System.DirectoryServices.AccountManagement.ContextType]
