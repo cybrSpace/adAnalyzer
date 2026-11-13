@@ -171,6 +171,8 @@ function ConvertTo-ADAnalyzerDirectoryObject {
     foreach($name in @('WhenChanged','WhenCreated','LastLogonDate','PasswordLastSet')){$result[$name]=ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $Record $name)}
     $result['PasswordNeverExpires']=Get-ADAnalyzerDirectoryField $Record 'PasswordNeverExpires'
     $result['SIDHistory']=@(Get-ADAnalyzerDirectoryField $Record 'SIDHistory' @() | ForEach-Object {ConvertTo-ADAnalyzerSid $_})
+    $resultantDn=@(Get-ADAnalyzerDirectoryField $Record 'msDS-ResultantPSO' @())
+    $result['ResultantPasswordPolicyDN']=if($resultantDn.Count -eq 1 -and $resultantDn[0] -is [string] -and -not [string]::IsNullOrWhiteSpace($resultantDn[0])){$resultantDn[0]}else{$null}
     $result['AllowedToDelegateTo']=@(Get-ADAnalyzerDirectoryField $Record 'msDS-AllowedToDelegateTo' @())
     $result['SupportedEncryptionTypes']=Get-ADAnalyzerDirectoryField $Record 'msDS-SupportedEncryptionTypes'
     $result['Protected']=if($null -eq $result['ProtectedFromAccidentalDeletion']){$null}else{[bool]$result['ProtectedFromAccidentalDeletion']}
@@ -303,7 +305,7 @@ function Get-ADAnalyzerDirectoryData {
         $rootDomainSid=ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $rootDomain 'DomainSID')
     }
     # Query schema metadata only, never managed-password attribute values.
-    $featureNames=@('msLAPS-PasswordExpirationTime','ms-Mcs-AdmPwdExpirationTime','msLAPS-Password','msLAPS-EncryptedPassword','ms-Mcs-AdmPwd','msDS-AllowedToActOnBehalfOfOtherIdentity','msDS-GroupMSAMembership')
+    $featureNames=@('msLAPS-PasswordExpirationTime','ms-Mcs-AdmPwdExpirationTime','msLAPS-Password','msLAPS-EncryptedPassword','ms-Mcs-AdmPwd','msDS-AllowedToActOnBehalfOfOtherIdentity','msDS-GroupMSAMembership','msDS-ResultantPSO')
     $schema=@();$schemaDn=[string](Get-ADAnalyzerDirectoryField $root 'SchemaNamingContext')
     if($schemaDn){
         $clauses=($featureNames | ForEach-Object {'(lDAPDisplayName='+$_+')'}) -join ''
@@ -322,6 +324,8 @@ function Get-ADAnalyzerDirectoryData {
     }
     $classificationAttributes=@($classificationAttributes | Select-Object -Unique)
     $userProperties=@($userProperties+$classificationAttributes | Select-Object -Unique)
+    $resultantPsoAvailable=$coverage['FeatureSchema'] -eq 'Collected' -and 'msDS-ResultantPSO' -in $available
+    if($resultantPsoAvailable){$userProperties+='msDS-ResultantPSO'}
     $computerProperties=@($computerProperties+$classificationAttributes | Select-Object -Unique)
     foreach($attribute in @('msLAPS-PasswordExpirationTime','ms-Mcs-AdmPwdExpirationTime','msDS-AllowedToActOnBehalfOfOtherIdentity')){
         if($attribute -in $available){$computerProperties+=$attribute;if($attribute -eq 'msDS-AllowedToActOnBehalfOfOtherIdentity'){$userProperties+=$attribute}}
@@ -344,7 +348,7 @@ function Get-ADAnalyzerDirectoryData {
     if($domainDn){
         $settings=@(& $query 'Get-ADObject' @{Identity=$domainDn;Properties=@('ms-DS-MachineAccountQuota','msDS-Behavior-Version')} 'DomainSettings') | Select-Object -First 1
         $defaultPolicy=@(& $query 'Get-ADDefaultDomainPasswordPolicy' @{Identity=$domainDn} 'DefaultPasswordPolicy') | Select-Object -First 1
-        $fineGrained=@(& $query 'Get-ADFineGrainedPasswordPolicy' @{Filter='*';Properties=@('AppliesTo','Precedence','MinPasswordLength','PasswordHistoryCount','ComplexityEnabled','MaxPasswordAge','MinPasswordAge','LockoutThreshold','LockoutDuration','LockoutObservationWindow')} 'FineGrainedPasswordPolicies')
+        $fineGrained=@(& $query 'Get-ADFineGrainedPasswordPolicy' @{Filter='*';Properties=@('AppliesTo','Precedence','MinPasswordLength','PasswordHistoryCount','ComplexityEnabled','ReversibleEncryptionEnabled','MaxPasswordAge','MinPasswordAge','LockoutThreshold','LockoutDuration','LockoutObservationWindow')} 'FineGrainedPasswordPolicies')
         $optional=@(& $query 'Get-ADOptionalFeature' @{Filter='*';Properties=@('EnabledScopes','FeatureGUID')} 'OptionalFeatures')
     }else{foreach($key in @('DomainSettings','DefaultPasswordPolicy','FineGrainedPasswordPolicies','OptionalFeatures')){$coverage[$key]='Unreadable'}}
     $users=@($rawUsers | ForEach-Object {ConvertTo-ADAnalyzerDirectoryObject $_ 'User' $classificationAttributes})
@@ -380,9 +384,27 @@ function Get-ADAnalyzerDirectoryData {
         $object | Add-Member NoteProperty AccountClassification $type -Force
         $object | Add-Member NoteProperty DelegationSchemaStatus $coverage['FeatureSchema'] -Force
     }
+    # Only a positive server-computed association can select cached policy.
+    # An absent attribute can also mean unreadable; retain the dedicated query.
+    $psoIndex=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
+    if($resultantPsoAvailable -and $coverage['FineGrainedPasswordPolicies'] -eq 'Collected'){
+        foreach($pso in $fineGrained){
+            $dn=Get-ADAnalyzerDirectoryField $pso 'DistinguishedName'
+            if($dn -isnot [string] -or [string]::IsNullOrWhiteSpace($dn)){continue}
+            if($psoIndex.ContainsKey($dn)){$psoIndex[$dn].Count++;continue}
+            $complete=$true
+            foreach($field in @('MinPasswordLength','PasswordHistoryCount','ComplexityEnabled','ReversibleEncryptionEnabled','LockoutThreshold','LockoutDuration','LockoutObservationWindow','MinPasswordAge','MaxPasswordAge')){
+                if($null -eq (Get-ADAnalyzerDirectoryField $pso $field)){$complete=$false;break}
+            }
+            $psoIndex[$dn]=[pscustomobject]@{Policy=$pso;Count=1;Complete=$complete}
+        }
+    }
     foreach($user in $users){
         $key='ResultantPasswordPolicy:'+$user.DistinguishedName
-        $effective=@(& $query 'Get-ADUserResultantPasswordPolicy' @{Identity=$user.DistinguishedName} $key) | Select-Object -First 1
+        $effective=$null;$dn=$user.ResultantPasswordPolicyDN
+        if($dn -and $psoIndex.ContainsKey($dn) -and $psoIndex[$dn].Count -eq 1 -and $psoIndex[$dn].Complete){
+            $effective=$psoIndex[$dn].Policy;$coverage[$key]='Collected'
+        }else{$effective=@(& $query 'Get-ADUserResultantPasswordPolicy' @{Identity=$user.DistinguishedName} $key) | Select-Object -First 1}
         $resultant.Add([pscustomobject]@{Target=$user.DistinguishedName;Policy=if($effective){$effective}else{$defaultPolicy};Source=if($effective){'FineGrained'}else{'DefaultDomain'};Status=$coverage[$key]})
     }
     $coverage['ResultantPasswordPolicies']=if(@($resultant | Where-Object Status -ne 'Collected').Count){'Partial'}elseif($coverage['Users'] -eq 'Collected'){'Collected'}else{'Unreadable'}

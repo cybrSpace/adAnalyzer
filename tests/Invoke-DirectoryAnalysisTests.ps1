@@ -40,6 +40,7 @@ function Remove-PSDrive {
 $script:Queries=[System.Collections.Generic.List[object]]::new()
 $script:Denied='';$script:IncludeLapsSchema=$true;$script:HostUnavailable=$false;$script:DeniedHostClass=''
 $script:ServiceAccount=$null
+$script:IncludePsoSchema=$false;$script:FineGrainedFixture=@();$script:ResultantFixture=$null
 $script:DomainDn='DC=example,DC=invalid';$script:DomainSid='S-1-5-21-1-2-3'
 $script:User=[pscustomobject]@{
     ObjectClass='user';ObjectGuid='11111111-1111-1111-1111-111111111111';SID=($script:DomainSid+'-1001')
@@ -89,19 +90,27 @@ function Select-RequestedDirectoryFixture($Record,$Properties) {
     $result=[ordered]@{}
     foreach($property in $Record.PSObject.Properties){
         if($property.Name -ieq 'SIDHistory' -and 'SIDHistory' -notin $Properties){continue}
+        if($property.Name -ieq 'msDS-ResultantPSO' -and 'msDS-ResultantPSO' -notin $Properties){continue}
         $result[$property.Name]=$property.Value
     }
     [pscustomobject]$result
 }
-function Get-ADUser {param($Filter,$Properties,$SearchBase,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADUser' $PSBoundParameters; Select-RequestedDirectoryFixture $script:User $Properties}
+function Get-ADUser {param($Filter,$Properties,$SearchBase,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADUser' $PSBoundParameters;foreach($record in @($script:User)){Select-RequestedDirectoryFixture $record $Properties}}
 function Get-ADComputer {param($Filter,$Properties,$SearchBase,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADComputer' $PSBoundParameters; Select-RequestedDirectoryFixture $script:Computer $Properties}
 function Get-ADGroup {param($Filter,$Properties,$SearchBase,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADGroup' $PSBoundParameters; $script:Groups}
 function Get-ADTrust {param($Filter,$Properties,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADTrust' $PSBoundParameters;[pscustomobject]@{Name='partner.invalid';Target='partner.invalid';IntraForest=$false;ForestTransitive=$false;SIDFilteringQuarantined=$false;TrustType='External'}}
 function Get-ADDomainController {param($Filter,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADDomainController' $PSBoundParameters;[pscustomobject]@{HostName='dc.example.invalid'}}
 function Get-ADServiceAccount {param($Filter,$Properties,$SearchBase,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADServiceAccount' $PSBoundParameters; Select-RequestedDirectoryFixture $script:ServiceAccount $Properties}
 function Get-ADDefaultDomainPasswordPolicy {param($Identity,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADDefaultDomainPasswordPolicy' $PSBoundParameters;$script:PasswordPolicy}
-function Get-ADFineGrainedPasswordPolicy {param($Filter,$Properties,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADFineGrainedPasswordPolicy' $PSBoundParameters}
-function Get-ADUserResultantPasswordPolicy {param($Identity,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADUserResultantPasswordPolicy' $PSBoundParameters}
+function Get-ADFineGrainedPasswordPolicy {
+    param($Filter,$Properties,$Server,$Credential,$ErrorAction)
+    Register-DirectoryQuery 'Get-ADFineGrainedPasswordPolicy' $PSBoundParameters
+    foreach($row in @($script:FineGrainedFixture)){
+        $projected=[ordered]@{};foreach($property in $row.PSObject.Properties){if($property.Name -in @('DistinguishedName','Name','ObjectGuid')+@($Properties)){$projected[$property.Name]=$property.Value}}
+        [pscustomobject]$projected
+    }
+}
+function Get-ADUserResultantPasswordPolicy {param($Identity,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADUserResultantPasswordPolicy' $PSBoundParameters;$script:ResultantFixture}
 function Get-ADOptionalFeature {param($Filter,$Properties,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADOptionalFeature' $PSBoundParameters;[pscustomobject]@{FeatureGUID='766ddcd8-acd0-445e-f3b9-a7f9b6744f2a';EnabledScopes=@('fixture')}}
 function Get-ADOrganizationalUnit {param($Filter,$SearchBase,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADOrganizationalUnit' $PSBoundParameters;[pscustomobject]@{DistinguishedName='OU=People,DC=example,DC=invalid'}}
 function Get-ADObject {
@@ -118,6 +127,7 @@ function Get-ADObject {
     if($LDAPFilter -eq '(objectClass=groupPolicyContainer)'){return [pscustomobject]@{DistinguishedName=('CN={fixture},CN=Policies,CN=System,'+$script:DomainDn)}}
     if($LDAPFilter -eq '(objectClass=controlAccessRight)'){return [pscustomobject]@{rightsGuid='1131f6aa-9c07-11d1-f79f-00c04fc2dcd2';displayName='Replication changes'}}
     if($Properties -contains 'schemaIDGUID'){
+        if($script:IncludePsoSchema){[pscustomobject]@{lDAPDisplayName='msDS-ResultantPSO';schemaIDGUID=([guid]'33333333-2222-3333-4444-555555555555').ToByteArray()}}
         if($script:IncludeLapsSchema){[pscustomobject]@{lDAPDisplayName='msLAPS-PasswordExpirationTime';schemaIDGUID=([guid]'11111111-2222-3333-4444-555555555555').ToByteArray()}}
         [pscustomobject]@{lDAPDisplayName='msDS-AllowedToActOnBehalfOfOtherIdentity';schemaIDGUID=([guid]'22222222-2222-3333-4444-555555555555').ToByteArray()}
     }
@@ -239,6 +249,88 @@ Invoke-DirectoryTest 'invalid directory connection mode fails before metadata or
         try{$null=Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile $profile}catch{$caught=$true}
         Assert-DirectoryTrue $caught 'Invalid connection mode accepted';Assert-DirectoryEqual 0 $script:Queries.Count
     }
+}
+function New-ResultantPolicyFixture {
+    [pscustomobject][ordered]@{DistinguishedName=('CN=SharedPSO,CN=Password Settings Container,CN=System,'+$script:DomainDn);MinPasswordLength=16;PasswordHistoryCount=20;ComplexityEnabled=$true;ReversibleEncryptionEnabled=$false;LockoutThreshold=0;LockoutDuration=[timespan]::FromMinutes(30);LockoutObservationWindow=[timespan]::FromMinutes(30);MaxPasswordAge=[timespan]::FromDays(90);MinPasswordAge=[timespan]::Zero}
+}
+Invoke-DirectoryTest 'positive computed PSO metadata reuses a complete shared policy instead of per-user queries' {
+    $saved=$script:User;$script:IncludePsoSchema=$true
+    $script:ParityOperatingSystemPolicy=(Get-Command Test-ADAnalyzerOperatingSystemProfile).ScriptBlock
+    function script:Test-ADAnalyzerOperatingSystemProfile {param($Object,$Entries,$ReferenceTime) & $script:ParityOperatingSystemPolicy -Object $Object -Entries $Entries -ReferenceTime ([datetimeoffset]'2026-11-13T00:00:00Z')}
+    . (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')
+    try{
+        $policy=New-ResultantPolicyFixture;$script:FineGrainedFixture=@($policy);$script:ResultantFixture=$policy
+        $script:User=@(foreach($index in 1..100){$row=$saved.PSObject.Copy();$row.ObjectGuid=[guid]::NewGuid().ToString();$row.DistinguishedName=('CN=User'+$index+',OU=People,'+$script:DomainDn);$row.SID=$script:DomainSid+'-'+(2000+$index);$row | Add-Member -NotePropertyName 'msDS-ResultantPSO' -NotePropertyValue $policy.DistinguishedName;$row})
+        foreach($mode in @('PSDrive','Direct')){
+            $profile=New-DirectoryProfile;$profile.Analysis.DirectoryConnection=$mode;$script:Queries.Clear()
+            $before=ConvertTo-Json -InputObject $script:User -Depth 30 -Compress
+            $cached=Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile $profile
+            $cachedCalls=@($script:Queries | Where-Object Command -eq Get-ADUserResultantPasswordPolicy).Count
+            Assert-DirectoryEqual 0 $cachedCalls
+            Assert-DirectoryEqual 1 @($script:Queries | Where-Object Command -eq Get-ADFineGrainedPasswordPolicy).Count
+            Assert-DirectoryEqual 100 $cached.PasswordPolicies.Resultant.Count
+            Assert-DirectoryEqual 100 @($cached.Users.DistinguishedName | Select-Object -Unique).Count
+            Assert-DirectoryEqual 0 @($cached.PasswordPolicies.Resultant | Where-Object {$_.Status -ne 'Collected' -or $_.Source -ne 'FineGrained'}).Count
+            Assert-DirectoryEqual $policy.DistinguishedName $cached.Users[0].ResultantPasswordPolicyDN
+            Assert-DirectoryTrue ($cached.PasswordPolicies.Resultant[0].Policy.LockoutDuration -is [timespan]) 'Cached duration lost its type'
+            Assert-DirectoryEqual $false $cached.PasswordPolicies.Resultant[0].Policy.ReversibleEncryptionEnabled
+            Assert-DirectoryEqual 0 $cached.PasswordPolicies.Resultant[0].Policy.LockoutThreshold
+            Assert-DirectoryEqual ([timespan]::Zero) $cached.PasswordPolicies.Resultant[0].Policy.MinPasswordAge
+            Assert-DirectoryEqual $before (ConvertTo-Json -InputObject $script:User -Depth 30 -Compress)
+            foreach($row in $script:User){$row.'msDS-ResultantPSO'=$null}
+            $script:Queries.Clear();$baseline=Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile $profile
+            $baselineCalls=@($script:Queries | Where-Object Command -eq Get-ADUserResultantPasswordPolicy).Count;Assert-DirectoryEqual 100 $baselineCalls
+            $a=@(Test-ADAnalyzerDirectoryPolicy -Data $cached -Profile $profile | Sort-Object CheckId)
+            $b=@(Test-ADAnalyzerDirectoryPolicy -Data $baseline -Profile $profile | Sort-Object CheckId)
+            Assert-DirectoryEqual $a.Count $b.Count
+            for($index=0;$index -lt $a.Count;$index++){
+                Assert-DirectoryEqual $a[$index].CheckId $b[$index].CheckId
+                $left=ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerComparableValue $a[$index]) -Depth 50 -Compress
+                $right=ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerComparableValue $b[$index]) -Depth 50 -Compress
+                Assert-DirectoryTrue ($left -ceq $right) ('Cache changed check '+$a[$index].RuleId+' for '+$a[$index].Target)
+            }
+            foreach($row in $script:User){$row.'msDS-ResultantPSO'=$policy.DistinguishedName}
+            Write-Host ("MEASURE {0}: 100 users, resultant calls fallback={1}, cache={2}; one bulk PSO query" -f $mode,$baselineCalls,$cachedCalls)
+        }
+    }finally{Set-Item Function:script:Test-ADAnalyzerOperatingSystemProfile $script:ParityOperatingSystemPolicy;$script:User=$saved;$script:IncludePsoSchema=$false;$script:FineGrainedFixture=@();$script:ResultantFixture=$null}
+}
+Invoke-DirectoryTest 'uncertain computed PSO or cache evidence retains per-user lookup and error semantics' {
+    $saved=$script:User
+    try{
+        foreach($case in @('Absent','Multiple','NonString','Malformed','Unmatched','Ambiguous','MixedDuplicate','Incomplete','SchemaUnavailable','SchemaDenied','BulkDenied')){
+            $policy=New-ResultantPolicyFixture;$script:FineGrainedFixture=@($policy);$script:ResultantFixture=$policy;$script:IncludePsoSchema=$case -ne 'SchemaUnavailable'
+            $script:User=$saved.PSObject.Copy()
+            $value=switch($case){Absent{$null};Multiple{,@($policy.DistinguishedName,$policy.DistinguishedName)};NonString{1};Malformed{'not a policy DN'};Unmatched{'CN=Other,'+$script:DomainDn};default{$policy.DistinguishedName}}
+            $script:User | Add-Member -NotePropertyName 'msDS-ResultantPSO' -NotePropertyValue $value
+            if($case -eq 'Ambiguous'){$script:FineGrainedFixture+=@($policy.PSObject.Copy())}
+            if($case -eq 'MixedDuplicate'){$partial=$policy.PSObject.Copy();$partial.PSObject.Properties.Remove('LockoutDuration');$script:FineGrainedFixture+=@($partial)}
+            if($case -eq 'Incomplete'){$script:FineGrainedFixture=@($policy.PSObject.Copy());$script:FineGrainedFixture[0].PSObject.Properties.Remove('LockoutDuration')}
+            $script:Denied=if($case -eq 'BulkDenied'){'Get-ADFineGrainedPasswordPolicy'}elseif($case -eq 'SchemaDenied'){'Get-ADObject'}else{''};$script:Queries.Clear()
+            $data=Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile (New-DirectoryProfile)
+            Assert-DirectoryEqual 1 @($script:Queries | Where-Object Command -eq Get-ADUserResultantPasswordPolicy).Count
+            Assert-DirectoryEqual Collected $data.PasswordPolicies.Resultant[0].Status;Assert-DirectoryEqual FineGrained $data.PasswordPolicies.Resultant[0].Source
+            $userQuery=@($script:Queries | Where-Object Command -eq Get-ADUser)[0]
+            Assert-DirectoryEqual ($case -notin 'SchemaUnavailable','SchemaDenied') ('msDS-ResultantPSO' -in $userQuery.Parameters.Properties)
+        }
+        $script:IncludePsoSchema=$true;$script:FineGrainedFixture=@();$script:ResultantFixture=$null;$script:Denied='Get-ADUserResultantPasswordPolicy'
+        $data=Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile (New-DirectoryProfile)
+        Assert-DirectoryEqual Unreadable $data.PasswordPolicies.Resultant[0].Status;Assert-DirectoryEqual Partial $data.Coverage.ResultantPasswordPolicies
+        $checks=@(Test-ADAnalyzerDirectoryPolicy -Data $data -Profile (New-DirectoryProfile))
+        Assert-DirectoryEqual Unknown (Select-DirectoryCheck $checks PASSWORD.MIN_LENGTH).Status
+    }finally{$script:User=$saved;$script:IncludePsoSchema=$false;$script:FineGrainedFixture=@();$script:ResultantFixture=$null;$script:Denied=''}
+}
+Invoke-DirectoryTest 'mixed explicit and absent computed policy evidence queries only uncertain users' {
+    $saved=$script:User
+    try{
+        $policy=New-ResultantPolicyFixture;$script:IncludePsoSchema=$true;$script:FineGrainedFixture=@($policy);$script:ResultantFixture=$policy
+        $script:User=@(foreach($index in 1..3){$row=$saved.PSObject.Copy();$row.DistinguishedName=('CN=Mixed'+$index+',OU=People,'+$script:DomainDn);$row | Add-Member -NotePropertyName 'msDS-ResultantPSO' -NotePropertyValue $(if($index -eq 1){$policy.DistinguishedName}elseif($index -eq 2){$null}else{'CN=Missing,'+$script:DomainDn});$row})
+        $script:Queries.Clear();$data=Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile (New-DirectoryProfile)
+        $lookups=@($script:Queries | Where-Object Command -eq Get-ADUserResultantPasswordPolicy)
+        Assert-DirectoryEqual 2 $lookups.Count
+        Assert-DirectoryTrue ($data.Users[0].DistinguishedName -notin $lookups.Parameters.Identity) 'A known cached user was queried again'
+        Assert-DirectoryEqual 3 $data.PasswordPolicies.Resultant.Count
+        Assert-DirectoryEqual 0 @($data.PasswordPolicies.Resultant | Where-Object Status -ne Collected).Count
+    }finally{$script:User=$saved;$script:IncludePsoSchema=$false;$script:FineGrainedFixture=@();$script:ResultantFixture=$null}
 }
 Invoke-DirectoryTest 'SID graph follows primary and transitive membership and stops cycles' {
     $object=[pscustomobject]@{SID=($script:DomainSid+'-1001');PrimaryGroupID=513;MemberOf=@('CN=Child,DC=example,DC=invalid')}
