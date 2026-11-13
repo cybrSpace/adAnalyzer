@@ -27,7 +27,7 @@ function Get-ADAnalyzerDefaultProfile {
     @{
         SchemaVersion=1;Name='AD Tactical Hardening';Version='1.0.0'
         Targets=@{Domain='';Server='';SearchBase=''}
-        Analysis=@{IncludeAcl=$false;IncludeHostChecks=$false;IncludeGpo=$true;AssumeGpoApplicable=$false;HostTimeoutSeconds=30;TemplatePath='';Language='en-US'}
+        Analysis=@{IncludeAcl=$false;IncludeHostChecks=$false;IncludeGpo=$true;AssumeGpoApplicable=$false;HostTimeoutSeconds=30;TemplatePath='';Language='en-US';DirectoryConnection='PSDrive'}
         Policy=@{
             MinimumPasswordLength=12;MinimumPasswordAgeDays=1;MaximumPasswordAgeDays=90
             UserPasswordAgeDays=90;ServicePasswordAgeDays=365;AllowPasswordNeverExpires=$false
@@ -135,6 +135,8 @@ function Import-ADAnalyzerProfile {
     $timeout=0
     if(-not [int]::TryParse([string]$result.Analysis.HostTimeoutSeconds,[ref]$timeout) -or $timeout -lt 1 -or $timeout -gt 300){throw 'Analysis.HostTimeoutSeconds must be an integer 1..300'}
     $result.Analysis.HostTimeoutSeconds=$timeout
+    if($result.Analysis.DirectoryConnection -isnot [string] -or $result.Analysis.DirectoryConnection -notin 'PSDrive','Direct'){throw 'Analysis.DirectoryConnection must be PSDrive or Direct'}
+    $result.Analysis.DirectoryConnection=if($result.Analysis.DirectoryConnection -ieq 'PSDrive'){'PSDrive'}else{'Direct'}
     if($result.Remediation.MaximumActions -isnot [int] -and $result.Remediation.MaximumActions -isnot [long]){throw 'Remediation.MaximumActions must be an integer'}
     if($result.Remediation.MaximumActions -lt 1 -or $result.Remediation.MaximumActions -gt 1000){throw 'Remediation.MaximumActions must be 1..1000'}
     foreach($exception in @($result.Exceptions)) {

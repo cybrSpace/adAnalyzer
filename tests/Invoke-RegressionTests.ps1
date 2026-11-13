@@ -120,6 +120,15 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
         Assert-Throws {Import-ADAnalyzerProfile -Path 'profile.ps1'}
         Assert-Throws {Import-ADAnalyzerProfile -Profile @{Analysis=@{IncludeAcl='false'}}}
     }
+    Invoke-Test 'directory connection defaults to PSDrive with validated explicit direct mode' {
+        Assert-Equal PSDrive (Get-ADAnalyzerDefaultProfile).Analysis.DirectoryConnection
+        foreach($mode in @('PSDrive','Direct')){
+            $json=Join-Path $temporary 'connection-profile.json';Set-Content -LiteralPath $json -Value ('{"Analysis":{"DirectoryConnection":"'+$mode+'"}}')
+            $psd1=Join-Path $temporary 'connection-profile.psd1';Set-Content -LiteralPath $psd1 -Value ("@{Analysis=@{DirectoryConnection='"+$mode+"'}}")
+            foreach($path in @($json,$psd1)){Assert-Equal $mode (Import-ADAnalyzerProfile -Path $path).Analysis.DirectoryConnection}
+        }
+        foreach($mode in @('Unknown',1,@('PSDrive','Direct'),$null)){Assert-Throws {Import-ADAnalyzerProfile -Profile @{Analysis=@{DirectoryConnection=$mode}}}}
+    }
     Invoke-Test 'profile defaults and nested collections are isolated between runs' {
         $a=Get-ADAnalyzerDefaultProfile;$b=Get-ADAnalyzerDefaultProfile;$a.Policy.MinimumPasswordLength=99;$a.Policy.AllowedUserRightSids['one']=@('SID')
         Assert-Equal 12 $b.Policy.MinimumPasswordLength;Assert-Equal 0 $b.Policy.AllowedUserRightSids.Count

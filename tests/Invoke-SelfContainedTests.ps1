@@ -14,6 +14,11 @@ $paths=& $module {
 }
 foreach($path in $paths){if([IO.Path]::GetFullPath($path) -ne $expected){throw "External AD dependency: $path"}}
 if(-not (Get-PSProvider ActiveDirectory -ErrorAction Stop)){throw 'Bundled AD provider was not registered'}
+$driveCommand=Get-Command New-PSDrive -ArgumentList @('ADAnalyzerMetadataProbe','ActiveDirectory','DC=example,DC=invalid') -ErrorAction Stop
+foreach($parameter in @('Server','Credential','Root','Scope')){
+    if(-not $driveCommand.Parameters.ContainsKey($parameter)){throw "Bundled AD drive is missing parameter: $parameter"}
+}
+Write-Host 'PASS bundled AD provider exposes drive server credential root and scope parameters without a live bind'
 if(Get-Module -Name GroupPolicy){throw 'Unexpected external GroupPolicy module'}
 if($module.ExportedCmdlets.Count -or $module.ExportedVariables.Count){throw 'Internal AD commands or script variables leaked from the public package interface'}
 foreach($name in @('Get-ADAnalyzerGpo','Get-ADAnalyzerGpoReport','Read-ADAnalyzerGpo')){

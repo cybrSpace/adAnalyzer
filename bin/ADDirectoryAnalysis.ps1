@@ -125,8 +125,10 @@ function Get-ADAnalyzerAccountType {
     [pscustomobject]@{Type=if($types.Count -eq 1 -and -not $invalidRules.Count){$types[0]}else{'Unknown'};Evidence=$evidence.ToArray();Conflicting=$types.Count -gt 1;InvalidRules=$invalidRules.ToArray()}
 }
 function Invoke-ADAnalyzerDirectoryQuery {
-    param([string]$Command,[hashtable]$Parameters,[string]$Key,$Coverage,$Errors,[string]$Target)
+    param([string]$Command,[hashtable]$Parameters,[string]$Key,$Coverage,$Errors,[string]$Target,[string]$ExpectedDrive,[string]$ConnectionError)
     try {
+        if($ConnectionError){throw $ConnectionError}
+        if($ExpectedDrive -and (Get-Location).Drive.Name -ne $ExpectedDrive){$Coverage['DirectoryConnection']='Unreadable';throw 'The owned AD PSDrive is no longer the active directory context'}
         $items=@(& $Command @Parameters -ErrorAction Stop)
         $Coverage[$Key]='Collected';return $items
     }catch{
@@ -255,6 +257,9 @@ function Get-ADAnalyzerHostData {
 function Get-ADAnalyzerDirectoryData {
     [CmdletBinding()]
     param([Parameter(Mandatory=$true)]$Context,[Parameter(Mandatory=$true)][hashtable]$Profile)
+    $connectionMode=Get-ADAnalyzerDirectoryField (Get-ADAnalyzerDirectoryField $Profile 'Analysis' @{}) 'DirectoryConnection' 'PSDrive'
+    if($connectionMode -isnot [string] -or $connectionMode -notin 'PSDrive','Direct'){throw 'Analysis.DirectoryConnection must be PSDrive or Direct'}
+    $connectionMode=if($connectionMode -ieq 'PSDrive'){'PSDrive'}else{'Direct'}
     $server=[string](Get-ADAnalyzerDirectoryField $Context 'Server')
     if([string]::IsNullOrWhiteSpace($server)){$server=[string](Get-ADAnalyzerDirectoryField $Context 'Domain')}
     if([string]::IsNullOrWhiteSpace($server)){throw 'Context.Server or Context.Domain is required'}
@@ -262,13 +267,35 @@ function Get-ADAnalyzerDirectoryData {
     $common=@{Server=$server}
     if($null -ne $credential -and $credential -ne [pscredential]::Empty){$common['Credential']=$credential}
     $coverage=[ordered]@{};$errors=[System.Collections.Generic.List[object]]::new()
-    $query={param($Command,$Arguments,$Key) $splat=@{}+$common+$Arguments;@(Invoke-ADAnalyzerDirectoryQuery $Command $splat $Key $coverage $errors $server)}
+    $expectedDrive=$null;$connectionError=$null
+    $query={param($Command,$Arguments,$Key) $splat=@{}+$common+$Arguments;@(Invoke-ADAnalyzerDirectoryQuery $Command $splat $Key $coverage $errors $server -ExpectedDrive $expectedDrive -ConnectionError $connectionError)}
     $root=@(& $query 'Get-ADRootDSE' @{} 'RootDSE') | Select-Object -First 1
     $domainIdentity=[string](Get-ADAnalyzerDirectoryField $Context 'Domain')
     if([string]::IsNullOrWhiteSpace($domainIdentity)){$domainIdentity=[string](Get-ADAnalyzerDirectoryField $root 'DefaultNamingContext' $server)}
     $domain=@(& $query 'Get-ADDomain' @{Identity=$domainIdentity} 'Domain') | Select-Object -First 1
     $domainDn=[string](Get-ADAnalyzerDirectoryField $domain 'DistinguishedName' (Get-ADAnalyzerDirectoryField $root 'DefaultNamingContext'))
     $domainSid=ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $domain 'DomainSID')
+    $drive=$null;$previousLocation=$null;$primaryError=$null;$restorationError=$null;$removalError=$null;$result=$null
+    $connectionStatus='Direct';$coverage['DirectoryConnection']='NotConfigured'
+    try {
+    if($connectionMode -eq 'PSDrive'){
+        try{
+            $previousLocation=Get-Location
+            $driveName='ADAnalyzerData'+[guid]::NewGuid().ToString('N')
+            $driveArguments=@{Name=$driveName;PSProvider='ActiveDirectory';Root=$domainDn;Server=$server;Scope='Local';ErrorAction='Stop';WhatIf=$false;Confirm=$false}
+            if($common.ContainsKey('Credential')){$driveArguments.Credential=$credential}
+            $drive=New-PSDrive @driveArguments
+            if($drive.Provider.Name -ne 'ActiveDirectory'){throw 'The requested AD PSDrive provider was not established'}
+            Set-Location -LiteralPath ($drive.Name+':') -ErrorAction Stop
+            $expectedDrive=$drive.Name
+            $null=$common.Remove('Credential')
+            $connectionStatus='Connected';$coverage['DirectoryConnection']='Collected'
+        }catch{
+            $connectionStatus='Unreadable';$coverage['DirectoryConnection']='Unreadable'
+            $connectionError='AD PSDrive connection is unavailable: '+$_.Exception.Message
+            $errors.Add([pscustomobject]@{Collector='DirectoryConnection';Target=$server;Status='Unreadable';Message=$_.Exception.Message;ExceptionType=$_.Exception.GetType().FullName}) > $null
+        }
+    }
     $forest=@(& $query 'Get-ADForest' @{} 'Forest') | Select-Object -First 1
     $rootDomainSid=$domainSid;$forestRoot=[string](Get-ADAnalyzerDirectoryField $forest 'RootDomain')
     if($forestRoot -and $forestRoot -ine (Get-ADAnalyzerDirectoryField $domain 'DNSRoot')){
@@ -404,13 +431,33 @@ function Get-ADAnalyzerDirectoryData {
         $coverage['Hosts']=if(@($hosts | Where-Object Status -ne 'Observed').Count){'Partial'}elseif($hosts.Count){'Collected'}else{'Unreadable'}
     }else{$coverage['Hosts']='NotConfigured'}
     $domainDto=[pscustomobject]@{DistinguishedName=$domainDn;DNSRoot=Get-ADAnalyzerDirectoryField $domain 'DNSRoot';SID=$domainSid;RootDomainSID=$rootDomainSid;DomainMode=Get-ADAnalyzerDirectoryField $domain 'DomainMode';ForestMode=Get-ADAnalyzerDirectoryField $forest 'ForestMode';MachineAccountQuota=Get-ADAnalyzerDirectoryField $settings 'ms-DS-MachineAccountQuota';OptionalFeatures=$optional;FeatureSchema=$available;PrivilegedSids=@($privilegedSids | Select-Object -Unique)}
-    [pscustomobject]@{
+    if($connectionMode -eq 'PSDrive' -and $coverage['DirectoryConnection'] -ne 'Collected'){$connectionStatus='Unreadable'}
+    $result=[pscustomobject]@{
         Server=$server;Domain=$domainDto;Users=$users;Groups=$groups;Computers=$computers;ServiceAccounts=$services
+        DirectoryConnection=[pscustomobject]@{Mode=$connectionMode;Server=$server;Status=$connectionStatus}
         Objects=@($users)+@($computers)+@($services);Trusts=$trusts
         PasswordPolicies=[pscustomobject]@{Default=$defaultPolicy;FineGrained=$fineGrained;Resultant=$resultant.ToArray()}
         DomainControllers=$controllers;Acl=[pscustomobject]@{Targets=$aclTargets.ToArray();Entries=$aces.ToArray();GuidMap=$guidMap;EffectiveAccessCalculated=$false}
         Hosts=$hosts;Errors=$errors.ToArray();Coverage=$coverage
     }
+    }catch{$primaryError=$_}
+    finally{
+        if($null -ne $drive){
+            try{Set-Location -LiteralPath $previousLocation.Path -ErrorAction Stop}catch{$restorationError=$_}
+            try{Remove-PSDrive -Name $drive.Name -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false}catch{$removalError=$_}
+        }
+    }
+    if($null -ne $primaryError){
+        if($null -ne $restorationError){$primaryError.Exception.Data['ADAnalyzerLocationRestorationError']=$restorationError.Exception.Message}
+        if($null -ne $removalError){$primaryError.Exception.Data['ADAnalyzerDriveRemovalError']=$removalError.Exception.Message}
+        throw $primaryError
+    }
+    if($null -ne $restorationError){
+        if($null -ne $removalError){$restorationError.Exception.Data['ADAnalyzerDriveRemovalError']=$removalError.Exception.Message}
+        throw $restorationError
+    }
+    if($null -ne $removalError){throw $removalError}
+    $result
 }
 
 function Add-ADAnalyzerDirectoryCheck {

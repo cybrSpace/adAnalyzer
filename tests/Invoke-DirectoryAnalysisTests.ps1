@@ -11,6 +11,32 @@ function Invoke-DirectoryTest([string]$Name,[scriptblock]$Body){
     try{& $Body;$script:Passed++;Write-Host "PASS $Name"}catch{$script:Failed++;Write-Host "FAIL $Name : $_"}
 }
 $script:Credential=[pscredential]::new('fixture-user',(ConvertTo-SecureString 'fixture-only' -AsPlainText -Force))
+$script:ExpectedDirectoryCredential=$script:Credential
+$script:DriveEvents=[Collections.Generic.List[object]]::new();$script:DriveConnections=@{};$script:DriveFailure=''
+function New-PSDrive {
+    param($Server,$Name,$PSProvider,$Root,$Credential,$Scope,$ErrorAction,[switch]$WhatIf,[switch]$Confirm)
+    $script:DriveEvents.Add([pscustomobject]@{Action='Create';Name=$Name;Parameters=@{}+$PSBoundParameters;CallerPath=(Microsoft.PowerShell.Management\Get-Location).Path})
+    if($script:DriveFailure -eq 'Create'){throw 'fixture drive creation failure'}
+    $null=Microsoft.PowerShell.Management\New-PSDrive -Name $Name -PSProvider FileSystem -Root $RepositoryRoot -Scope Script -ErrorAction Stop -WhatIf:$false -Confirm:$false
+    $script:DriveConnections[$Name]=[pscustomobject]@{Credential=$(if($PSBoundParameters.ContainsKey('Credential')){$Credential}else{[pscredential]::Empty});CallerPath=(Microsoft.PowerShell.Management\Get-Location).Path}
+    [pscustomobject]@{Name=$Name;Provider=[pscustomobject]@{Name='ActiveDirectory'}}
+}
+function Set-Location {
+    param($LiteralPath,$Path,$ErrorAction)
+    $destination=if($PSBoundParameters.ContainsKey('LiteralPath')){$LiteralPath}else{$Path}
+    $entering=@($script:DriveConnections.Keys | Where-Object {$destination -eq ($_+':')}).Count -gt 0
+    $restoring=@($script:DriveConnections.Values | Where-Object {$_.CallerPath -eq $destination}).Count -gt 0
+    if($entering -and $script:DriveFailure -eq 'Enter'){throw 'fixture drive entry failure'}
+    if($restoring -and $script:DriveFailure -in 'Restore','Both'){throw 'fixture drive restoration failure'}
+    Microsoft.PowerShell.Management\Set-Location -LiteralPath $destination -ErrorAction Stop
+}
+function Remove-PSDrive {
+    param($Name,$ErrorAction,[switch]$Force,[switch]$WhatIf,[switch]$Confirm)
+    $script:DriveEvents.Add([pscustomobject]@{Action='Remove';Name=$Name;Force=[bool]$Force})
+    if($script:DriveFailure -in 'Remove','Both'){throw 'fixture drive removal failure'}
+    Microsoft.PowerShell.Management\Remove-PSDrive -Name $Name -Force:$Force -ErrorAction Stop -WhatIf:$false -Confirm:$false
+    $script:DriveConnections.Remove($Name)
+}
 $script:Queries=[System.Collections.Generic.List[object]]::new()
 $script:Denied='';$script:IncludeLapsSchema=$true;$script:HostUnavailable=$false;$script:DeniedHostClass=''
 $script:ServiceAccount=$null
@@ -45,10 +71,15 @@ $script:PasswordPolicy=[pscustomobject]@{
 }
 function Register-DirectoryQuery([string]$Command,$Bound){
     $copy=@{};foreach($key in $Bound.Keys){$copy[$key]=$Bound[$key]}
-    $script:Queries.Add([pscustomobject]@{Command=$Command;Parameters=$copy})
+    $driveName=(Microsoft.PowerShell.Management\Get-Location).Drive.Name
+    $effectiveCredential=if($Bound.ContainsKey('Credential')){$Bound['Credential']}elseif($script:DriveConnections.ContainsKey($driveName)){$script:DriveConnections[$driveName].Credential}else{[pscredential]::Empty}
+    $script:Queries.Add([pscustomobject]@{Command=$Command;Parameters=$copy;Drive=$driveName;EffectiveCredential=$effectiveCredential})
     if($Bound['Server'] -ne 'dc.example.invalid'){throw "Missing explicit server for $Command"}
-    if($Bound['Credential'] -ne $script:Credential){throw "Missing explicit credential for $Command"}
+    if($effectiveCredential -ne $script:ExpectedDirectoryCredential){throw "Missing pinned credential for $Command"}
     if($script:Denied -eq $Command){throw "fixture denied: $Command"}
+    if($script:DriveFailure -eq 'Drift' -and $Command -eq 'Get-ADForest' -and $script:DriveConnections.ContainsKey($driveName)){
+        Microsoft.PowerShell.Management\Set-Location -LiteralPath $script:DriveConnections[$driveName].CallerPath -ErrorAction Stop
+    }
 }
 function Get-ADRootDSE {param($Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADRootDSE' $PSBoundParameters;[pscustomobject]@{DefaultNamingContext=$script:DomainDn;SchemaNamingContext=('CN=Schema,CN=Configuration,'+$script:DomainDn);ConfigurationNamingContext=('CN=Configuration,'+$script:DomainDn)}}
 function Get-ADDomain {param($Identity,$Server,$Credential,$ErrorAction) Register-DirectoryQuery 'Get-ADDomain' $PSBoundParameters;[pscustomobject]@{DistinguishedName=$script:DomainDn;DNSRoot='example.invalid';DomainSID=$script:DomainSid;DomainMode='fixture'}}
@@ -105,6 +136,110 @@ function Select-DirectoryCheck($Checks,[string]$Rule,[string]$Target=''){
     @($Checks | Where-Object {$_.RuleId -eq $Rule -and (-not $Target -or $_.Target -eq $Target)}) | Select-Object -First 1
 }
 
+Invoke-DirectoryTest 'modern bulk collection defaults to an owned AD provider drive with pinned context' {
+    $script:DriveEvents.Clear();$script:Queries.Clear();$before=(Get-Location).Path
+    $data=Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile (New-DirectoryProfile)
+    $created=@($script:DriveEvents | Where-Object Action -eq Create);$removed=@($script:DriveEvents | Where-Object Action -eq Remove)
+    Assert-DirectoryEqual 1 $created.Count;Assert-DirectoryEqual 1 $removed.Count
+    Assert-DirectoryEqual ActiveDirectory $created[0].Parameters.PSProvider;Assert-DirectoryEqual Local $created[0].Parameters.Scope
+    Assert-DirectoryEqual dc.example.invalid $created[0].Parameters.Server;Assert-DirectoryEqual $script:DomainDn $created[0].Parameters.Root
+    Assert-DirectoryEqual $script:Credential $created[0].Parameters.Credential
+    Assert-DirectoryEqual $created[0].Name $removed[0].Name;Assert-DirectoryEqual $true $removed[0].Force
+    foreach($query in @($script:Queries | Select-Object -Skip 2)){
+        Assert-DirectoryEqual $created[0].Name $query.Drive
+        Assert-DirectoryTrue (-not $query.Parameters.ContainsKey('Credential')) 'Bulk query bypassed the drive credential context'
+        Assert-DirectoryEqual $script:Credential $query.EffectiveCredential
+    }
+    Assert-DirectoryEqual $before (Get-Location).Path
+    Assert-DirectoryEqual PSDrive $data.DirectoryConnection.Mode;Assert-DirectoryEqual Connected $data.DirectoryConnection.Status
+    Assert-DirectoryEqual 0 @($script:DriveConnections.Keys).Count
+    Assert-DirectoryTrue (-not (Get-PSDrive -Name $created[0].Name -ErrorAction SilentlyContinue)) 'Owned drive leaked'
+}
+Invoke-DirectoryTest 'direct collection is explicit and returns the same typed datasets as drive collection' {
+    $profile=New-DirectoryProfile;$context=New-DirectoryContext
+    $a=Get-ADAnalyzerDirectoryData -Context $context -Profile $profile
+    $profile.Analysis.DirectoryConnection='Direct';$script:DriveEvents.Clear();$script:Queries.Clear()
+    $b=Get-ADAnalyzerDirectoryData -Context $context -Profile $profile
+    Assert-DirectoryEqual 0 $script:DriveEvents.Count;Assert-DirectoryEqual Direct $b.DirectoryConnection.Mode
+    foreach($query in $script:Queries){Assert-DirectoryEqual $script:Credential $query.Parameters.Credential}
+    foreach($field in @('Domain','Users','Computers','Groups','ServiceAccounts','Trusts','PasswordPolicies','DomainControllers','Acl')){
+        Assert-DirectoryEqual (ConvertTo-Json -InputObject $a.$field -Depth 40 -Compress) (ConvertTo-Json -InputObject $b.$field -Depth 40 -Compress)
+    }
+}
+Invoke-DirectoryTest 'current-identity drive access omits credentials and preserves the caller drive' {
+    $before=(Get-Location).Path;$caller='ADAnalyzerCaller'+[guid]::NewGuid().ToString('N')
+    $null=Microsoft.PowerShell.Management\New-PSDrive -Name $caller -PSProvider FileSystem -Root $RepositoryRoot -Scope Script -ErrorAction Stop -WhatIf:$false -Confirm:$false
+    try{
+        Microsoft.PowerShell.Management\Set-Location -LiteralPath ($caller+':') -ErrorAction Stop
+        $callerPath=(Get-Location).Path;$script:DriveEvents.Clear();$script:Queries.Clear();$script:ExpectedDirectoryCredential=[pscredential]::Empty
+        $context=New-DirectoryContext;$context.Credential=[pscredential]::Empty
+        $data=Get-ADAnalyzerDirectoryData -Context $context -Profile (New-DirectoryProfile)
+        $create=@($script:DriveEvents | Where-Object Action -eq Create)[0]
+        Assert-DirectoryTrue (-not $create.Parameters.ContainsKey('Credential')) 'Empty credential was passed to the provider'
+        Assert-DirectoryEqual $callerPath (Get-Location).Path
+        Assert-DirectoryTrue ([bool](Get-PSDrive -Name $caller -ErrorAction Stop)) 'Caller drive was removed'
+        Assert-DirectoryEqual Connected $data.DirectoryConnection.Status
+    }finally{
+        $script:ExpectedDirectoryCredential=$script:Credential
+        Microsoft.PowerShell.Management\Set-Location -LiteralPath $before -ErrorAction Stop
+        Microsoft.PowerShell.Management\Remove-PSDrive -Name $caller -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false
+    }
+}
+Invoke-DirectoryTest 'provider setup and read failures never silently fall back to direct bulk queries' {
+    foreach($mode in @('Create','Enter','Drift')){
+        $before=(Get-Location).Path;$script:DriveEvents.Clear();$script:Queries.Clear();$script:DriveFailure=$mode
+        try{
+            $data=Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile (New-DirectoryProfile)
+            Assert-DirectoryEqual Unreadable $data.Coverage.DirectoryConnection;Assert-DirectoryEqual Unreadable $data.Coverage.Users
+            Assert-DirectoryEqual 0 @($script:Queries | Where-Object Command -in 'Get-ADUser','Get-ADComputer','Get-ADGroup','Get-ADServiceAccount').Count
+            Assert-DirectoryTrue ($data.Errors.Count -gt 0) 'Unavailable provider context was hidden'
+            Assert-DirectoryEqual $before (Get-Location).Path;Assert-DirectoryEqual 0 @($script:DriveConnections.Keys).Count
+        }finally{
+            $script:DriveFailure=''
+            Microsoft.PowerShell.Management\Set-Location -LiteralPath $before -ErrorAction Stop
+            foreach($name in @($script:DriveConnections.Keys)){Microsoft.PowerShell.Management\Remove-PSDrive -Name $name -Force -ErrorAction SilentlyContinue -WhatIf:$false -Confirm:$false;$script:DriveConnections.Remove($name)}
+        }
+    }
+    $before=(Get-Location).Path;$script:Denied='Get-ADUser';$script:DriveEvents.Clear()
+    try{
+        $data=Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile (New-DirectoryProfile)
+        Assert-DirectoryEqual Unreadable $data.Coverage.Users;Assert-DirectoryEqual 0 @($data.Users).Count
+        Assert-DirectoryEqual 1 @($script:DriveEvents | Where-Object Action -eq Remove).Count
+        Assert-DirectoryEqual $before (Get-Location).Path
+    }finally{$script:Denied=''}
+}
+Invoke-DirectoryTest 'drive cleanup failures preserve both causes and suppress a successful DTO' {
+    foreach($mode in @('Restore','Remove','Both')){
+        $before=(Get-Location).Path;$script:DriveEvents.Clear();$script:DriveFailure=$mode;$emitted=[Collections.ArrayList]::new();$caught=$null
+        try{
+            try{Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile (New-DirectoryProfile) | ForEach-Object {$null=$emitted.Add($_)}}catch{$caught=$_}
+            Assert-DirectoryTrue ($null -ne $caught) 'Cleanup failure was swallowed';Assert-DirectoryEqual 0 $emitted.Count
+            $remove=@($script:DriveEvents | Where-Object Action -eq Remove);Assert-DirectoryEqual 1 $remove.Count;Assert-DirectoryEqual $true $remove[0].Force
+            if($mode -in 'Restore','Both'){Assert-DirectoryTrue ($caught.Exception.Message.Contains('fixture drive restoration failure')) 'Restoration cause was lost'}
+            if($mode -eq 'Both'){Assert-DirectoryTrue ($caught.Exception.Data['ADAnalyzerDriveRemovalError'].Contains('fixture drive removal failure')) 'Secondary cleanup cause was lost'}
+        }finally{
+            $script:DriveFailure=''
+            Microsoft.PowerShell.Management\Set-Location -LiteralPath $before -ErrorAction Stop
+            foreach($name in @($script:DriveConnections.Keys)){Microsoft.PowerShell.Management\Remove-PSDrive -Name $name -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false;$script:DriveConnections.Remove($name)}
+        }
+    }
+}
+Invoke-DirectoryTest 'owned drive is cleaned before the first collected snapshot reaches its consumer' {
+    $script:DriveEvents.Clear()
+    $data=Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile (New-DirectoryProfile) | ForEach-Object {
+        Assert-DirectoryEqual 0 @($script:DriveConnections.Keys).Count
+        Assert-DirectoryEqual 1 @($script:DriveEvents | Where-Object Action -eq Remove).Count
+        $_
+    } | Select-Object -First 1
+    Assert-DirectoryEqual 1 $data.Users.Count
+}
+Invoke-DirectoryTest 'invalid directory connection mode fails before metadata or bulk queries' {
+    foreach($mode in @('Unknown',1,@('PSDrive','Direct'),$null)){
+        $profile=New-DirectoryProfile;$profile.Analysis.DirectoryConnection=$mode;$script:Queries.Clear();$caught=$false
+        try{$null=Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile $profile}catch{$caught=$true}
+        Assert-DirectoryTrue $caught 'Invalid connection mode accepted';Assert-DirectoryEqual 0 $script:Queries.Count
+    }
+}
 Invoke-DirectoryTest 'SID graph follows primary and transitive membership and stops cycles' {
     $object=[pscustomobject]@{SID=($script:DomainSid+'-1001');PrimaryGroupID=513;MemberOf=@('CN=Child,DC=example,DC=invalid')}
     $m=Resolve-ADAnalyzerMembership -Object $object -Groups $script:Groups -DomainSid $script:DomainSid -PrivilegedSids @($script:DomainSid+'-512')
@@ -144,7 +279,7 @@ Invoke-DirectoryTest 'collector forwards server and credentials and avoids passw
     Assert-DirectoryTrue ((@($script:Queries | Where-Object Command -eq 'Get-ADUser')[0].Parameters.Properties) -contains 'IsCriticalSystemObject') 'Critical-object safety metadata must be queried explicitly'
     foreach($query in $script:Queries){
         Assert-DirectoryEqual 'dc.example.invalid' $query.Parameters.Server
-        Assert-DirectoryEqual $script:Credential $query.Parameters.Credential
+        Assert-DirectoryEqual $script:Credential $query.EffectiveCredential
         foreach($attribute in @($query.Parameters.Properties)){
             Assert-DirectoryTrue ($attribute -notin @('*','msDS-ManagedPassword','msLAPS-Password','msLAPS-EncryptedPassword','ms-Mcs-AdmPwd')) ('Forbidden attribute value query: '+$attribute)
         }
