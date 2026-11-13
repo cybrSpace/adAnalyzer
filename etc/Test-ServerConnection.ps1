@@ -53,7 +53,7 @@ foreach ($name in $servers) {
 
         }
 
-        $results.Add($object) > $null
+        $results.Add([pscustomobject]$object) > $null
 
     }
 
