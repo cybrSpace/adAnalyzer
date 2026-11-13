@@ -194,7 +194,11 @@ function Invoke-Cmdlet {
     }
 }
 
-function Initialize-RunspacePool () {
+function Initialize-RunspacePool {
+    <# .SYNOPSIS Returns an unopened pool; the caller owns Open and Dispose. #>
+    [CmdletBinding()]
+    param([ValidateRange(1,2147483647)][int]$MaxRunspaces=[Environment]::ProcessorCount)
+    $ErrorActionPreference='Stop'
 
     $r = @{}
 
@@ -215,12 +219,19 @@ function Initialize-RunspacePool () {
 
     }
 
-    #$r['pool'] = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $constant['runspace']['threads'], $r['init'], $host)
-    #$r['pool'].ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
-
-    $r['pool'] = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, [int]$env:NUMBER_OF_PROCESSORS, $r['init'], $host)
-    $r['pool'].ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
-    $r['pool'].CleanupInterval = 2 * [timespan]::TicksPerMinute
+    $pool=$null
+    try {
+        $pool=[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1,$MaxRunspaces,$r['init'],$host)
+        $pool.ThreadOptions=[System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
+        $pool.CleanupInterval=[timespan]::FromMinutes(2)
+        $r['pool']=$pool
+    } catch {
+        $failure=$_
+        if($null -ne $pool){
+            try{$pool.Dispose()}catch{$failure.Exception.Data['ADAnalyzerCleanupErrors']=@($_.Exception.GetBaseException().Message)}
+        }
+        throw $failure
+    }
 
 
     return $r

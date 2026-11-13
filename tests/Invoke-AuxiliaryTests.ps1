@@ -93,6 +93,13 @@ function Get-ADObject {$script:ExternalCalls++;throw 'Actual directory query mus
 try {
     $script:ReportA=New-AuxiliaryReport -Name ('Fixture '+[char]0x00FC+' policy') -Id ([guid]'11111111-1111-1111-1111-111111111111')
     $script:ReportB=New-AuxiliaryReport -Name $script:ReportA.Gpo.DisplayName -Id ([guid]'22222222-2222-2222-2222-222222222222')
+    foreach($mode in @('Default','Explicit','Invalid','Failures')){
+        Invoke-AuxiliaryTest ('pool contract: '+$mode) {
+            $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File (Join-Path $RepositoryRoot 'tests/PoolFixture.ps1') -RepositoryRoot $RepositoryRoot -Mode $mode)
+            Assert-Equal 0 $LASTEXITCODE
+            Assert-True (($output -join ' ') -match ('PASS pool contract '+$mode)) 'Pool child did not finish'
+        }
+    }
     foreach($mode in @('First','Final','Exhausted','NoRetry','Values','Invalid','Partial','NonTerminating','Delay','Defaults')){
         Invoke-AuxiliaryTest ('retry contract: '+$mode) {
             $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File (Join-Path $RepositoryRoot 'tests/RetryFixture.ps1') -RepositoryRoot $RepositoryRoot -Mode $mode)
