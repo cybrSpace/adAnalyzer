@@ -270,6 +270,109 @@ $during=$script:FixtureDrives.Count; [ADEnvironment]::Close()
     Assert-ClassEqual 'Script' $result.Scope
 }
 
+foreach($mode in @('Default','Direct','Ambient','Credential','CredentialDirect','CreateFail','EntryFail','QueryFail')){
+    Invoke-ClassTest ('legacy public reads preserve the preferred drive context: '+$mode) {
+        $source=@'
+$originals=@{}
+foreach($name in @('Get-Location','Set-Location','New-PSDrive','Get-ADDomain','Get-ADObject','Get-ADUser')){$originals[$name]=(Get-Command $name).ScriptBlock}
+$ambient='__MODE__' -eq 'Ambient'
+$initial=[pscustomobject]@{Path=if($ambient){'ambient-drive:/OU=Existing,DC=example,DC=invalid'}else{'fixture-start'};Provider=[pscustomobject]@{Name=if($ambient){'ActiveDirectory'}else{'FileSystem'}}}
+$script:DriveReadProbe=@{Mode='__MODE__';Originals=$originals;Initial=$initial;Location=$initial;NewCalls=[Collections.ArrayList]::new();DomainCalls=[Collections.ArrayList]::new();Bulk=[Collections.ArrayList]::new()}
+$callerNames=@($script:FixtureDrives | ForEach-Object Name);$removedBefore=$script:RemovedDrives.Count
+try{
+    function script:Get-Location {$script:DriveReadProbe.Location}
+    function script:Set-Location {
+        param($Path,$LiteralPath,$ErrorAction)
+        if($LiteralPath){$script:DriveReadProbe.Location=$script:DriveReadProbe.Initial;return}
+        if($script:DriveReadProbe.Mode -eq 'EntryFail'){throw 'fixture drive entry failed'}
+        $script:DriveReadProbe.Location=[pscustomobject]@{Path=$Path;Provider=[pscustomobject]@{Name='ActiveDirectory'}}
+    }
+    function script:New-PSDrive {
+        param($Server,$Name,$PSProvider,$Root,$Credential,$Scope,$ErrorAction,[switch]$WhatIf,[switch]$Confirm)
+        $null=$script:DriveReadProbe.NewCalls.Add([pscustomobject]@{Server=$Server;Root=$Root;Scope=$Scope;CredentialBound=$PSBoundParameters.ContainsKey('Credential');Credential=$Credential;Name=$Name})
+        if($script:DriveReadProbe.Mode -eq 'CreateFail'){throw 'fixture drive creation failed'}
+        & ($script:DriveReadProbe.Originals['New-PSDrive']) @PSBoundParameters
+    }
+    function script:Get-ADDomain {
+        param($Server,$Credential,$ErrorAction)
+        $null=$script:DriveReadProbe.DomainCalls.Add([pscustomobject]@{CredentialBound=$PSBoundParameters.ContainsKey('Credential');Credential=$Credential})
+        & ($script:DriveReadProbe.Originals['Get-ADDomain']) @PSBoundParameters
+    }
+    function script:Get-ADObject {
+        param($Filter,$Properties,$Server,$ErrorAction)
+        $null=$script:DriveReadProbe.Bulk.Add((Get-Location).Path)
+        if($script:DriveReadProbe.Mode -ne 'Direct' -and (Get-Location).Provider.Name -ne 'ActiveDirectory'){throw 'Bulk object read escaped its AD drive context'}
+        & ($script:DriveReadProbe.Originals['Get-ADObject']) @PSBoundParameters
+    }
+    function script:Get-ADUser {
+        param($Filter,$Properties,$Server,$ErrorAction)
+        $null=$script:DriveReadProbe.Bulk.Add((Get-Location).Path)
+        if($script:DriveReadProbe.Mode -eq 'QueryFail'){throw 'fixture bulk user read failed'}
+        if($script:DriveReadProbe.Mode -ne 'Direct' -and (Get-Location).Provider.Name -ne 'ActiveDirectory'){throw 'Bulk user read escaped its AD drive context'}
+        & ($script:DriveReadProbe.Originals['Get-ADUser']) @PSBoundParameters
+    }
+    $arguments=@{Class='User';FQDN='target.example.invalid'}
+    if('__MODE__' -in 'Direct','CredentialDirect'){$arguments.Profile=@{Analysis=@{DirectoryConnection='Direct'}}}
+    $credential=$null
+    if('__MODE__' -in 'Credential','CredentialDirect'){$credential=[pscredential]::new('fixture',(ConvertTo-SecureString 'fixture-only' -AsPlainText -Force));$arguments.Credential=$credential}
+    $caught=$null;$result=$null
+    try{$result=Get-ADEnvironment @arguments}catch{$caught=$_}
+    $failed='__MODE__' -in 'CreateFail','EntryFail','QueryFail'
+    if($failed -ne ($null -ne $caught)){throw 'Unexpected public read outcome'}
+    if(-not $failed -and $result.User.Report.Count -ne 1){throw 'User report changed'}
+    $newExpected=if('__MODE__' -in 'Direct','Ambient'){0}else{1}
+    if($script:DriveReadProbe.NewCalls.Count -ne $newExpected){throw 'Unexpected owned drive count'}
+    if($newExpected){
+        $call=$script:DriveReadProbe.NewCalls[0];$explicit=$null -ne $credential
+        if($call.CredentialBound -ne $explicit -or $script:DriveReadProbe.DomainCalls[0].CredentialBound -ne $explicit){throw 'Empty credential was bound or explicit credential was lost'}
+        if($explicit -and (-not [object]::ReferenceEquals($call.Credential,$credential) -or -not [object]::ReferenceEquals($script:DriveReadProbe.DomainCalls[0].Credential,$credential))){throw 'Credential identity changed'}
+        if($call.Server -ne 'target.example.invalid' -or $call.Root -ne 'DC=example,DC=invalid' -or $call.Scope -ne 'Script'){throw 'Drive target/root/lifetime changed'}
+        $expectedRemoved=if('__MODE__' -eq 'CreateFail'){0}else{1}
+        if(($script:RemovedDrives.Count-$removedBefore) -ne $expectedRemoved){throw 'Owned drive cleanup was incomplete'}
+        if($expectedRemoved -and $script:RemovedDrives[-1] -ne $call.Name){throw 'Cleanup removed the wrong drive'}
+    }elseif($script:RemovedDrives.Count -ne $removedBefore){throw 'Caller drive was removed'}
+    if('__MODE__' -in 'CreateFail','EntryFail' -and $script:DriveReadProbe.Bulk.Count){throw 'Bulk read followed failed drive setup'}
+    if(-not $failed -and $script:DriveReadProbe.Bulk.Count -lt 2){throw 'Bulk object/user path was not exercised'}
+    if($ambient -and @($script:DriveReadProbe.Bulk | Where-Object {$_ -ne $initial.Path}).Count){throw 'Ambient AD scope changed'}
+    if(-not [object]::ReferenceEquals($script:DriveReadProbe.Location,$initial)){throw 'Caller location/context was not restored'}
+    if(($callerNames -join ',') -cne (($script:FixtureDrives | ForEach-Object Name) -join ',')){throw 'Caller drives changed'}
+    if(-not [string]::IsNullOrEmpty([ADTarget]::ConnectionDrive)){throw 'Owned lease survived public cleanup'}
+    $true
+}finally{
+    foreach($name in $originals.Keys){Set-Item ('Function:script:'+$name) $originals[$name]}
+    [ADEnvironment]::Close()
+}
+'@
+        Assert-ClassTrue (Invoke-ClassScope ($source.Replace('__MODE__',$mode))) 'Legacy read context contract failed'
+    }
+}
+Invoke-ClassTest 'both legacy connection overloads omit null or empty credentials' {
+    $count=Invoke-ClassScope @'
+$domain=(Get-Command Get-ADDomain).ScriptBlock;$drive=(Get-Command New-PSDrive).ScriptBlock
+$script:OptionalDomain=$domain;$script:OptionalDrive=$drive;$script:OptionalCount=0
+try{
+    function script:Get-ADDomain {
+        param($Server,$Credential,$ErrorAction)
+        if($PSBoundParameters.ContainsKey('Credential')){throw 'Empty domain credential was bound'}
+        & $script:OptionalDomain @PSBoundParameters
+    }
+    function script:New-PSDrive {
+        param($Server,$Name,$PSProvider,$Root,$Credential,$Scope,$ErrorAction,[switch]$WhatIf,[switch]$Confirm)
+        if($PSBoundParameters.ContainsKey('Credential')){throw 'Empty drive credential was bound'}
+        $script:OptionalCount++
+        & $script:OptionalDrive @PSBoundParameters
+    }
+    foreach($value in @($null,[pscredential]::Empty)){foreach($explicitServer in @($false,$true)){
+        try{
+            $target=[ADTarget]::new('target.example.invalid')
+            if($explicitServer){$target.Connect('target.example.invalid',$value)}else{$target.Connect($value)}
+        }finally{[ADTarget]::Close()}
+    }}
+    $script:OptionalCount
+}finally{Set-Item Function:script:Get-ADDomain $domain;Set-Item Function:script:New-PSDrive $drive;[ADTarget]::Close()}
+'@
+    Assert-ClassEqual 4 $count
+}
 foreach($mode in @('Restore','Remove','Both')){
     Invoke-ClassTest ('owned AD drive cleanup preserves failures and retry state: '+$mode) {
         $source=@'

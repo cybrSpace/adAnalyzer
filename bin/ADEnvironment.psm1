@@ -2833,7 +2833,9 @@ class ADTarget {
 
 try {
 
-            $item = Get-ADDomain -Server ([ADTarget]::FQDN) -Credential $value
+            $connectionParameters = @{Server=[ADTarget]::FQDN;ErrorAction='Stop'}
+            if ($null -ne $value -and $value -ne [PSCredential]::Empty) { $connectionParameters.Credential = $value }
+            $item = Get-ADDomain @connectionParameters
 
             [ADTarget]::Disconnect()
             $driveName = $item.NetBiosName
@@ -2841,7 +2843,9 @@ try {
                 $driveName = '{0}-ADAnalyzer-{1}' -f $driveName, [guid]::NewGuid().ToString('N')
             }
             [ADTarget]::PreviousLocation = (Get-Location).Path
-            $object = New-PSDrive -Server ([ADTarget]::FQDN) -Name $driveName -PSProvider ActiveDirectory -Root $item.DistinguishedName -Credential $value -Scope Script -ErrorAction Stop -WhatIf:$false -Confirm:$false
+            $driveParameters = @{Server=[ADTarget]::FQDN;Name=$driveName;PSProvider='ActiveDirectory';Root=$item.DistinguishedName;Scope='Script';ErrorAction='Stop'}
+            if ($connectionParameters.ContainsKey('Credential')) { $driveParameters.Credential = $value }
+            $object = New-PSDrive @driveParameters -WhatIf:$false -Confirm:$false
             [ADTarget]::ConnectionDrive = $object.Name
 
             Set-Location -Path ('{0}:' -f $object.Name) -ErrorAction Stop
@@ -2865,7 +2869,9 @@ try {
 
 try {
 
-            $item = Get-ADDomain -Server $fqdn -Credential $value
+            $connectionParameters = @{Server=$fqdn;ErrorAction='Stop'}
+            if ($null -ne $value -and $value -ne [PSCredential]::Empty) { $connectionParameters.Credential = $value }
+            $item = Get-ADDomain @connectionParameters
 
             [ADTarget]::Disconnect()
             $driveName = $item.NetBiosName
@@ -2873,7 +2879,9 @@ try {
                 $driveName = '{0}-ADAnalyzer-{1}' -f $driveName, [guid]::NewGuid().ToString('N')
             }
             [ADTarget]::PreviousLocation = (Get-Location).Path
-            $object = New-PSDrive -Server $fqdn -Name $driveName -PSProvider ActiveDirectory -Root $item.DistinguishedName -Credential $value -Scope Script -ErrorAction Stop -WhatIf:$false -Confirm:$false
+            $driveParameters = @{Server=$fqdn;Name=$driveName;PSProvider='ActiveDirectory';Root=$item.DistinguishedName;Scope='Script';ErrorAction='Stop'}
+            if ($connectionParameters.ContainsKey('Credential')) { $driveParameters.Credential = $value }
+            $object = New-PSDrive @driveParameters -WhatIf:$false -Confirm:$false
             [ADTarget]::ConnectionDrive = $object.Name
 
             Set-Location -Path ('{0}:' -f $object.Name) -ErrorAction Stop
@@ -3209,12 +3217,13 @@ function Get-ADEnvironment () {
 
         if ($var.ContainsKey('Analyze') -or $var.ContainsKey('Report') -or $var.ContainsKey('Class')) {
 
-            if ($Credential -ne [PSCredential]::Empty -and [String]::IsNullOrEmpty($FQDN)) {
+            $hasCredential = $null -ne $Credential -and $Credential -ne [PSCredential]::Empty
+            if ($hasCredential -and [String]::IsNullOrEmpty($FQDN)) {
 
                 $adEnvironment = [ADEnvironment]::Initialize($Credential, $Class)
 
             }
-            elseif ($Credential -ne [PSCredential]::Empty -and -not [String]::IsNullOrEmpty($FQDN)) {
+            elseif ($hasCredential -and -not [String]::IsNullOrEmpty($FQDN)) {
 
                 $adEnvironment = [ADEnvironment]::Initialize($FQDN, $Credential, $Class)
 
@@ -3230,6 +3239,11 @@ function Get-ADEnvironment () {
 
             }
 
+            # Reuse an ambient AD drive so its credentials and search base stay
+            # intact. Constructors remain usable for offline graph creation.
+            if (-not $hasCredential -and $script:ADAnalyzerLegacyProfile.Analysis.DirectoryConnection -eq 'PSDrive' -and (Get-Location).Provider.Name -ne 'ActiveDirectory') {
+                $adEnvironment.Connect([PSCredential]::Empty)
+            }
             $adEnvironment.Analyze()
 
             return $adEnvironment
