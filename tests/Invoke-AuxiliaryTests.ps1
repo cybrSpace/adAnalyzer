@@ -93,6 +93,13 @@ function Get-ADObject {$script:ExternalCalls++;throw 'Actual directory query mus
 try {
     $script:ReportA=New-AuxiliaryReport -Name ('Fixture '+[char]0x00FC+' policy') -Id ([guid]'11111111-1111-1111-1111-111111111111')
     $script:ReportB=New-AuxiliaryReport -Name $script:ReportA.Gpo.DisplayName -Id ([guid]'22222222-2222-2222-2222-222222222222')
+    foreach($mode in @('Inert','States','Connections','Direct','DiscoveryFailures','HostFailures','Validation','Csv','ExportFailures','WhatIf','Cli')){
+        Invoke-AuxiliaryTest ('SQL inventory contract: '+$mode) {
+            $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File (Join-Path $RepositoryRoot 'tests/SqlInventoryFixture.ps1') -RepositoryRoot $RepositoryRoot -WorkingDirectory (Join-Path $script:Temporary ('sql-'+$mode)) -Mode $mode)
+            Assert-Equal 0 $LASTEXITCODE
+            Assert-True (($output -join ' ') -match ('PASS SQL inventory '+$mode)) 'SQL inventory child did not finish'
+        }
+    }
     foreach($mode in @('Inert','Traversal','SharedRoots','Selection','SpecialFilter','Connection','QueryFailures','Csv','ExportFailures','WhatIf','Cli')){
         Invoke-AuxiliaryTest ('group inventory contract: '+$mode) {
             $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File (Join-Path $RepositoryRoot 'tests/GroupInventoryFixture.ps1') -RepositoryRoot $RepositoryRoot -WorkingDirectory (Join-Path $script:Temporary ('groups-'+$mode)) -Mode $mode)

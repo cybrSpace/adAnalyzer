@@ -58,6 +58,15 @@ foreach($contract in @(@{Owner=$principalType;Name='Context';Value=$contextType}
 }
 if(-not [Enum]::IsDefined($identityType,'Sid')){throw 'Missing SID lookup enum'}
 Write-Host 'PASS principal member enumeration metadata without authentication'
+foreach($spec in @(
+    @{Name='New-CimSession';Parameters=@('ComputerName','Credential','OperationTimeoutSec')},
+    @{Name='Get-CimInstance';Parameters=@('CimSession','ClassName','Property','OperationTimeoutSec')},
+    @{Name='Remove-CimSession';Parameters=@('CimSession')}
+)){
+    $command=Get-Command $spec.Name -CommandType Cmdlet -ErrorAction Stop
+    foreach($parameter in $spec.Parameters){if(-not $command.Parameters.ContainsKey($parameter)){throw ('Missing CIM parameter '+$spec.Name+'.'+$parameter)}}
+}
+Write-Host 'PASS CIM inventory operation metadata without connecting to a host'
 if(Get-Module -Name GroupPolicy){throw 'Unexpected external GroupPolicy module'}
 if($module.ExportedCmdlets.Count -or $module.ExportedVariables.Count){throw 'Internal AD commands or script variables leaked from the public package interface'}
 foreach($name in @('Get-ADAnalyzerGpo','Get-ADAnalyzerGpoReport','Read-ADAnalyzerGpo')){
