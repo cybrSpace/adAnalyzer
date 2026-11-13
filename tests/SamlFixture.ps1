@@ -50,6 +50,11 @@ try{
             $savedPreference=$ErrorActionPreference
             try{$ErrorActionPreference='Continue';$fresh=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $path 2>&1);$freshExit=$LASTEXITCODE}finally{$ErrorActionPreference=$savedPreference}
             Assert-Saml ($freshExit -ne 0 -and ($fresh -join ' ') -match 'Specify ConfigPath') ('Fresh CLI did not reach explicit-config guard; exit='+$freshExit+'; output='+($fresh -join ' | '))
+            $freshScript='$ErrorActionPreference=''Stop'';. '''+$path.Replace("'","''")+''';$t=[Target]::new(@{},@{limit=1;wait=0});if($t.Session.GetType().FullName -ne ''Microsoft.PowerShell.Commands.WebRequestSession'' -or $t.Collection -isnot [Collections.ArrayList]){throw ''Fresh constructor failed''};if($t.Session -is [IDisposable]){$t.Session.Dispose()};''PASS fresh constructor'''
+            $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($freshScript))
+            $savedPreference=$ErrorActionPreference
+            try{$ErrorActionPreference='Continue';$fresh=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -EncodedCommand $encoded 2>&1);$freshExit=$LASTEXITCODE}finally{$ErrorActionPreference=$savedPreference}
+            Assert-Saml ($freshExit -eq 0 -and ($fresh -join ' ') -match 'PASS fresh constructor') ('Fresh constructor did not resolve utility types; exit='+$freshExit+'; output='+($fresh -join ' | '))
             $json=Join-Path $WorkingDirectory 'config.json';[IO.File]::WriteAllText($json,(@{Url=$urls;Config=$config} | ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($true))
             $caught=$false;try{& $path | Out-Null}catch{$caught=$true};Assert-Saml ($caught -and $global:SamlProbe.Calls.Count -eq 0) 'CLI authenticated without explicit configuration'
             $csv=Join-Path $WorkingDirectory 'cli.csv';$rows=@(& $path -ConfigPath $json -Credential $credential -OutputPath $csv)

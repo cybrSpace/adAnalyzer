@@ -1,4 +1,3 @@
-using module Microsoft.PowerShell.Utility
 using namespace System.Collections
 using namespace System.Collections.Specialized
 [CmdletBinding()]
@@ -25,9 +24,13 @@ class Target {
         $this.Config.limit=[Target]::ReadInteger($this.Config.limit,'limit',1,[int]::MaxValue)
         $this.Config.wait=[Target]::ReadInteger($this.Config.wait,'wait',0,[int]::MaxValue)
         $this.Config.RequestTimeoutSeconds=[Target]::ReadInteger($this.Config.RequestTimeoutSeconds,'RequestTimeoutSeconds',1,300)
-        $this.Agent=[Microsoft.PowerShell.Commands.PSUserAgent]::InternetExplorer
+        # Binary utility types are not available at class parse time in a fresh Windows PowerShell 5.1 process.
+        Microsoft.PowerShell.Core\Import-Module -Name Microsoft.PowerShell.Utility -Scope Local -ErrorAction Stop
+        $agentType=[type]'Microsoft.PowerShell.Commands.PSUserAgent'
+        $sessionType=[type]'Microsoft.PowerShell.Commands.WebRequestSession'
+        $this.Agent=$agentType::InternetExplorer
         $this.Protocol=[Net.SecurityProtocolType]::Tls12
-        $this.Session=[Microsoft.PowerShell.Commands.WebRequestSession]::new()
+        $this.Session=[Activator]::CreateInstance($sessionType)
         $this.Collection=[Collection]::new()
     }
     static [int]ReadInteger($value,[string]$name,[int]$minimum,[int]$maximum) {
