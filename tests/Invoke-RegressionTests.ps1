@@ -158,6 +158,58 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
         $before=$script:Exports;$scan=$script:ScanCalls;$null=Start-ADAnalyzer -OutputPath (Join-Path $temporary 'preview') -WhatIf
         Assert-Equal ($scan+1) $script:ScanCalls;Assert-Equal $before $script:Exports
     }
+    Invoke-Test 'unattended plan export keeps normal file impact and delegates high-impact mutations' {
+        $fixture=Join-Path $temporary 'plan-confirmation.ps1'
+        Set-Content -LiteralPath $fixture -Value @'
+param([string]$Root,[string]$OutputDirectory)
+$ErrorActionPreference='Stop';$ConfirmPreference='High'
+foreach($file in @('ADProfile','ADOperations','Start-ADAnalyzer')){. (Join-Path $Root ('bin/'+$file+'.ps1'))}
+function Assert-Plan($Value,[string]$Message){if(-not $Value){throw $Message}}
+foreach($name in @('Invoke-ADAnalyzerRemediationPlan','Undo-ADAnalyzerRemediation')){
+    $metadata=[Management.Automation.CommandMetadata]::new((Get-Command $name))
+    Assert-Plan ($metadata.ConfirmImpact -eq 'High') 'Actual executor lost high-impact confirmation'
+}
+function Get-ADAnalyzerAssessment {param($Credential,$Profile,[switch]$IncludeAcl,[switch]$IncludeHostChecks,[switch]$SkipGpo) [pscustomobject]@{SchemaVersion=1;Target='fixture.invalid';Checks=@();Findings=@();Objects=@()}}
+function New-ADAnalyzerRemediationPlan {param($Assessment,$Profile) [pscustomobject]@{SchemaVersion=1;Target=$Assessment.Target;Actions=@();Summary=@{Proposed=0}}}
+$script:FixtureMutations=0
+function Invoke-ADAnalyzerRemediationPlan {
+    [CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact='High')]param($Plan,$Server,$Credential,$JournalPath)
+    if($PSCmdlet.ShouldProcess($Server,'fixture apply')){$script:FixtureMutations++}
+}
+function Undo-ADAnalyzerRemediation {
+    [CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact='High')]param($JournalPath,$Server,$Credential)
+    if($PSCmdlet.ShouldProcess($Server,'fixture undo')){$script:FixtureMutations++}
+}
+foreach($operation in @('plan','remediate')){
+    $path=Join-Path $OutputDirectory ('unattended-'+$operation+'.json')
+    $result=Start-ADAnalyzer -Operation $operation -OutputPath $path
+    $saved=Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    Assert-Plan ($saved.Target -eq 'fixture.invalid' -and $saved.Actions.Count -eq 0 -and $result.Actions.Count -eq 0) 'Inert plan export failed'
+    $preview=$path+'.preview';$null=Start-ADAnalyzer -Operation $operation -OutputPath $preview -WhatIf
+    Assert-Plan (-not (Test-Path -LiteralPath $preview)) 'WhatIf wrote a plan'
+    $confirmed=$path+'.confirmed';$blocked=$false
+    try{$null=Start-ADAnalyzer -Operation $operation -OutputPath $confirmed -Confirm}catch{$blocked=$_.Exception.Message -match 'NonInteractive'}
+    Assert-Plan ($blocked -and -not (Test-Path -LiteralPath $confirmed)) 'Explicit plan confirmation was suppressed'
+}
+foreach($operation in @('apply','undo')){
+    $arguments=@{Operation=$operation;JournalPath='fixture-journal';Server='dc.fixture.invalid'}
+    if($operation -eq 'apply'){$arguments.PlanPath='fixture-plan'}
+    $blocked=$false;try{$null=Start-ADAnalyzer @arguments}catch{$blocked=$_.Exception.Message -match 'NonInteractive'}
+    Assert-Plan $blocked 'Default executor confirmation was suppressed'
+    $before=$script:FixtureMutations;$null=Start-ADAnalyzer @arguments -WhatIf
+    Assert-Plan ($script:FixtureMutations -eq $before) 'WhatIf reached a mutation'
+    $null=Start-ADAnalyzer @arguments -Confirm:$false
+    Assert-Plan ($script:FixtureMutations -eq ($before+1)) 'Explicit executor confirmation was not delegated'
+    $blocked=$false;try{$null=Start-ADAnalyzer @arguments -Confirm}catch{$blocked=$_.Exception.Message -match 'NonInteractive'}
+    Assert-Plan ($blocked -and $script:FixtureMutations -eq ($before+1)) 'Explicit executor confirmation was suppressed'
+}
+Assert-Plan ($ConfirmPreference -eq 'High') 'Caller confirmation preference changed'
+'PASS unattended inert plan export and guarded mutation delegation'
+'@
+        $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $fixture -Root $RepositoryRoot -OutputDirectory $temporary)
+        Assert-Equal 0 $LASTEXITCODE
+        Assert-True (($output -join ' ') -match 'PASS unattended inert plan export') 'Confirmation fixture did not finish'
+    }
     Invoke-Test 'profile validation rejects unknown settings and executable input formats' {
         Assert-Throws {Import-ADAnalyzerProfile -Profile @{Policy=@{MisspelledThreshold=6}}}
         Assert-Throws {Import-ADAnalyzerProfile -Path 'profile.ps1'}

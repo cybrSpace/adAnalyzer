@@ -16,7 +16,7 @@ function Start-ADAnalyzer {
     plan; only apply executes approved DisableAccount actions from a plan file.
     The function throws on collection/export errors and never exits its caller.
     #>
-    [CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact='High')]
+    [CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact='Medium')]
     param(
         [ValidateSet('assess','report','plan','remediate','apply','undo','prerequisites')][string]$Operation='assess',
         [Alias('Domain')][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')][string]$FQDN,
