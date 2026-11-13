@@ -62,8 +62,8 @@ function Start-ADAnalyzer {
         }
         return $result
     }
-    if($OutputPath){$null=Export-ADAnalyzerAssessment -Assessment $assessment -Path $OutputPath -Format All -WhatIf:$WhatIfPreference -Confirm:$false}
     if($ReferencePath){$assessment | Add-Member -NotePropertyName Comparison -NotePropertyValue (Compare-ADAnalyzerAssessment -Reference $ReferencePath -Difference $assessment)}
+    if($OutputPath){$null=Export-ADAnalyzerAssessment -Assessment $assessment -Path $OutputPath -Format All -WhatIf:$WhatIfPreference -Confirm:$false}
     return $assessment
 }
 

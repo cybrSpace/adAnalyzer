@@ -82,6 +82,49 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
         $result=Start-ADAnalyzer -Operation report -OutputPath (Join-Path $temporary 'report')
         Assert-Equal 'actual.example.invalid' $result.Target;Assert-Equal 'actual.example.invalid' $script:ExportTarget
     }
+    Invoke-Test 'requested comparison survives actual helper JSON and HTML exports' {
+        & {
+            . (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')
+            $reference=Join-Path $temporary 'comparison-reference.json'
+            @{SchemaVersion=1;Target='actual.example.invalid';RunId='reference';Checks=@(@{RuleId='FIXTURE.CHECK';Target='fixture-object';Status='Fail';Evidence=@{Value=0}});Findings=@()} | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reference
+            foreach($operation in @('assess','report')){
+                $path=Join-Path $temporary ('comparison-'+$operation)
+                $result=Start-ADAnalyzer -Operation $operation -OutputPath $path -ReferencePath $reference
+                $saved=Get-Content -LiteralPath ($path+'.json') -Raw | ConvertFrom-Json
+                Assert-True ($null -ne $saved.Comparison) 'Saved snapshot lost its comparison'
+                foreach($field in @('SchemaVersion','ComparisonType','ReferenceRunId','DifferenceRunId')){Assert-Equal $result.Comparison.$field $saved.Comparison.$field}
+                Assert-Equal (ConvertTo-Json -InputObject $result.Comparison.Summary -Compress) (ConvertTo-Json -InputObject $saved.Comparison.Summary -Compress)
+                Assert-Equal $result.Comparison.Changes.Count $saved.Comparison.Changes.Count
+                Assert-Equal 1 $saved.Comparison.Changes.Count
+                Assert-Equal 'NotObservedInDifference' $saved.Comparison.Changes[0].Reason
+                Assert-Equal (ConvertTo-Json -InputObject $result.Comparison.Changes -Depth 100 -Compress) (ConvertTo-Json -InputObject $saved.Comparison.Changes -Depth 100 -Compress)
+                Assert-Equal ([datetimeoffset]$result.Comparison.Timestamp).UtcDateTime.Ticks ([datetimeoffset]$saved.Comparison.Timestamp).UtcDateTime.Ticks
+                Assert-Equal 'reference' $saved.Comparison.ReferenceRunId
+                Assert-True ((Get-Content -LiteralPath ($path+'.html') -Raw) -match 'ADAnalyzerAssessmentComparison') 'HTML snapshot lost comparison'
+            }
+            $result=Start-ADAnalyzer -ReferencePath $reference
+            Assert-Equal 'reference' $result.Comparison.ReferenceRunId
+            $path=Join-Path $temporary 'comparison-whatif'
+            $result=Start-ADAnalyzer -OutputPath $path -ReferencePath $reference -WhatIf
+            Assert-Equal 'reference' $result.Comparison.ReferenceRunId
+            Assert-Equal 0 @(Get-ChildItem -LiteralPath $temporary -Filter 'comparison-whatif*').Count
+        }
+    }
+    Invoke-Test 'invalid comparison references preserve existing reports and create no fresh reports' {
+        & {
+            . (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')
+            $reference=Join-Path $temporary 'invalid-reference.json';$path=Join-Path $temporary 'preserved-comparison'
+            foreach($extension in @('.json','.html','.csv')){[IO.File]::WriteAllText(($path+$extension),('previous '+$extension))}
+            foreach($content in @('invalid-json','{"SchemaVersion":2,"Target":"actual.example.invalid"}','{"SchemaVersion":1,"Target":"other.example.invalid","Checks":[]}')){
+                [IO.File]::WriteAllText($reference,$content)
+                Assert-Throws {Start-ADAnalyzer -OutputPath $path -ReferencePath $reference}
+                foreach($extension in @('.json','.html','.csv')){Assert-Equal ('previous '+$extension) ([IO.File]::ReadAllText($path+$extension))}
+            }
+            $fresh=Join-Path $temporary 'invalid-comparison-fresh'
+            Assert-Throws {Start-ADAnalyzer -OutputPath $fresh -ReferencePath (Join-Path $temporary 'missing-reference.json')}
+            Assert-Equal 0 @(Get-ChildItem -LiteralPath $temporary -Filter 'invalid-comparison-fresh*').Count
+        }
+    }
     Invoke-Test 'credential is forwarded by reference and collectors remain opt-in' {
         $credential=[pscredential]::new('fixture',(ConvertTo-SecureString 'fixture-only' -AsPlainText -Force))
         $null=Start-ADAnalyzer -Credential $credential -IncludeAcl -IncludeHostChecks -SkipGpo
