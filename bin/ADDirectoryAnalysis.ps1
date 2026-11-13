@@ -84,7 +84,7 @@ function Resolve-ADAnalyzerMembership {
     }
     $privileged=@($effective | Where-Object {$_ -in $PrivilegedSids})
     [pscustomobject]@{
-        DirectSids=@($direct.ToArray() | ForEach-Object {if($byDn.ContainsKey($_)){ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $byDn[$_] 'SID')}else{$_}} | Where-Object {$_} | Select-Object -Unique)
+        DirectSids=@($direct.ToArray() | ForEach-Object {if($byDn.ContainsKey($_)){ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $byDn[$_] 'SID' (Get-ADAnalyzerDirectoryField $byDn[$_] 'objectSid'))}else{$_}} | Where-Object {$_} | Select-Object -Unique)
         EffectiveSids=$effective.ToArray();PrivilegedSids=$privileged;IsPrivileged=$privileged.Count -gt 0
         Unresolved=@($unresolved.ToArray() | Select-Object -Unique);Cycles=@($cycles.ToArray() | Select-Object -Unique)
         ResolutionStatus=if($unresolved.Count){'Unknown'}else{'Complete'}

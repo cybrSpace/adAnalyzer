@@ -133,3 +133,28 @@ $item=@([GroupObject]::Analyze($value) | Where-Object {$_.finding -eq 'Defect - 
     Assert-ClassEqual 1 $r.Count
     Assert-ClassEqual 'FixtureGroup' $r.Source
 }
+
+Invoke-ClassTest 'legacy user data report and CSV retain empty single and multiple direct memberships' {
+    $count=Invoke-ClassScope @'
+$savedMembers=$script:UserRecord.memberOf;$count=0
+$path=Join-Path ([IO.Path]::GetTempPath()) ('ad-membership-'+[guid]::NewGuid().ToString('N')+'.csv')
+try {
+    foreach($members in @(@(),@($script:GroupRecord.distinguishedName),@($script:GroupRecord.distinguishedName,'CN=Other,DC=example,DC=invalid'))){
+        $script:UserRecord.memberOf=$members
+        $before=ConvertTo-Json -InputObject $script:UserRecord -Depth 10 -Compress
+        $e=Get-ADEnvironment -Class User -FQDN target.example.invalid
+        $data=$e.User.Data['adoe'];$report=$e.User.Report['adoe']
+        if(($data.memberOf -join ';') -ne ($members -join ';')){throw 'Data membership changed'}
+        if(-not $report.Contains('memberOf') -or ($report.memberOf -join ';') -ne ($members -join ';')){throw 'Report membership lost'}
+        $e.User.Report.ExportCSV($path);$csv=@(Import-Csv -LiteralPath $path)
+        if($csv.Count -ne 1 -or $csv[0].memberOf -ne ($members -join ';')){throw 'CSV membership lost'}
+        if(($report.memberOf -join ';') -ne ($members -join ';')){throw 'Export mutated report'}
+        if((ConvertTo-Json -InputObject $script:UserRecord -Depth 10 -Compress) -ne $before){throw 'Source user mutated'}
+        if($report.privilegeResolution -ne 'Unknown' -or $report.protectedUser -ne $false){throw 'Privilege/protection resolution changed'}
+        $count++
+    }
+} finally {$script:UserRecord.memberOf=$savedMembers;if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path -Force};[ADEnvironment]::Close()}
+$count
+'@
+    Assert-ClassEqual 3 $count
+}

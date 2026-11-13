@@ -756,6 +756,10 @@ Invoke-DirectoryTest 'generic AD objects with raw objectSid retain stable group 
     $user=[pscustomobject]@{objectSid=($script:DomainSid+'-9000');MemberOf=@($group.DistinguishedName)}
     $membership=Resolve-ADAnalyzerMembership -Object $user -Groups @($group) -DomainSid $script:DomainSid -PrivilegedSids @($script:DomainSid+'-512')
     Assert-DirectoryTrue $membership.IsPrivileged 'Raw LDAP attribute name lost the privileged SID'
+    Assert-DirectoryEqual ($script:DomainSid+'-512') ($membership.DirectSids -join ',')
+    Assert-DirectoryEqual ($script:DomainSid+'-512') ($membership.EffectiveSids -join ',')
+    Assert-DirectoryEqual ($script:DomainSid+'-512') $group.objectSid
+    Assert-DirectoryEqual $false ([bool]$group.PSObject.Properties['SID'])
     Assert-DirectoryEqual 0 $membership.Unresolved.Count
 }
 Write-Host ("{0} directory tests passed; {1} failed" -f $script:Passed,$script:Failed)

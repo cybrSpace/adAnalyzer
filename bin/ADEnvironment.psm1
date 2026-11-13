@@ -1281,6 +1281,7 @@ class UserObject : OrderedDictionary {
             }
             'memberOf' {
 
+                $object[$_] = $value[$_]
                 $profile = Get-ADAnalyzerLegacyProfile
                 $domainSid = [DomainData]::GetInstance().DomainSID
                 $privilegedSids = @(Get-ADAnalyzerPrivilegedSids -DomainSid $domainSid -RootDomainSid ([DomainData]::GetInstance().RootDomainSID) -Profile $profile)
