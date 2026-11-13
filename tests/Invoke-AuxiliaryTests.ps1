@@ -93,6 +93,14 @@ function Get-ADObject {$script:ExternalCalls++;throw 'Actual directory query mus
 try {
     $script:ReportA=New-AuxiliaryReport -Name ('Fixture '+[char]0x00FC+' policy') -Id ([guid]'11111111-1111-1111-1111-111111111111')
     $script:ReportB=New-AuxiliaryReport -Name $script:ReportA.Gpo.DisplayName -Id ([guid]'22222222-2222-2222-2222-222222222222')
+    foreach($mode in @('Inert','Validation','Rows','Credentials','Csv','QueryFailures','ExportFailures','WhatIf','Cli')){
+        Invoke-AuxiliaryTest ('standalone AD server inventory contract: '+$mode) {
+            $working=Join-Path $script:Temporary ('servers-'+$mode)
+            $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File (Join-Path $RepositoryRoot 'tests/ServerInventoryFixture.ps1') -RepositoryRoot $RepositoryRoot -WorkingDirectory $working -Mode $mode)
+            Assert-Equal 0 $LASTEXITCODE
+            Assert-True (($output -join ' ') -match ('PASS standalone AD server inventory '+$mode)) 'Server inventory child did not finish'
+        }
+    }
     . (Join-Path $RepositoryRoot 'etc/Get-GPOXML.ps1')
     . (Join-Path $RepositoryRoot 'etc/Get-LocalAdminGPO.ps1')
     Invoke-AuxiliaryTest 'dot sourcing both GPO tools is inert and preserves caller state' {

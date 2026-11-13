@@ -19,6 +19,16 @@ foreach($parameter in @('Server','Credential','Root','Scope')){
     if(-not $driveCommand.Parameters.ContainsKey($parameter)){throw "Bundled AD drive is missing parameter: $parameter"}
 }
 Write-Host 'PASS bundled AD provider exposes drive server credential root and scope parameters without a live bind'
+if(Get-Command Get-ADComputer -ListImported -ErrorAction SilentlyContinue){throw 'Private AD computer command was visible before the local import probe'}
+$localPath=& {
+    Import-Module -Name $expected -Scope Local -ErrorAction Stop
+    $command=Get-Command Get-ADComputer -CommandType Cmdlet -ListImported -ErrorAction Stop
+    foreach($name in @('Identity','Properties','Server','Credential')){if(-not $command.Parameters.ContainsKey($name)){throw ('Bundled computer command lacks '+$name)}}
+    $command.Module.Path
+}
+if([IO.Path]::GetFullPath($localPath) -ne $expected){throw 'Scoped computer command came from an external dependency'}
+if(Get-Command Get-ADComputer -ListImported -ErrorAction SilentlyContinue){throw 'Local binary import leaked a private AD command'}
+Write-Host 'PASS bundled AD computer metadata is locally scoped without invoking a directory query'
 if(Get-Module -Name GroupPolicy){throw 'Unexpected external GroupPolicy module'}
 if($module.ExportedCmdlets.Count -or $module.ExportedVariables.Count){throw 'Internal AD commands or script variables leaked from the public package interface'}
 foreach($name in @('Get-ADAnalyzerGpo','Get-ADAnalyzerGpoReport','Read-ADAnalyzerGpo')){

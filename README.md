@@ -53,6 +53,8 @@ Local Users and Groups preference checks follow their scope, source, and UID; mi
 
 This is a file-based policy reader, not a GPMC HTML report generator or an ADMX display-name engine. Scripts and other unsupported client-side extension formats are inventoried rather than interpreted; parsed settings are not a calculation of effective policy or RSoP. Offline parsing is portable; live directory/SMB integration is supported on Windows. The older GroupPolicy DLLs in `lib` are not loaded.
 
+`etc/Get-ADServers.ps1` exposes `Get-ADServers -Identity @('server1','server2')` with optional `Server`, `Credential`, and `OutputPath`. It loads the bundled AD library in the owning function scope, preserves the `name,ipv4Address` columns and input order, and buffers all requested lookups before returning/exporting. Missing or ambiguous identities and lookup/conversion/write errors preserve previous output. Dot sourcing is inert; direct execution requires explicit identities and writes only with `OutputPath`. `WhatIf` returns inventory while suppressing file writes.
+
 The standalone `etc/Get-GPOXML.ps1` and `etc/Get-LocalAdminGPO.ps1` scripts also use the package reader. They require explicit targets and selection, return XML or canonical check objects, and write only when `OutputPath` is supplied. Dot sourcing defines their functions without connecting, importing native modules, prompting, or opening files:
 
 ```powershell
