@@ -40,6 +40,20 @@ foreach($name in @('Name','SamAccountName','Sid','Description')){if($null -eq $g
 if(-not [IDisposable].IsAssignableFrom($contextType) -or -not [IDisposable].IsAssignableFrom($groupType)){throw 'Principal ownership contract is not disposable'}
 if(-not [Enum]::IsDefined($machineType,'Machine') -or -not [Enum]::IsDefined($identityType,'SamAccountName')){throw 'Missing machine/SAM lookup enums'}
 Write-Host 'PASS host principal framework metadata supports detached snapshots without creating an authentication context'
+$principalType=[System.DirectoryServices.AccountManagement.Principal]
+$resultType=[System.DirectoryServices.AccountManagement.PrincipalSearchResult[System.DirectoryServices.AccountManagement.Principal]]
+$enumeratorType=[Collections.Generic.IEnumerator[System.DirectoryServices.AccountManagement.Principal]]
+$members=$groupType.GetMethod('GetMembers',[type[]]@([bool]))
+if($null -eq $members -or $members.IsStatic -or $members.ReturnType -ne $resultType){throw 'Missing direct group-member enumeration contract'}
+$enumerator=$resultType.GetMethod('GetEnumerator',[type]::EmptyTypes)
+if($null -eq $enumerator -or $enumerator.IsStatic -or $enumerator.ReturnType -ne $enumeratorType){throw 'Missing principal enumerator contract'}
+if(-not [IDisposable].IsAssignableFrom($resultType) -or -not [IDisposable].IsAssignableFrom($enumeratorType) -or -not [Collections.IEnumerator].IsAssignableFrom($enumeratorType)){throw 'Principal enumeration ownership contract is unavailable'}
+foreach($contract in @(@{Owner=$principalType;Name='Context';Value=$contextType},@{Owner=$principalType;Name='SamAccountName';Value=[string]},@{Owner=$contextType;Name='Name';Value=[string]})){
+    $property=$contract.Owner.GetProperty($contract.Name)
+    if($null -eq $property -or $property.PropertyType -ne $contract.Value -or $null -eq $property.GetGetMethod() -or $property.GetGetMethod().IsStatic){throw ('Missing readable principal property '+$contract.Name)}
+}
+if(-not [Enum]::IsDefined($identityType,'Sid')){throw 'Missing SID lookup enum'}
+Write-Host 'PASS principal member enumeration metadata without authentication'
 if(Get-Module -Name GroupPolicy){throw 'Unexpected external GroupPolicy module'}
 if($module.ExportedCmdlets.Count -or $module.ExportedVariables.Count){throw 'Internal AD commands or script variables leaked from the public package interface'}
 foreach($name in @('Get-ADAnalyzerGpo','Get-ADAnalyzerGpoReport','Read-ADAnalyzerGpo')){

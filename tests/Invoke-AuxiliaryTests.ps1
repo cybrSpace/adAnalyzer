@@ -93,6 +93,13 @@ function Get-ADObject {$script:ExternalCalls++;throw 'Actual directory query mus
 try {
     $script:ReportA=New-AuxiliaryReport -Name ('Fixture '+[char]0x00FC+' policy') -Id ([guid]'11111111-1111-1111-1111-111111111111')
     $script:ReportB=New-AuxiliaryReport -Name $script:ReportA.Gpo.DisplayName -Id ([guid]'22222222-2222-2222-2222-222222222222')
+    foreach($scriptName in @('Get-LocalGroup.ps1','Get-LocalGroup copy.ps1')){foreach($mode in @('Inert','Success','Pipeline','Failures','Validation','Cli')){
+        Invoke-AuxiliaryTest ('local group ownership contract: '+$scriptName+' '+$mode) {
+            $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File (Join-Path $RepositoryRoot 'tests/LocalGroupFixture.ps1') -RepositoryRoot $RepositoryRoot -ScriptName $scriptName -Mode $mode)
+            Assert-Equal 0 $LASTEXITCODE
+            Assert-True (($output -join ' ') -match [regex]::Escape('PASS local group contract '+$scriptName+' '+$mode)) 'Local group child did not finish'
+        }
+    }}
     foreach($scriptName in @('Get-ServerHPA.ps1','Get-ServerHPA copy.ps1')){foreach($mode in @('Inert','Success','Failures','Validation','Cli')){
         Invoke-AuxiliaryTest ('host-group principal contract: '+$scriptName+' '+$mode) {
             $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File (Join-Path $RepositoryRoot 'tests/PrincipalGroupFixture.ps1') -RepositoryRoot $RepositoryRoot -ScriptName $scriptName -Mode $mode)
