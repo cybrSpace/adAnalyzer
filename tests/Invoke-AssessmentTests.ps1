@@ -54,6 +54,72 @@ function New-RegistryIdentityFixture([string]$Name,[switch]$Deleted){
 }
 $temp=Join-Path ([IO.Path]::GetTempPath()) ('ad-assessment-'+[guid]::NewGuid().ToString('N'));$null=New-Item -Path $temp -ItemType Directory
 try {
+    Test-Assessment 'logical GPO paths are canonical and comparisons survive physical separator differences' {
+        $root=Join-Path $temp 'logical-source';$null=[IO.Directory]::CreateDirectory((Join-Path $root 'Machine'));$null=[IO.Directory]::CreateDirectory((Join-Path $root 'User'))
+        $script:LogicalSourceRoot=(Get-Item -LiteralPath $root).FullName
+        $script:LogicalReads=[Collections.Generic.List[string]]::new()
+        $script:LogicalFiles=@('Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf','Machine/Extra.ini','Machine/Preferences/Groups/Groups.xml','Machine/Scripts/unsupported.cmd')
+        $ini=(Get-Command Read-AnalyzerPolicyIni).ScriptBlock;$xml=(Get-Command Read-AnalyzerPolicyXml).ScriptBlock
+        $listing=Get-Command Get-ChildItem
+        try{
+            function script:Get-ChildItem {
+                param($LiteralPath,[switch]$Recurse,[switch]$File,[switch]$Force,$ErrorAction)
+                if($LiteralPath -eq (Join-Path $script:LogicalSourceRoot 'Machine')){foreach($path in $script:LogicalFiles){
+                    [pscustomobject]@{FullName=$script:LogicalSourceRoot+$script:LogicalSeparator+$path.Replace('/',$script:LogicalSeparator);Name=($path.Split('/')[-1]);Extension=[IO.Path]::GetExtension($path);Length=100}
+                }}
+            }
+            function script:Read-AnalyzerPolicyIni {
+                param($Path)
+                $script:LogicalReads.Add($Path)
+                if($Path -like '*GptTmpl.inf'){return [ordered]@{'System Access'=[ordered]@{MinimumPasswordLength='16'}}}
+                return [ordered]@{Fixture=[ordered]@{Setting='value'}}
+            }
+            function script:Read-AnalyzerPolicyXml {
+                param($Path)
+                $script:LogicalReads.Add($Path)
+                return [xml]'<Groups><Group uid="stable"><Properties action="U" groupSid="S-1-5-32-544"/></Group></Groups>'
+            }
+            $results=@()
+            foreach($separator in @([string][char]92,'/')){
+                $script:LogicalSeparator=$separator;$script:LogicalReads.Clear()
+                $policy=Read-ADAnalyzerGpo $root
+                Assert-Equal $script:LogicalSourceRoot $policy.Path
+                foreach($path in @($policy.SecuritySettings.Source)+@($policy.IniSettings.Source)+@($policy.XmlFiles.Path)+@($policy.Files.Path)+@($policy.UnparsedFiles.Path)){
+                    Assert-True (-not $path.Contains([string][char]92)) ('Noncanonical logical path '+$path)
+                    Assert-True (-not [IO.Path]::IsPathRooted($path)) 'Physical root escaped into logical metadata'
+                }
+                Assert-Equal 3 $script:LogicalReads.Count
+                foreach($path in $script:LogicalReads){
+                    Assert-True ($path.StartsWith($script:LogicalSourceRoot+$separator,[StringComparison]::Ordinal)) 'File I/O path was normalized'
+                    Assert-True ($path.Contains($separator+'Machine'+$separator)) 'Original file I/O path was replaced'
+                }
+                $gpo=[pscustomobject]@{Id=[guid]'11111111-1111-1111-1111-111111111111';Flags=0;Links=@()}
+                $results+=Invoke-ADAnalyzerAssessment -DirectoryData (New-AssessmentFixture) -GpoData @([pscustomobject]@{Gpo=$gpo;Policy=$policy})
+            }
+            $changes=@((Compare-ADAnalyzerAssessment $results[0] $results[1]).Changes | Where-Object RuleId -like 'GPO.*')
+            Assert-True ($changes.Count -gt 5) 'Policy paths were not assessed'
+            Assert-Equal 0 @($changes | Where-Object Change -ne Unchanged).Count
+            Assert-Equal (ConvertTo-Json -InputObject $results[0].Data.Policies -Depth 100 -Compress) (ConvertTo-Json -InputObject $results[1].Data.Policies -Depth 100 -Compress)
+        }finally{
+            Set-Item Function:script:Read-AnalyzerPolicyIni $ini;Set-Item Function:script:Read-AnalyzerPolicyXml $xml
+            if($listing -is [Management.Automation.FunctionInfo]){Set-Item Function:script:Get-ChildItem $listing.ScriptBlock}else{Remove-Item Function:Get-ChildItem}
+            Assert-Equal $listing.CommandType (Get-Command Get-ChildItem).CommandType
+        }
+    }
+    Test-Assessment 'native GPO files retain canonical logical paths and original bytes' {
+        $root=Join-Path $temp 'native-logical-source';$files=@{
+            'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf'="[System Access]`nMinimumPasswordLength=16"
+            'Machine/Extra.ini'="[Fixture]`nSetting=value"
+            'Machine/Preferences/Groups/Groups.xml'='<Groups><Group uid="stable"><Properties action="U" groupSid="S-1-5-32-544"/></Group></Groups>'
+            'Machine/Scripts/unsupported.cmd'='fixture content'
+        }
+        $bytes=@{}
+        foreach($relative in $files.Keys){$path=Join-Path $root $relative;$null=[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path));[IO.File]::WriteAllText($path,$files[$relative]);$bytes[$path]=[Convert]::ToBase64String([IO.File]::ReadAllBytes($path))}
+        $policy=Read-ADAnalyzerGpo $root
+        foreach($path in @($policy.SecuritySettings.Source)+@($policy.IniSettings.Source)+@($policy.XmlFiles.Path)+@($policy.Files.Path)+@($policy.UnparsedFiles.Path)){Assert-True (-not $path.Contains([string][char]92)) 'Native logical path was not canonical'}
+        Assert-Equal 1 $policy.SecuritySettings.Count;Assert-Equal 2 $policy.IniSettings.Count;Assert-Equal 1 $policy.XmlFiles.Count;Assert-Equal 1 $policy.UnparsedFiles.Count
+        foreach($path in $bytes.Keys){Assert-Equal $bytes[$path] ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)))}
+    }
     Test-Assessment 'registry template metadata uses final effective writes in each hive without altering raw inventory' {
         foreach($deleted in @($false,$true)){
             $fixture=New-RegistryIdentityFixture ('registry-effective-'+$deleted) -Deleted:$deleted

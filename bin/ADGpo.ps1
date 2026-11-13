@@ -157,6 +157,7 @@ function Read-ADAnalyzerGpo {
         foreach($file in Get-ChildItem -LiteralPath $side -Recurse -File -Force -ErrorAction Stop) {
             $relative=$file.FullName.Substring($root.FullName.TrimEnd('\','/').Length+1)
             $normalized=$relative.Replace('\','/')
+            $relative=$normalized
             $securityTemplate=$normalized -ieq ('{0}/Microsoft/Windows NT/SecEdit/GptTmpl.inf' -f $pair[1])
             $kind='Unparsed'
             if($file.Extension -in '.ini','.inf') {

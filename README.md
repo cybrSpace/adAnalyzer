@@ -47,6 +47,8 @@ $offline = Read-ADAnalyzerGpo -Path 'C:\PolicyCopies\{GPO-GUID}'
 
 Registry source identities from the outer GPO reader are `Machine/Registry.pol` or `User/Registry.pol`, so copying an identical policy or changing its SYSVOL root does not change its check identities. Raw writes and bytes remain inventory; assessment metadata enrichment uses final effective values, including deletion records. Comparing an older snapshot that uses absolute registry sources may report identity changes. The low-level registry parser retains its supplied file path.
 
+All relative GPO source and inventory paths use forward slashes across Windows and portable offline hosts. Physical file-read paths and the returned policy root are preserved. Older snapshots containing native backslash separators may show identity or evidence changes when compared with canonical-path snapshots.
+
 This is a file-based policy reader, not a GPMC HTML report generator or an ADMX display-name engine. Scripts and other unsupported client-side extension formats are inventoried rather than interpreted; parsed settings are not a calculation of effective policy or RSoP. Offline parsing is portable; live directory/SMB integration is supported on Windows. The older GroupPolicy DLLs in `lib` are not loaded.
 
 The standalone `etc/Get-GPOXML.ps1` and `etc/Get-LocalAdminGPO.ps1` scripts also use the package reader. They require explicit targets and selection, return XML or canonical check objects, and write only when `OutputPath` is supplied. Dot sourcing defines their functions without connecting, importing native modules, prompting, or opening files:
