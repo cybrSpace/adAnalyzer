@@ -1,0 +1,366 @@
+[CmdletBinding()]
+param([string]$RepositoryRoot)
+$ErrorActionPreference='Stop'
+if(-not $RepositoryRoot){$RepositoryRoot=Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)}
+$script:Passed=0;$script:Failed=0
+function Assert-Equal($Expected,$Actual){if($Expected -ne $Actual){throw "Expected [$Expected], received [$Actual]"}}
+function Assert-True($Actual,[string]$Message){if(-not $Actual){throw $Message}}
+function Assert-Throws([scriptblock]$Body){$failed=$false;try{& $Body > $null}catch{$failed=$true};if(-not $failed){throw 'Expected a terminating error'}}
+function Invoke-Test([string]$Name,[scriptblock]$Body){try{& $Body;$script:Passed++;Write-Host "PASS $Name"}catch{$script:Failed++;Write-Host "FAIL $Name : $_";Write-Host $_.ScriptStackTrace}}
+Add-Type -TypeDefinition @'
+namespace Microsoft.ActiveDirectory.Management { public class ADPropertyValueCollection {} public class ADPartition {} public class ADEntity {} }
+namespace Microsoft.ActiveDirectory.Management.Provider { public class ADDriveInfo {} }
+'@
+$temporary=Join-Path ([IO.Path]::GetTempPath()) ('ad-entry-tests-'+[guid]::NewGuid().ToString('N'))
+$null=New-Item -Path $temporary -ItemType Directory
+try {
+    foreach($mode in @('Default','Explicit')){
+        Invoke-Test ('optional installer direct file entry is inert under WhatIf: '+$mode) {
+            $root=Join-Path $temporary ('installer entry '+$mode);$directory=Join-Path $root 'etc';$null=[IO.Directory]::CreateDirectory($directory)
+            $fingerprints=@{}
+            foreach($name in @('Install-DevelopmentTools.ps1','DevelopmentDependencies.psd1')){
+                $source=Join-Path (Join-Path $RepositoryRoot 'etc') $name;$destination=Join-Path $directory $name
+                [IO.File]::Copy($source,$destination)
+                $fingerprints[$destination]=[Convert]::ToBase64String([IO.File]::ReadAllBytes($source))
+            }
+            $installer=Join-Path $directory 'Install-DevelopmentTools.ps1';$extra=@()
+            $destination=if($mode -eq 'Explicit'){Join-Path $root 'explicit destination'}else{Join-Path $root 'tools/modules'}
+            if($mode -eq 'Explicit'){$extra=@('-Path',$destination)}
+            $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $installer -WhatIf @extra 2>&1)
+            Assert-Equal 0 $LASTEXITCODE
+            Assert-Equal 0 @($output | Where-Object {$_ -is [Management.Automation.ErrorRecord]}).Count
+            foreach($name in (Import-PowerShellDataFile -LiteralPath (Join-Path $directory 'DevelopmentDependencies.psd1')).Keys){Assert-True (($output -join ' ') -match [regex]::Escape($name)) ('Installer did not reach WhatIf for '+$name)}
+            Assert-Equal $false (Test-Path -LiteralPath $destination)
+            Assert-Equal 2 @(Get-ChildItem -LiteralPath $root -Recurse -File -Force).Count
+            foreach($path in $fingerprints.Keys){Assert-Equal $fingerprints[$path] ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)))}
+        }
+    }
+    Invoke-Test 'all package PowerShell files parse without syntax errors' {
+        foreach($file in Get-ChildItem -LiteralPath (Join-Path $RepositoryRoot 'bin') -File | Where-Object Extension -in '.ps1','.psm1') {
+            $tokens=$null;$errors=$null;$null=[Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$tokens,[ref]$errors)
+            if($errors.Count){throw ($file.Name+': '+($errors.Message -join '; '))}
+        }
+    }
+    $helpFixture=Join-Path $temporary 'legacy-help.ps1'
+    Set-Content -LiteralPath $helpFixture -Value @'
+param([string]$Root,[string]$Mode)
+$ErrorActionPreference='Stop'
+Add-Type -TypeDefinition 'namespace Microsoft.ActiveDirectory.Management {public class ADPropertyValueCollection {} public class ADPartition {} public class ADEntity {}} namespace Microsoft.ActiveDirectory.Management.Provider {public class ADDriveInfo {}}'
+$module=Import-Module (Join-Path $Root 'bin/ADEnvironment.psm1') -Force -PassThru
+& $module {
+    $script:HelpCalls=0;$script:DirectoryCalls=0
+    function script:Get-Help {param($Name,[switch]$Detailed) $script:HelpCalls++;'fixture local help'}
+    function script:Get-ADRootDSE {$script:DirectoryCalls++;throw 'Unexpected directory read during help'}
+    function script:Get-ADDomain {$script:DirectoryCalls++;throw 'Unexpected domain read during help'}
+}
+'BEFORE legacy help'
+if($Mode -eq 'Help'){$null=Get-ADEnvironment -Help}else{$null=Get-ADEnvironment}
+$counts=& $module {[pscustomobject]@{Help=$script:HelpCalls;Directory=$script:DirectoryCalls}}
+if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain local and read-only'}
+'PASS caller continued after legacy help'
+'@
+    foreach($mode in @('Help','NoClass')){
+        Invoke-Test ('legacy '+$mode+' returns to its caller without directory access') {
+            $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $helpFixture -Root $RepositoryRoot -Mode $mode)
+            Assert-Equal 0 $LASTEXITCODE
+            Assert-True (($output -join ' ') -match 'BEFORE legacy help') 'Child did not import the actual module and reach help'
+            Assert-True (($output -join ' ') -match 'PASS caller continued after legacy help') 'Legacy help terminated the caller'
+        }
+    }
+    . (Join-Path $RepositoryRoot 'bin/ADProfile.ps1')
+    Invoke-Test 'offline prerequisites resolve the owning package root without an explicit argument' {
+        $implicit=@(Get-ADAnalyzerPrerequisite)
+        $explicit=@(Get-ADAnalyzerPrerequisite -RepositoryRoot $RepositoryRoot)
+        Assert-True ($implicit.Count -gt 0) 'Prerequisites returned no package checks'
+        Assert-Equal $RepositoryRoot ($implicit | Where-Object RuleId -eq PACKAGE.POWERSHELL).Target
+        Assert-Equal Pass ($implicit | Where-Object RuleId -eq PACKAGE.BUNDLED_AD).Status
+        Assert-Equal (ConvertTo-Json -InputObject $explicit -Depth 100 -Compress) (ConvertTo-Json -InputObject $implicit -Depth 100 -Compress)
+    }
+    $before=(Get-Location).Path
+    $Credential='caller credential sentinel';$Operation='caller operation sentinel'
+    . (Join-Path $RepositoryRoot 'bin/Start-ADAnalyzer.ps1')
+    Invoke-Test 'dot sourcing the helper preserves caller credentials operation and location' {Assert-Equal $before (Get-Location).Path;Assert-Equal 'caller credential sentinel' $Credential;Assert-Equal 'caller operation sentinel' $Operation;Assert-True ([bool](Get-Command Start-ADAnalyzer)) 'Missing helper function'}
+    $script:ScanCalls=0;$script:ApplyCalls=0;$script:Exports=0;$script:FailScan=$false;$script:FailExport=$false
+    function Get-ADAnalyzerAssessment {
+        param($Domain,$Server,$SearchBase,$Credential,$Profile,[switch]$IncludeAcl,[switch]$IncludeHostChecks,[switch]$SkipGpo)
+        $script:ScanCalls++;$script:ScanArguments=$PSBoundParameters
+        if($script:FailScan){throw 'fixture scan failure'}
+        [pscustomobject]@{SchemaVersion=1;Target='actual.example.invalid';State='Complete';RunId='fixture';Findings=@();Checks=@();Objects=@();Coverage=@{Total=0}}
+    }
+    function Export-ADAnalyzerAssessment {
+        [CmdletBinding(SupportsShouldProcess=$true)]param($Assessment,$Path,$Format)
+        if($script:FailExport){throw 'fixture export failure'}
+        if($PSCmdlet.ShouldProcess($Path,'fixture export')){$script:Exports++;$script:ExportTarget=$Assessment.Target}
+    }
+    function New-ADAnalyzerRemediationPlan {param($Assessment,$Profile) [pscustomobject]@{SchemaVersion=1;Target=$Assessment.Target;Actions=@();Summary=@{Proposed=0}}}
+    function Invoke-ADAnalyzerRemediationPlan {
+        [CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact='High')]param($Plan,$Server,$Credential,$JournalPath)
+        if($PSCmdlet.ShouldProcess($Server,'fixture apply')){$script:ApplyCalls++}
+        [pscustomobject]@{State='Complete';Target=$Server}
+    }
+    function Undo-ADAnalyzerRemediation {
+        [CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact='High')]param($JournalPath,$Server,$Credential)
+        if($PSCmdlet.ShouldProcess($Server,'fixture undo')){$script:ApplyCalls++}
+    }
+    Invoke-Test 'helper forwards explicit target and search-base without prompting' {
+        $null=Start-ADAnalyzer -Operation assess -FQDN target.example.invalid -Server dc.example.invalid -SearchBase 'OU=People,DC=example,DC=invalid'
+        Assert-Equal 'target.example.invalid' $script:ScanArguments.Domain;Assert-Equal 'dc.example.invalid' $script:ScanArguments.Server
+        Assert-Equal 'OU=People,DC=example,DC=invalid' $script:ScanArguments.SearchBase
+    }
+    Invoke-Test 'discovered domain identity is preserved in returned and exported reports' {
+        $result=Start-ADAnalyzer -Operation report -OutputPath (Join-Path $temporary 'report')
+        Assert-Equal 'actual.example.invalid' $result.Target;Assert-Equal 'actual.example.invalid' $script:ExportTarget
+    }
+    Invoke-Test 'requested comparison survives actual helper JSON and HTML exports' {
+        & {
+            . (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')
+            $reference=Join-Path $temporary 'comparison-reference.json'
+            @{SchemaVersion=1;Target='actual.example.invalid';RunId='reference';Checks=@(@{RuleId='FIXTURE.CHECK';Target='fixture-object';Status='Fail';Evidence=@{Value=0}});Findings=@()} | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reference
+            foreach($operation in @('assess','report')){
+                $path=Join-Path $temporary ('comparison-'+$operation)
+                $result=Start-ADAnalyzer -Operation $operation -OutputPath $path -ReferencePath $reference
+                $saved=Get-Content -LiteralPath ($path+'.json') -Raw | ConvertFrom-Json
+                Assert-True ($null -ne $saved.Comparison) 'Saved snapshot lost its comparison'
+                foreach($field in @('SchemaVersion','ComparisonType','ReferenceRunId','DifferenceRunId')){Assert-Equal $result.Comparison.$field $saved.Comparison.$field}
+                Assert-Equal (ConvertTo-Json -InputObject $result.Comparison.Summary -Compress) (ConvertTo-Json -InputObject $saved.Comparison.Summary -Compress)
+                Assert-Equal $result.Comparison.Changes.Count $saved.Comparison.Changes.Count
+                Assert-Equal 1 $saved.Comparison.Changes.Count
+                Assert-Equal 'NotObservedInDifference' $saved.Comparison.Changes[0].Reason
+                Assert-Equal (ConvertTo-Json -InputObject $result.Comparison.Changes -Depth 100 -Compress) (ConvertTo-Json -InputObject $saved.Comparison.Changes -Depth 100 -Compress)
+                Assert-Equal ([datetimeoffset]$result.Comparison.Timestamp).UtcDateTime.Ticks ([datetimeoffset]$saved.Comparison.Timestamp).UtcDateTime.Ticks
+                Assert-Equal 'reference' $saved.Comparison.ReferenceRunId
+                Assert-True ((Get-Content -LiteralPath ($path+'.html') -Raw) -match 'ADAnalyzerAssessmentComparison') 'HTML snapshot lost comparison'
+            }
+            $result=Start-ADAnalyzer -ReferencePath $reference
+            Assert-Equal 'reference' $result.Comparison.ReferenceRunId
+            $path=Join-Path $temporary 'comparison-whatif'
+            $result=Start-ADAnalyzer -OutputPath $path -ReferencePath $reference -WhatIf
+            Assert-Equal 'reference' $result.Comparison.ReferenceRunId
+            Assert-Equal 0 @(Get-ChildItem -LiteralPath $temporary -Filter 'comparison-whatif*').Count
+        }
+    }
+    Invoke-Test 'invalid comparison references preserve existing reports and create no fresh reports' {
+        & {
+            . (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')
+            $reference=Join-Path $temporary 'invalid-reference.json';$path=Join-Path $temporary 'preserved-comparison'
+            foreach($extension in @('.json','.html','.csv')){[IO.File]::WriteAllText(($path+$extension),('previous '+$extension))}
+            foreach($content in @('invalid-json','{"SchemaVersion":2,"Target":"actual.example.invalid"}','{"SchemaVersion":1,"Target":"other.example.invalid","Checks":[]}')){
+                [IO.File]::WriteAllText($reference,$content)
+                Assert-Throws {Start-ADAnalyzer -OutputPath $path -ReferencePath $reference}
+                foreach($extension in @('.json','.html','.csv')){Assert-Equal ('previous '+$extension) ([IO.File]::ReadAllText($path+$extension))}
+            }
+            $fresh=Join-Path $temporary 'invalid-comparison-fresh'
+            Assert-Throws {Start-ADAnalyzer -OutputPath $fresh -ReferencePath (Join-Path $temporary 'missing-reference.json')}
+            Assert-Equal 0 @(Get-ChildItem -LiteralPath $temporary -Filter 'invalid-comparison-fresh*').Count
+        }
+    }
+    Invoke-Test 'credential is forwarded by reference and collectors remain opt-in' {
+        $credential=[pscredential]::new('fixture',(ConvertTo-SecureString 'fixture-only' -AsPlainText -Force))
+        $null=Start-ADAnalyzer -Credential $credential -IncludeAcl -IncludeHostChecks -SkipGpo
+        Assert-True ([object]::ReferenceEquals($credential,$script:ScanArguments.Credential)) 'Dropped credential'
+        Assert-True $script:ScanArguments.IncludeAcl 'ACL option lost';Assert-True $script:ScanArguments.IncludeHostChecks 'Host option lost';Assert-True $script:ScanArguments.SkipGpo 'GPO option lost'
+    }
+    Invoke-Test 'scan failures escape the helper as terminating errors' {
+        $script:FailScan=$true;try{Assert-Throws {Start-ADAnalyzer}}finally{$script:FailScan=$false}
+    }
+    Invoke-Test 'export failures escape the helper as terminating errors' {
+        $script:FailExport=$true;try{Assert-Throws {Start-ADAnalyzer -OutputPath (Join-Path $temporary 'broken')}}finally{$script:FailExport=$false}
+    }
+    Invoke-Test 'plan and legacy remediate operations never apply mutations' {
+        $before=$script:ApplyCalls
+        foreach($operation in @('plan','remediate')){$plan=Start-ADAnalyzer -Operation $operation;Assert-Equal 'actual.example.invalid' $plan.Target;Assert-Equal 0 $plan.Actions.Count}
+        Assert-Equal $before $script:ApplyCalls
+    }
+    Invoke-Test 'apply requires both an explicit plan and journal' {
+        Assert-Throws {Start-ADAnalyzer -Operation apply -PlanPath 'fixture.json'}
+        Assert-Throws {Start-ADAnalyzer -Operation apply -JournalPath 'fixture.json'}
+    }
+    Invoke-Test 'WhatIf never reaches the apply mutation' {
+        $before=$script:ApplyCalls;$null=Start-ADAnalyzer -Operation apply -PlanPath 'fixture.json' -JournalPath 'journal.json' -Server dc.example.invalid -WhatIf
+        Assert-Equal $before $script:ApplyCalls
+    }
+    Invoke-Test 'WhatIf never reaches the undo mutation' {
+        $before=$script:ApplyCalls;$null=Start-ADAnalyzer -Operation undo -JournalPath 'journal.json' -Server dc.example.invalid -WhatIf
+        Assert-Equal $before $script:ApplyCalls
+    }
+    Invoke-Test 'read-only WhatIf still collects while suppressing export writes' {
+        $before=$script:Exports;$scan=$script:ScanCalls;$null=Start-ADAnalyzer -OutputPath (Join-Path $temporary 'preview') -WhatIf
+        Assert-Equal ($scan+1) $script:ScanCalls;Assert-Equal $before $script:Exports
+    }
+    Invoke-Test 'unattended plan export keeps normal file impact and delegates high-impact mutations' {
+        $fixture=Join-Path $temporary 'plan-confirmation.ps1'
+        Set-Content -LiteralPath $fixture -Value @'
+param([string]$Root,[string]$OutputDirectory)
+$ErrorActionPreference='Stop';$ConfirmPreference='High'
+foreach($file in @('ADProfile','ADOperations','Start-ADAnalyzer')){. (Join-Path $Root ('bin/'+$file+'.ps1'))}
+function Assert-Plan($Value,[string]$Message){if(-not $Value){throw $Message}}
+foreach($name in @('Invoke-ADAnalyzerRemediationPlan','Undo-ADAnalyzerRemediation')){
+    $metadata=[Management.Automation.CommandMetadata]::new((Get-Command $name))
+    Assert-Plan ($metadata.ConfirmImpact -eq 'High') 'Actual executor lost high-impact confirmation'
+}
+function Get-ADAnalyzerAssessment {param($Credential,$Profile,[switch]$IncludeAcl,[switch]$IncludeHostChecks,[switch]$SkipGpo) [pscustomobject]@{SchemaVersion=1;Target='fixture.invalid';Checks=@();Findings=@();Objects=@()}}
+function New-ADAnalyzerRemediationPlan {param($Assessment,$Profile) [pscustomobject]@{SchemaVersion=1;Target=$Assessment.Target;Actions=@();Summary=@{Proposed=0}}}
+$script:FixtureMutations=0
+function Invoke-ADAnalyzerRemediationPlan {
+    [CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact='High')]param($Plan,$Server,$Credential,$JournalPath)
+    if($PSCmdlet.ShouldProcess($Server,'fixture apply')){$script:FixtureMutations++}
+}
+function Undo-ADAnalyzerRemediation {
+    [CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact='High')]param($JournalPath,$Server,$Credential)
+    if($PSCmdlet.ShouldProcess($Server,'fixture undo')){$script:FixtureMutations++}
+}
+foreach($operation in @('plan','remediate')){
+    $path=Join-Path $OutputDirectory ('unattended-'+$operation+'.json')
+    $result=Start-ADAnalyzer -Operation $operation -OutputPath $path
+    $saved=Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    Assert-Plan ($saved.Target -eq 'fixture.invalid' -and $saved.Actions.Count -eq 0 -and $result.Actions.Count -eq 0) 'Inert plan export failed'
+    $preview=$path+'.preview';$null=Start-ADAnalyzer -Operation $operation -OutputPath $preview -WhatIf
+    Assert-Plan (-not (Test-Path -LiteralPath $preview)) 'WhatIf wrote a plan'
+    $confirmed=$path+'.confirmed';$blocked=$false
+    try{$null=Start-ADAnalyzer -Operation $operation -OutputPath $confirmed -Confirm}catch{$blocked=$_.Exception.Message -match 'NonInteractive'}
+    Assert-Plan ($blocked -and -not (Test-Path -LiteralPath $confirmed)) 'Explicit plan confirmation was suppressed'
+}
+foreach($operation in @('apply','undo')){
+    $arguments=@{Operation=$operation;JournalPath='fixture-journal';Server='dc.fixture.invalid'}
+    if($operation -eq 'apply'){$arguments.PlanPath='fixture-plan'}
+    $blocked=$false;try{$null=Start-ADAnalyzer @arguments}catch{$blocked=$_.Exception.Message -match 'NonInteractive'}
+    Assert-Plan $blocked 'Default executor confirmation was suppressed'
+    $before=$script:FixtureMutations;$null=Start-ADAnalyzer @arguments -WhatIf
+    Assert-Plan ($script:FixtureMutations -eq $before) 'WhatIf reached a mutation'
+    $null=Start-ADAnalyzer @arguments -Confirm:$false
+    Assert-Plan ($script:FixtureMutations -eq ($before+1)) 'Explicit executor confirmation was not delegated'
+    $blocked=$false;try{$null=Start-ADAnalyzer @arguments -Confirm}catch{$blocked=$_.Exception.Message -match 'NonInteractive'}
+    Assert-Plan ($blocked -and $script:FixtureMutations -eq ($before+1)) 'Explicit executor confirmation was suppressed'
+}
+Assert-Plan ($ConfirmPreference -eq 'High') 'Caller confirmation preference changed'
+'PASS unattended inert plan export and guarded mutation delegation'
+'@
+        $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $fixture -Root $RepositoryRoot -OutputDirectory $temporary)
+        Assert-Equal 0 $LASTEXITCODE
+        Assert-True (($output -join ' ') -match 'PASS unattended inert plan export') 'Confirmation fixture did not finish'
+    }
+    Invoke-Test 'profile validation rejects unknown settings and executable input formats' {
+        Assert-Throws {Import-ADAnalyzerProfile -Profile @{Policy=@{MisspelledThreshold=6}}}
+        Assert-Throws {Import-ADAnalyzerProfile -Path 'profile.ps1'}
+        Assert-Throws {Import-ADAnalyzerProfile -Profile @{Analysis=@{IncludeAcl='false'}}}
+    }
+    Invoke-Test 'directory connection defaults to PSDrive with validated explicit direct mode' {
+        Assert-Equal PSDrive (Get-ADAnalyzerDefaultProfile).Analysis.DirectoryConnection
+        foreach($mode in @('PSDrive','Direct')){
+            $json=Join-Path $temporary 'connection-profile.json';Set-Content -LiteralPath $json -Value ('{"Analysis":{"DirectoryConnection":"'+$mode+'"}}')
+            $psd1=Join-Path $temporary 'connection-profile.psd1';Set-Content -LiteralPath $psd1 -Value ("@{Analysis=@{DirectoryConnection='"+$mode+"'}}")
+            foreach($path in @($json,$psd1)){Assert-Equal $mode (Import-ADAnalyzerProfile -Path $path).Analysis.DirectoryConnection}
+        }
+        foreach($mode in @('Unknown',1,@('PSDrive','Direct'),$null)){Assert-Throws {Import-ADAnalyzerProfile -Profile @{Analysis=@{DirectoryConnection=$mode}}}}
+    }
+    Invoke-Test 'profile defaults and nested collections are isolated between runs' {
+        $a=Get-ADAnalyzerDefaultProfile;$b=Get-ADAnalyzerDefaultProfile;$a.Policy.MinimumPasswordLength=99;$a.Policy.AllowedUserRightSids['one']=@('SID')
+        Assert-Equal 12 $b.Policy.MinimumPasswordLength;Assert-Equal 0 $b.Policy.AllowedUserRightSids.Count
+    }
+    Invoke-Test 'custom value baselines reject secret identities in every profile collection without changing input' {
+        foreach($section in @('RegistryRules','ExpectedGpoSettings','Host')){foreach($expected in @('unit7-secret',@('unit7-secret'),'',$null,$true)){
+            $rule=@{Id='unit7-secret-label';Key='Software\Fixture';ValueName='dEfAuLtPaSsWoRd';Name='MACHINE\Software\Fixture\DefaultPassword';Expected=$expected}
+            $inputProfile=if($section -eq 'Host'){@{Host=@{RegistryRules=@($rule)}}}else{@{$section=@($rule)}}
+            $before=ConvertTo-Json -InputObject $inputProfile -Depth 20 -Compress
+            $caught=$null;try{$null=Import-ADAnalyzerProfile -Profile $inputProfile}catch{$caught=$_}
+            Assert-True ($null -ne $caught) 'Secret value baseline accepted'
+            Assert-Equal 'Value baselines for secret-bearing settings are not supported. Use secret-presence checks.' $caught.Exception.Message
+            Assert-True (([string]$caught.TargetObject) -notmatch 'unit7-secret') 'Secret rule leaked through error target'
+            Assert-Equal $before (ConvertTo-Json -InputObject $inputProfile -Depth 20 -Compress)
+        }}
+    }
+    Invoke-Test 'JSON and PSD1 custom secret baselines are rejected for all profile collections' {
+        foreach($section in @('RegistryRules','ExpectedGpoSettings','Host')){
+            $rule=@{ValueName='DefaultPassword';Expected='unit7-file-secret'}
+            $inputProfile=if($section -eq 'Host'){@{Host=@{RegistryRules=@($rule)}}}else{@{$section=@($rule)}}
+            $json=Join-Path $temporary 'secret-profile.json';$inputProfile | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $json
+            $literal="@{ValueName='DefaultPassword';Expected='unit7-file-secret'}"
+            $text=if($section -eq 'Host'){"@{Host=@{RegistryRules=@($literal)}}"}else{"@{$section=@($literal)}"}
+            $psd1=Join-Path $temporary 'secret-profile.psd1';Set-Content -LiteralPath $psd1 -Value $text
+            foreach($path in @($json,$psd1)){
+                $caught=$null;try{$null=Import-ADAnalyzerProfile -Path $path}catch{$caught=$_}
+                Assert-True ($null -ne $caught) 'Secret value file baseline accepted'
+                Assert-Equal 'Value baselines for secret-bearing settings are not supported. Use secret-presence checks.' $caught.Exception.Message
+            }
+        }
+    }
+    Invoke-Test 'standalone profile loading rejects secret baselines and retains ordinary typed settings' {
+        $fixture=Join-Path $temporary 'profile-only.ps1'
+        Set-Content -LiteralPath $fixture -Value @'
+param([string]$Root)
+$ErrorActionPreference='Stop'
+. (Join-Path $Root 'bin/ADProfile.ps1')
+$profile=Import-ADAnalyzerProfile -Profile @{Policy=@{PasswordComplexity=$true;MinimumPasswordLength=14};RegistryRules=@(@{Key='Software\Password';ValueName='Enabled';Expected=0})}
+if($profile.Policy.MinimumPasswordLength -ne 14 -or $profile.RegistryRules[0].Expected -isnot [int]){throw 'Ordinary typed baseline changed'}
+$caught=$null
+try{$null=Import-ADAnalyzerProfile -Profile @{ExpectedGpoSettings=@(@{Kind='SecurityOptions';Name='MACHINE\Software\Fixture\DefaultPassword';Expected='fixture-only'})}}catch{$caught=$_}
+if($null -eq $caught -or $caught.Exception.Message -ne 'Value baselines for secret-bearing settings are not supported. Use secret-presence checks.'){throw 'Standalone profile guard did not run'}
+'@
+        & (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $fixture -Root $RepositoryRoot
+        Assert-Equal 0 $LASTEXITCODE
+    }
+    Invoke-Test 'profile conversion preserves sorted scalar collections and typed values' {
+        $profile=Import-ADAnalyzerProfile -Profile @{Policy=@{ApprovedLocalAdminSids=@('S-1-5-32-545','S-1-5-32-544' | Sort-Object)}}
+        Assert-True ($profile.Policy.ApprovedLocalAdminSids[0] -is [string]) 'Pipeline-wrapped string became a property dictionary'
+        Assert-Equal 'S-1-5-32-544' $profile.Policy.ApprovedLocalAdminSids[0]
+        Assert-Equal 2 $profile.Policy.ApprovedLocalAdminSids.Count
+    }
+    Invoke-Test 'JSON and restricted PSD1 overrides merge without discarding defaults' {
+        $json=Join-Path $temporary 'profile.json';Set-Content -LiteralPath $json -Value '{"Name":"Fixture","Policy":{"MinimumPasswordLength":20}}'
+        $psd1=Join-Path $temporary 'profile.psd1';Set-Content -LiteralPath $psd1 -Value "@{Name='Fixture';Policy=@{MinimumPasswordLength=20}}"
+        foreach($path in @($json,$psd1)){$p=Import-ADAnalyzerProfile -Path $path;Assert-Equal 20 $p.Policy.MinimumPasswordLength;Assert-Equal 6 $p.Policy.LockoutThreshold}
+    }
+    Invoke-Test 'exceptions require ownership reason expiry and retain the original status' {
+        Assert-Throws {Import-ADAnalyzerProfile -Profile @{Exceptions=@(@{RuleId='ONE';Target='*'})}}
+        $profile=Import-ADAnalyzerProfile -Profile @{Exceptions=@(@{RuleId='ONE';Target='fixture';Owner='Ops';Reason='Temporary';Expires=[datetime]::UtcNow.AddDays(1).ToString('o')})}
+        $check=New-ADAnalyzerCheck -RuleId ONE -Target fixture -Status Fail
+        $result=$check | Set-ADAnalyzerCheckException -Profile $profile
+        Assert-Equal Fail $result.Status;Assert-True $result.Suppressed 'Exception metadata missing'
+    }
+    Invoke-Test 'expired exceptions do not suppress findings' {
+        $profile=Import-ADAnalyzerProfile -Profile @{Exceptions=@(@{RuleId='ONE';Target='fixture';Owner='Ops';Reason='Expired';Expires='2020-01-01T00:00:00Z'})}
+        $check=New-ADAnalyzerCheck -RuleId ONE -Target fixture -Status Fail
+        Assert-Equal $false ($check | Set-ADAnalyzerCheckException -Profile $profile).Suppressed
+    }
+    Invoke-Test 'check identities are stable and target-specific' {
+        $a=New-ADAnalyzerCheck -RuleId ONE -Target fixture -Status Pass;$b=New-ADAnalyzerCheck -RuleId one -Target FIXTURE -Status Fail;$c=New-ADAnalyzerCheck -RuleId ONE -Target other -Status Pass
+        Assert-Equal $a.CheckId $b.CheckId;Assert-True ($a.CheckId -ne $c.CheckId) 'Different targets collided'
+    }
+    Invoke-Test 'prerequisite CLI honors the same domain target argument' {
+        function Get-ADAnalyzerPrerequisite {param($RepositoryRoot,$Server,$Credential,[switch]$Online,$Profile) [pscustomobject]@{Observed=$Server;Status='Pass'}}
+        $result=Start-ADAnalyzer -Operation prerequisites -FQDN target.example.invalid -Online
+        Assert-Equal target.example.invalid $result.Observed
+    }
+    $harness=Join-Path $temporary 'cli-harness.ps1'
+    $harnessSource=@'
+param([string]$State)
+. '__PROFILE__'
+$global:ADAnalyzerFixtureCliState=$State
+function Get-ADAnalyzerAssessment {
+    param($Domain,$Server,$SearchBase,$Credential,$Profile,[switch]$IncludeAcl,[switch]$IncludeHostChecks,[switch]$SkipGpo)
+    if($global:ADAnalyzerFixtureCliState -eq 'Error'){throw 'fixture CLI collection failed'}
+    $state=if($global:ADAnalyzerFixtureCliState -eq 'Partial'){'Partial'}else{'Complete'}
+    $findings=if($global:ADAnalyzerFixtureCliState -eq 'Findings'){@([pscustomobject]@{Status='Fail';Suppressed=$false})}else{@()}
+    [pscustomobject]@{RunId='fixture';Target=$Domain;State=$state;Coverage=@{};Findings=$findings}
+}
+& '__HELPER__' -Operation assess -Domain example.invalid -PassThru -FailOnFindings
+exit $LASTEXITCODE
+'@
+    $harnessSource=$harnessSource.Replace('__PROFILE__',(Join-Path $RepositoryRoot 'bin/ADProfile.ps1').Replace("'","''")).Replace('__HELPER__',(Join-Path $RepositoryRoot 'bin/Start-ADAnalyzer.ps1').Replace("'","''"))
+    Set-Content -LiteralPath $harness -Value $harnessSource -Encoding UTF8
+    foreach($case in @(@{State='Complete';Code=0},@{State='Partial';Code=2},@{State='Error';Code=1},@{State='Findings';Code=3})) {
+        Invoke-Test ('CLI process returns explicit exit status for '+$case.State) {
+            $shell=(Get-Process -Id $PID).Path;$previous=$ErrorActionPreference
+            try{$ErrorActionPreference='Continue';$null=& $shell -NoLogo -NoProfile -NonInteractive -File $harness -State $case.State 2>&1;$actual=$LASTEXITCODE}finally{$ErrorActionPreference=$previous}
+            Assert-Equal $case.Code $actual
+        }
+    }
+    Invoke-Test 'manifest exports only package commands and has no installed RSAT requirement' {
+        $manifest=Import-PowerShellDataFile (Join-Path $RepositoryRoot 'ADEnvironment.psd1')
+        Assert-Equal 0 @($manifest.RequiredModules | Where-Object { $null -ne $_ }).Count
+        Assert-True ($manifest.NestedModules -contains 'lib/Microsoft.ActiveDirectory.Management.dll') 'Bundled AD module missing'
+        foreach($name in @('Get-ADAnalyzerAssessment','Invoke-ADAnalyzerAssessment','New-ADAnalyzerRemediationPlan','Export-ADAnalyzerAssessment')){Assert-True ($manifest.FunctionsToExport -contains $name) "Missing public command $name"}
+    }
+}finally{Remove-Item -LiteralPath $temporary -Recurse -Force -WhatIf:$false -Confirm:$false}
+Write-Host ("{0} entry-point/profile tests passed; {1} failed" -f $script:Passed,$script:Failed)
+if($script:Failed){exit 1}

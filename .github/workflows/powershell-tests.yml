@@ -1,0 +1,65 @@
+name: PowerShell regression tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    name: Tests (${{ matrix.name }})
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows PowerShell 5.1
+            version: '5.1'
+            sha256: ''
+          - name: PowerShell 7.6 LTS (7.6.10)
+            version: '7.6.10'
+            sha256: '7D871531806EB1646264E4BBABD9F0C30C23355591BC756BB9909448C29AE166'
+          - name: PowerShell 7.7 (7.7.0)
+            version: '7.7.0'
+            sha256: '7C74E03B20A75B59715847439D046A6214B1863EE79B187872980F139BB4A05F'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select pinned test engine
+        shell: powershell
+        env:
+          TEST_VERSION: ${{ matrix.version }}
+          TEST_ARCHIVE_SHA256: ${{ matrix.sha256 }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $ProgressPreference='SilentlyContinue'
+          if ($env:TEST_VERSION -eq '5.1') {
+            # Windows services the 5.1 build; the suite asserts 5.1/Desktop/x64.
+            $engine=Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe'
+          } else {
+            [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+            $directory=Join-Path $env:RUNNER_TEMP ('powershell-'+$env:TEST_VERSION)
+            $archive=$directory+'.zip'
+            $url='https://github.com/PowerShell/PowerShell/releases/download/v{0}/PowerShell-{0}-win-x64.zip' -f $env:TEST_VERSION
+            Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
+            $actualHash=(Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+            if ($actualHash -ne $env:TEST_ARCHIVE_SHA256) { throw 'PowerShell archive SHA256 mismatch' }
+            Expand-Archive -LiteralPath $archive -DestinationPath $directory
+            $engine=Join-Path $directory 'pwsh.exe'
+          }
+          if (-not (Test-Path -LiteralPath $engine -PathType Leaf)) { throw 'Selected PowerShell executable is missing' }
+          'ADANALYZER_TEST_POWERSHELL='+$engine | Out-File -LiteralPath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Save optional pinned development tools
+        # The runner shell only downloads packages. Every check below executes
+        # in the selected engine, including Pester/PSScriptAnalyzer on 5.1.
+        shell: pwsh
+        run: ./etc/Install-DevelopmentTools.ps1 -Confirm:$false
+      - name: Log runtime and run all tests in the selected engine
+        shell: powershell
+        run: |
+          & $env:ADANALYZER_TEST_POWERSHELL -NoLogo -NoProfile -NonInteractive -File ./tests/Invoke-TestSuite.ps1 -ExpectedVersion '${{ matrix.version }}' -Mode All
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

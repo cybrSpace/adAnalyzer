@@ -1,6 +1,14 @@
+[CmdletBinding()]
+param(
+    [Alias('context')][string]$CliContext,
+    [Alias('principal')][string]$CliPrincipal,
+    [Alias('Credential')][pscredential]$CliCredential=[pscredential]::Empty
+)
+
 $constant = @{
 
     'module'   = 'WindowsServerHPA'
+    'HostGroupHelperPath' = (Join-Path $PSScriptRoot 'Get-ServerHPA.ps1')
 
     'property' = @{
         'skip'  = 3
@@ -59,43 +67,15 @@ $constant = @{
 
 }
 
-$constant['domain']['context'] = New-Object System.DirectoryServices.AccountManagement.PrincipalContext(
-    [System.DirectoryServices.AccountManagement.ContextType]::Domain, $constant['domain']['fqdn']
-)
-
-function Connect-WindowsServer () {
-
-    param (
-
-        $context, $principal, $domain
-
-    )
-
-    try {
-
-        $r = @{}
-
-        $r['context'] = New-System.DirectoryServices.AccountManagement.PrincipalContext(
-            [System.DirectoryServices.AccountManagement.ContextType]::Machine, $context
-        )
-
-        $r['principal'] = [System.DirectoryServices.AccountManagement.GroupPrincipal]::FindByIdentity(
-            $r['context'], [System.DirectoryServices.AccountManagement.IdentityType]::SamAccountName, $principal
-        )
-
-        if ($null -eq $r['principal'].Members -or [String]::IsNullOrEmpty($r['principal'].Members.Count)) {
-
-            $r['principal'] = New-Object System.DirectoryServices.DirectoryEntry(($r['principal'].GetUnderlyingObject()).Path)
-
-        }
-
-    }
-    catch {
-
-        throw $_.Exception.Message
-
-    }
-
+function Connect-WindowsServer {
+    [CmdletBinding()]
+    param([string]$context,[string]$principal,$domain,[pscredential]$Credential=[pscredential]::Empty)
+    $ErrorActionPreference='Stop'
+    # Pool workers clone function definitions, so use the absolute configured dependency path.
+    $helperPath=[string]$constant['HostGroupHelperPath']
+    if([string]::IsNullOrWhiteSpace($helperPath) -or -not [IO.File]::Exists($helperPath)){throw 'Host-group reader dependency is unavailable.'}
+    . $helperPath
+    Get-ServerHPA -Computer $context -Target $principal -Credential $Credential
 }
 
 function Format-WindowsServerException () {
@@ -103,15 +83,21 @@ function Format-WindowsServerException () {
         [Parameter(Mandatory = $true)]
         $value
     )
+    $message=$null
     switch ($constant['error'].Keys) { 
 
         'bad.user' {
 
-            if ($value -match ('({0})' -f ($contains['error'][$_]['value'] -join '|'))) {
+            if ($value -match ('({0})' -f ($constant['error'][$_]['value'] -join '|'))) {
 
-                $var['attempt']++
+                $syncRoot=$var.SyncRoot
+                [Threading.Monitor]::Enter($syncRoot)
+                try {
+                    $var['attempt']++
+                    $exceeded=$var['attempt'] -ge $constant['property']['limit']
+                } finally {[Threading.Monitor]::Exit($syncRoot)}
 
-                if ($var['attempt'] -ge $constant['property']['limit']) {
+                if ($exceeded) {
 
                     throw 'exceeded invalid attempt limit'
 
@@ -131,9 +117,14 @@ function Format-WindowsServerException () {
 
             if ($value -match ('({0})' -f ($constant['error'][$_]['value'] -join '|'))) {
 
-                $var['attempt']++
+                $syncRoot=$var.SyncRoot
+                [Threading.Monitor]::Enter($syncRoot)
+                try {
+                    $var['attempt']++
+                    $exceeded=$var['attempt'] -ge $constant['property']['limit']
+                } finally {[Threading.Monitor]::Exit($syncRoot)}
 
-                if ($var['attempt'] -ge $constant['property']['limit']) {
+                if ($exceeded) {
 
                     throw 'exceeded invalid attempt limit'
 
@@ -171,78 +162,34 @@ function Format-WindowsServerException () {
 
 }
 
-function Invoke-Cmdlet () {
-
-    [CmdletBinding(DefaultParameterSetName = 'Target')]
-    param (
-        [Parameter(Mandatory = $true, ParameterSetName = 'Invoke')]
-        [Parameter(Mandatory = $true, ParameterSetName = 'Retry')]
-        [scriptblock]$sb,
-
-        [Parameter(ParameterSetName = 'Retry')]
+function Invoke-Cmdlet {
+    <# .SYNOPSIS Runs a block once, or retries it up to Max total attempts.
+       .DESCRIPTION Retry safety belongs to the caller; this does not impose a deadline on the block. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][scriptblock]$sb,
         [switch]$retry,
-        [Parameter(Mandatory = $true, ParameterSetName = 'Retry')]
-        [int]$max = 0
+        [ValidateRange(1,2147483647)][int]$max=3,
+        [ValidateRange(0,300)][int]$DelaySeconds=1
     )
-    function Set-RetryDelay () {
-
-        param (
-
-            [alias('attempt')]
-            $a = 0,
-            [alias('previousDelay')]
-            $pd = 0
-
-        )
-
-        return [math]::Ceiling((Get-Random -Minimum $pd -Maximum ((1 / 2) * ([math]::Pow(2, $a) - 1))))
-
-    }
-
-    $attempt = 0
-    $pDelay = 0
-    $return = $null
-
-    do {
-
-        ++$attempt
-            
-        try {
-            $return = Invoke-Command -ScriptBlock $sb
-            $exit = $true
-        } 
-        catch {
-
-            if ($retry) {
-
-                $exit = $false
-                $pDelay = Set-RetryDelay -attempt $attempt -previousDelay $pDelay
-                Start-Sleep
-
-            }
-            else {
-
-                $exit = $true
-
-            }
-
+    $ErrorActionPreference='Stop'
+    $attempts=if($retry){$max}else{1}
+    for($attempt=1;$attempt -le $attempts;$attempt++){
+        try{
+            $output=@(Invoke-Command -ScriptBlock $sb -ErrorAction Stop)
+            return $output
+        }catch{
+            if($attempt -ge $attempts){throw}
         }
-
-    } until ($exit -eq $true -or $attempt -eq $max)
-
-    if ($attempt -eq $max) {
-
-        throw 'invoke_cmdlet_failed...({})' -f $error[0].Exception.Message
-
+        if($DelaySeconds){Start-Sleep -Seconds $DelaySeconds}
     }
-    else {
-
-        return $return
-
-    }
-
 }
-function Initialize-RunspacePool () {
+
+function Initialize-RunspacePool {
+    <# .SYNOPSIS Returns an unopened pool; the caller owns Open and Dispose. #>
+    [CmdletBinding()]
+    param([ValidateRange(1,2147483647)][int]$MaxRunspaces=[Environment]::ProcessorCount)
+    $ErrorActionPreference='Stop'
 
     $r = @{}
 
@@ -263,12 +210,19 @@ function Initialize-RunspacePool () {
 
     }
 
-    #$r['pool'] = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $constant['runspace']['threads'], $r['init'], $host)
-    #$r['pool'].ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
-
-    $r['pool'] = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, [int]$env:NUMBER_OF_PROCESSORS, $r['init'], $host)
-    $r['pool'].ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
-    $r['pool'].CleanupInterval = 2 * [timespan]::TicksPerMinute
+    $pool=$null
+    try {
+        $pool=[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1,$MaxRunspaces,$r['init'],$host)
+        $pool.ThreadOptions=[System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
+        $pool.CleanupInterval=[timespan]::FromMinutes(2)
+        $r['pool']=$pool
+    } catch {
+        $failure=$_
+        if($null -ne $pool){
+            try{$pool.Dispose()}catch{$failure.Exception.Data['ADAnalyzerCleanupErrors']=@($_.Exception.GetBaseException().Message)}
+        }
+        throw $failure
+    }
 
 
     return $r
@@ -278,8 +232,7 @@ function Initialize-RunspacePool () {
 $var = [hashtable]::Synchronized(@{})
 $tbl = [hashtable]::Synchronized(@{})
 
-$srv = [ordered]@{
-    'name' = 'srv1'
+if($MyInvocation.InvocationName -ne '.'){
+    if([string]::IsNullOrWhiteSpace($CliContext) -or [string]::IsNullOrWhiteSpace($CliPrincipal)){throw 'Specify context and principal for an explicit host-group read.'}
+    Connect-WindowsServer -context $CliContext -principal $CliPrincipal -Credential $CliCredential
 }
-$tbl[$srv['name']] = $srv
-Connect-WindowsServer -context $srv['name'] -principal $constant['target']['principal'] -domain $constant['domain']['context']
