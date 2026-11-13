@@ -171,77 +171,29 @@ function Format-WindowsServerException () {
 
 }
 
-function Invoke-Cmdlet () {
-
-    [CmdletBinding(DefaultParameterSetName = 'Target')]
-    param (
-        [Parameter(Mandatory = $true, ParameterSetName = 'Invoke')]
-        [Parameter(Mandatory = $true, ParameterSetName = 'Retry')]
-        [scriptblock]$sb,
-
-        [Parameter(ParameterSetName = 'Retry')]
+function Invoke-Cmdlet {
+    <# .SYNOPSIS Runs a block once, or retries it up to Max total attempts.
+       .DESCRIPTION Retry safety belongs to the caller; this does not impose a deadline on the block. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][scriptblock]$sb,
         [switch]$retry,
-        [Parameter(Mandatory = $true, ParameterSetName = 'Retry')]
-        [int]$max = 0
+        [ValidateRange(1,2147483647)][int]$max=3,
+        [ValidateRange(0,300)][int]$DelaySeconds=1
     )
-    function Set-RetryDelay () {
-
-        param (
-
-            [alias('attempt')]
-            $a = 0,
-            [alias('previousDelay')]
-            $pd = 0
-
-        )
-
-        return [math]::Ceiling((Get-Random -Minimum $pd -Maximum ((1 / 2) * ([math]::Pow(2, $a) - 1))))
-
-    }
-
-    $attempt = 0
-    $pDelay = 0
-    $return = $null
-
-    do {
-
-        ++$attempt
-            
-        try {
-            $return = Invoke-Command -ScriptBlock $sb
-            $exit = $true
-        } 
-        catch {
-
-            if ($retry) {
-
-                $exit = $false
-                $pDelay = Set-RetryDelay -attempt $attempt -previousDelay $pDelay
-                Start-Sleep
-
-            }
-            else {
-
-                $exit = $true
-
-            }
-
+    $ErrorActionPreference='Stop'
+    $attempts=if($retry){$max}else{1}
+    for($attempt=1;$attempt -le $attempts;$attempt++){
+        try{
+            $output=@(Invoke-Command -ScriptBlock $sb -ErrorAction Stop)
+            return $output
+        }catch{
+            if($attempt -ge $attempts){throw}
         }
-
-    } until ($exit -eq $true -or $attempt -eq $max)
-
-    if ($attempt -eq $max) {
-
-        throw 'invoke_cmdlet_failed...({})' -f $error[0].Exception.Message
-
+        if($DelaySeconds){Start-Sleep -Seconds $DelaySeconds}
     }
-    else {
-
-        return $return
-
-    }
-
 }
+
 function Initialize-RunspacePool () {
 
     $r = @{}
