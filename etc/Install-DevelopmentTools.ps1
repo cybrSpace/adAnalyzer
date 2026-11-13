@@ -1,6 +1,7 @@
 [CmdletBinding(SupportsShouldProcess=$true)]
-param([string]$Path=(Join-Path (Split-Path -Parent $PSScriptRoot) 'tools/modules'))
+param([string]$Path)
 $ErrorActionPreference='Stop'
+if(-not $PSBoundParameters.ContainsKey('Path')){$Path=Join-Path (Split-Path -Parent $PSScriptRoot) 'tools/modules'}
 $dependencies=Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot 'DevelopmentDependencies.psd1')
 foreach($name in $dependencies.Keys) {
     $version=$dependencies[$name]

@@ -68,6 +68,14 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
         }
     }
     . (Join-Path $RepositoryRoot 'bin/ADProfile.ps1')
+    Invoke-Test 'offline prerequisites resolve the owning package root without an explicit argument' {
+        $implicit=@(Get-ADAnalyzerPrerequisite)
+        $explicit=@(Get-ADAnalyzerPrerequisite -RepositoryRoot $RepositoryRoot)
+        Assert-True ($implicit.Count -gt 0) 'Prerequisites returned no package checks'
+        Assert-Equal $RepositoryRoot ($implicit | Where-Object RuleId -eq PACKAGE.POWERSHELL).Target
+        Assert-Equal Pass ($implicit | Where-Object RuleId -eq PACKAGE.BUNDLED_AD).Status
+        Assert-Equal (ConvertTo-Json -InputObject $explicit -Depth 100 -Compress) (ConvertTo-Json -InputObject $implicit -Depth 100 -Compress)
+    }
     $before=(Get-Location).Path
     $Credential='caller credential sentinel';$Operation='caller operation sentinel'
     . (Join-Path $RepositoryRoot 'bin/Start-ADAnalyzer.ps1')
