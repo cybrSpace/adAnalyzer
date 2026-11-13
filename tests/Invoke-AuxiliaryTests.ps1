@@ -318,7 +318,17 @@ try {
         try{
             $null=Assert-Throws {Get-ADAnalyzerLocalAdminGpo -InputObject $script:ReportA -OutputPath $path}
             Assert-Equal $before (Get-BytesFingerprint $path)
-        }finally{Remove-Item Function:script:ConvertTo-Csv}
+        }finally{Remove-Item Function:ConvertTo-Csv}
+    }
+    Invoke-AuxiliaryTest 'successful populated CSV export recovers after injected serialization failure' {
+        Assert-Equal Cmdlet (Get-Command ConvertTo-Csv).CommandType
+        $path=Join-Path $script:Temporary 'serialization-recovery.csv'
+        $rows=@(Get-ADAnalyzerLocalAdminGpo -InputObject $script:ReportA -OutputPath $path)
+        $csv=@(Import-Csv -LiteralPath $path)
+        Assert-True ($rows.Count -gt 0) 'Recovery fixture produced no inventory'
+        Assert-Equal $rows.Count $csv.Count
+        Assert-Equal (($rows.RuleId | Sort-Object) -join ',') (($csv.RuleId | Sort-Object) -join ',')
+        Assert-NoSecret ([IO.File]::ReadAllText($path))
     }
     Invoke-AuxiliaryTest 'an empty all-policy selection exports explicit CSV headers and no fabricated rows' {
         $script:Candidates=@();$path=Join-Path $script:Temporary 'no-policies.csv'
