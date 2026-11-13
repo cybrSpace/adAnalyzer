@@ -29,6 +29,17 @@ $localPath=& {
 if([IO.Path]::GetFullPath($localPath) -ne $expected){throw 'Scoped computer command came from an external dependency'}
 if(Get-Command Get-ADComputer -ListImported -ErrorAction SilentlyContinue){throw 'Local binary import leaked a private AD command'}
 Write-Host 'PASS bundled AD computer metadata is locally scoped without invoking a directory query'
+Add-Type -AssemblyName System.DirectoryServices.AccountManagement -ErrorAction Stop
+$contextType=[System.DirectoryServices.AccountManagement.PrincipalContext]
+$machineType=[System.DirectoryServices.AccountManagement.ContextType]
+$identityType=[System.DirectoryServices.AccountManagement.IdentityType]
+$groupType=[System.DirectoryServices.AccountManagement.GroupPrincipal]
+foreach($signature in @(@($machineType,[string]),@($machineType,[string],[string],[string]))){if($null -eq $contextType.GetConstructor([type[]]$signature)){throw 'Missing host principal context constructor'}}
+if($null -eq $groupType.GetMethod('FindByIdentity',[type[]]@($contextType,$identityType,[string]))){throw 'Missing host group lookup signature'}
+foreach($name in @('Name','SamAccountName','Sid','Description')){if($null -eq $groupType.GetProperty($name)){throw ('Missing principal metadata getter '+$name)}}
+if(-not [IDisposable].IsAssignableFrom($contextType) -or -not [IDisposable].IsAssignableFrom($groupType)){throw 'Principal ownership contract is not disposable'}
+if(-not [Enum]::IsDefined($machineType,'Machine') -or -not [Enum]::IsDefined($identityType,'SamAccountName')){throw 'Missing machine/SAM lookup enums'}
+Write-Host 'PASS host principal framework metadata supports detached snapshots without creating an authentication context'
 if(Get-Module -Name GroupPolicy){throw 'Unexpected external GroupPolicy module'}
 if($module.ExportedCmdlets.Count -or $module.ExportedVariables.Count){throw 'Internal AD commands or script variables leaked from the public package interface'}
 foreach($name in @('Get-ADAnalyzerGpo','Get-ADAnalyzerGpoReport','Read-ADAnalyzerGpo')){
