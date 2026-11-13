@@ -88,6 +88,13 @@ if(-not [IDisposable].IsAssignableFrom($entryType) -or $null -eq $entryType.GetC
 $localUser=Get-Command Get-LocalUser -CommandType Cmdlet -ErrorAction SilentlyContinue
 if($localUser -and -not $localUser.Parameters.ContainsKey('SID')){throw 'Local account lookup lacks exact SID support'}
 Write-Host 'PASS local-admin SID and ADSI metadata without account translation or enumeration'
+foreach($name in @('Invoke-RestMethod','Invoke-WebRequest')){
+    $command=Get-Command $name -CommandType Cmdlet -Module Microsoft.PowerShell.Utility -ErrorAction Stop
+    $timeout=@($command.Parameters.Values | Where-Object {$_.Name -eq 'TimeoutSec' -or $_.Aliases -contains 'TimeoutSec'})
+    if($timeout.Count -ne 1){throw ('Missing compatible request timeout for '+$name)}
+    foreach($parameter in @('Uri','Method','Body','WebSession','UseBasicParsing','UserAgent')){if(-not $command.Parameters.ContainsKey($parameter)){throw ('Missing SAML request parameter '+$parameter)}}
+}
+Write-Host 'PASS native SAML request timeout metadata without HTTP'
 if(Get-Module -Name GroupPolicy){throw 'Unexpected external GroupPolicy module'}
 if($module.ExportedCmdlets.Count -or $module.ExportedVariables.Count){throw 'Internal AD commands or script variables leaked from the public package interface'}
 foreach($name in @('Get-ADAnalyzerGpo','Get-ADAnalyzerGpoReport','Read-ADAnalyzerGpo')){
