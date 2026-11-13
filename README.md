@@ -49,6 +49,8 @@ Registry source identities from the outer GPO reader are `Machine/Registry.pol` 
 
 All relative GPO source and inventory paths use forward slashes across Windows and portable offline hosts. Physical file-read paths and the returned policy root are preserved. Older snapshots containing native backslash separators may show identity or evidence changes when compared with canonical-path snapshots.
 
+Local Users and Groups preference checks follow their scope, source, and UID; missing UIDs use a file-local XML path. Security-option checks follow their scope, source, and setting. Unrelated file/item insertion or source removal does not renumber existing identities. Repeated identities remain separate, with occurrence suffixes confined to their duplicate family. Missing-UID sibling positions and ambiguous duplicate occurrences can still change identity when those items are reordered. Older ordinal-based snapshots may show identity changes when compared with these snapshots.
+
 This is a file-based policy reader, not a GPMC HTML report generator or an ADMX display-name engine. Scripts and other unsupported client-side extension formats are inventoried rather than interpreted; parsed settings are not a calculation of effective policy or RSoP. Offline parsing is portable; live directory/SMB integration is supported on Windows. The older GroupPolicy DLLs in `lib` are not loaded.
 
 The standalone `etc/Get-GPOXML.ps1` and `etc/Get-LocalAdminGPO.ps1` scripts also use the package reader. They require explicit targets and selection, return XML or canonical check objects, and write only when `OutputPath` is supplied. Dot sourcing defines their functions without connecting, importing native modules, prompting, or opening files:

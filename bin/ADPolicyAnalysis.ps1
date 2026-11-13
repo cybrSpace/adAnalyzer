@@ -43,6 +43,28 @@ function Get-ADAnalyzerPolicyXmlPath {
     return $parts -join '/'
 }
 
+function Join-ADAnalyzerPolicyIdentity {
+    param([string[]]$Parts)
+    $result=[Text.StringBuilder]::new()
+    foreach($part in $Parts){
+        $text=[string]$part
+        $null=$result.Append($text.Length.ToString([Globalization.CultureInfo]::InvariantCulture)).Append(':').Append($text)
+    }
+    $result.ToString()
+}
+
+function Resolve-ADAnalyzerPolicyIdentityCollisions {
+    param([string[]]$Targets)
+    $counts=[Collections.Generic.Dictionary[string,int]]::new([StringComparer]::OrdinalIgnoreCase)
+    $seen=[Collections.Generic.Dictionary[string,int]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach($identity in $Targets){if($counts.ContainsKey($identity)){$counts[$identity]++}else{$counts[$identity]=1}}
+    foreach($identity in $Targets){
+        if($counts[$identity] -eq 1){$identity;continue}
+        if($seen.ContainsKey($identity)){$seen[$identity]++}else{$seen[$identity]=1}
+        $identity+'/duplicate/'+$seen[$identity].ToString([Globalization.CultureInfo]::InvariantCulture)
+    }
+}
+
 function Get-ADAnalyzerPolicyApplicability {
     param($Gpo,[string]$Scope,[hashtable]$Profile,[switch]$Targeted,[switch]$Disabled)
     $flags=Get-ADAnalyzerPolicyValue $Gpo Flags 0
@@ -146,7 +168,7 @@ function ConvertFrom-ADAnalyzerLocalUsersGroups {
             if($item.LocalName -eq 'User'){$targetSid=Get-ADAnalyzerXmlAttribute $properties userSid (Get-ADAnalyzerXmlAttribute $properties sid)}
             $targetName=Get-ADAnalyzerXmlAttribute $properties $(if($item.LocalName -eq 'Group'){'groupName'}else{'userName'})
             $sidValid=-not $targetSid -or $targetSid -match '^S-\d+(-\d+)+$'
-            [pscustomobject]@{Scope=$record.File.Scope;Source=$record.File.Path;Kind=$item.LocalName;Uid=(Get-ADAnalyzerXmlAttribute $item uid);Name=$targetName;Sid=$targetSid;Action=$action;Disabled=($disabled -in '1','true');AccountDisabled=(Get-ADAnalyzerXmlAttribute $properties disabled);PasswordNeverExpires=(Get-ADAnalyzerXmlAttribute $properties neverExpires);Targeted=($null -ne $filters -and $filters.HasChildNodes);Filters=(Get-ADAnalyzerPresencePolicyXml $filters);DeleteAllUsers=(Get-ADAnalyzerXmlAttribute $properties deleteAllUsers '0') -in '1','true';DeleteAllGroups=(Get-ADAnalyzerXmlAttribute $properties deleteAllGroups '0') -in '1','true';RemovePolicy=(Get-ADAnalyzerXmlAttribute $item removePolicy '0') -in '1','true';Members=$members;Valid=($null -ne $properties -and $sidValid -and $disabled -in '0','1','true','false' -and $action -in 'C','U','R','D' -and @($members | Where-Object {-not $_.Valid -or $_.Action -notin 'ADD','REMOVE'}).Count -eq 0)}
+            [pscustomobject]@{Scope=$record.File.Scope;Source=$record.File.Path;Kind=$item.LocalName;Uid=(Get-ADAnalyzerXmlAttribute $item uid);ItemPath=(Get-ADAnalyzerPolicyXmlPath $item);Name=$targetName;Sid=$targetSid;Action=$action;Disabled=($disabled -in '1','true');AccountDisabled=(Get-ADAnalyzerXmlAttribute $properties disabled);PasswordNeverExpires=(Get-ADAnalyzerXmlAttribute $properties neverExpires);Targeted=($null -ne $filters -and $filters.HasChildNodes);Filters=(Get-ADAnalyzerPresencePolicyXml $filters);DeleteAllUsers=(Get-ADAnalyzerXmlAttribute $properties deleteAllUsers '0') -in '1','true';DeleteAllGroups=(Get-ADAnalyzerXmlAttribute $properties deleteAllGroups '0') -in '1','true';RemovePolicy=(Get-ADAnalyzerXmlAttribute $item removePolicy '0') -in '1','true';Members=$members;Valid=($null -ne $properties -and $sidValid -and $disabled -in '0','1','true','false' -and $action -in 'C','U','R','D' -and @($members | Where-Object {-not $_.Valid -or $_.Action -notin 'ADD','REMOVE'}).Count -eq 0)}
         }
     }
 }
@@ -326,9 +348,10 @@ function Test-ADAnalyzerGpoPolicy {
             $rows+=[pscustomobject]@{Scope=$setting.Scope;Source=$setting.Source;Value=$rawValue;Type=$type;Raw=$raw;Deleted=$false;ValueValid=(Get-ADAnalyzerPolicyValue $setting ValueValid $null)}
         }
         if(-not $rows.Count){New-ADAnalyzerCheck -RuleId ('GPO.Security.'+$spec.Id) -Status NotConfigured -Severity High -Category SecurityOptions -Target ($target+'/Security/'+$spec.Id) -Observed $null -Expected $spec.Expected -Evidence @{Name=$spec.Name} -Message 'This GPO does not configure this supported baseline setting.' -Applicability Unknown;continue}
-        $ordinal=0
+        $sourceTargets=@(foreach($row in $rows){$target+'/'+$row.Scope+'/'+([string]$row.Source).Replace('\','/')+'/Security/'+$spec.Id})
+        $rowTargets=@(Resolve-ADAnalyzerPolicyIdentityCollisions -Targets $sourceTargets);$rowIndex=0
         foreach($row in $rows){
-            $ordinal++;$status='Unknown';$valid=$true;$pass=$false;$observed=$row.Value
+            $checkTarget=$rowTargets[$rowIndex];$rowIndex++;$status='Unknown';$valid=$true;$pass=$false;$observed=$row.Value
             if(-not (Test-ADAnalyzerPolicyValueValid $row)){$status='Invalid'}
             elseif($row.Deleted){$status='NotConfigured'}
             elseif($null -ne $row.Type -and $null -ne $spec.Type -and $row.Type -ne $spec.Type){$status='Invalid'}
@@ -351,7 +374,7 @@ function Test-ADAnalyzerGpoPolicy {
                 }
                 $status=if(-not $valid){'Invalid'}elseif($pass){'Pass'}else{'Fail'}
             }
-            New-ADAnalyzerCheck -RuleId ('GPO.Security.'+$spec.Id) -Status $status -Severity High -Category SecurityOptions -Target ($target+'/'+$row.Scope+'/'+$row.Source+'/Security/'+$spec.Id+'/'+$ordinal) -Observed $observed -Expected $spec.Expected -Evidence @{Name=$spec.Name;RegistryType=$row.Type;Path=$row.Source;Deleted=$row.Deleted} -Message 'Stored security policy was validated and compared with the profile; this is not a calculation of effective policy.' -Applicability (Get-ADAnalyzerPolicyApplicability $Gpo $row.Scope $Profile)
+            New-ADAnalyzerCheck -RuleId ('GPO.Security.'+$spec.Id) -Status $status -Severity High -Category SecurityOptions -Target $checkTarget -Observed $observed -Expected $spec.Expected -Evidence @{Name=$spec.Name;RegistryType=$row.Type;Path=$row.Source;Deleted=$row.Deleted} -Message 'Stored security policy was validated and compared with the profile; this is not a calculation of effective policy.' -Applicability (Get-ADAnalyzerPolicyApplicability $Gpo $row.Scope $Profile)
         }
     }
 
@@ -366,13 +389,18 @@ function Test-ADAnalyzerGpoPolicy {
         New-ADAnalyzerCheck -RuleId 'GPO.RestrictedGroups.LocalAdministrators' -Status $status -Severity High -Category RestrictedGroups -Target ($target+'/'+$group.Scope+'/'+$group.Source+'/'+$group.SettingName) -Observed $group -Expected $approved -Evidence @{Path=$group.Source;Mode=$group.Mode} -Message 'Members replaces the configured membership; MemberOf requires inclusion. Names without a SID cannot be approved by the SID allowlist.' -Applicability (Get-ADAnalyzerPolicyApplicability $Gpo $group.Scope $Profile)
     }
     if(-not $restricted.Count){New-ADAnalyzerCheck -RuleId 'GPO.RestrictedGroups.LocalAdministrators' -Status NotConfigured -Severity High -Category RestrictedGroups -Target ($target+'/RestrictedGroups') -Observed $null -Expected $approved -Evidence $null -Message 'No Restricted Groups configuration was found in this GPO.' -Applicability Unknown}
-    $local=@(ConvertFrom-ADAnalyzerLocalUsersGroups $Policy.XmlFiles);$index=0
+    $local=@(ConvertFrom-ADAnalyzerLocalUsersGroups $Policy.XmlFiles)
+    $itemIdentities=@(foreach($item in $local){
+        $kind=if($item.Uid){'Uid'}else{'Path'};$identity=if($item.Uid){$item.Uid}else{$item.ItemPath}
+        $target+'/LocalUsersGroups/'+(Join-ADAnalyzerPolicyIdentity -Parts @($item.Scope,([string]$item.Source).Replace('\','/'),$kind,$identity))
+    })
+    $itemTargets=@(Resolve-ADAnalyzerPolicyIdentityCollisions -Targets $itemIdentities);$itemIndex=0
     foreach($item in $local){
-        $index++;$privileged=$item.Sid -eq 'S-1-5-32-544' -or $item.Name -ieq 'Administrators'
+        $checkTarget=$itemTargets[$itemIndex];$itemIndex++;$privileged=$item.Sid -eq 'S-1-5-32-544' -or $item.Name -ieq 'Administrators'
         $additions=@($item.Members | Where-Object Action -eq 'ADD');$unknown=@($additions | Where-Object {-not $_.Sid}).Count -gt 0
         $bad=@($additions | Where-Object {$_.Sid -and $approved -notcontains $_.Sid})
         $status=if(-not $item.Valid){'Invalid'}elseif($item.Disabled -or $item.Action -eq 'D'){'NotApplicable'}elseif($item.Kind -ne 'Group' -or -not $privileged){'Unknown'}elseif($bad.Count){'Fail'}elseif($unknown){'Unknown'}else{'Pass'}
-        New-ADAnalyzerCheck -RuleId 'GPO.Preferences.LocalUsersGroups' -Status $status -Severity High -Category LocalUsersGroups -Target ($target+'/'+$item.Scope+'/'+$item.Source+'/'+$item.Uid+'/'+$index) -Observed $item -Expected $approved -Evidence @{Path=$item.Source;Targeting=$item.Targeted;Disabled=$item.Disabled;Action=$item.Action} -Message 'Preference actions and member additions/removals are preserved. Targeting filters have not been evaluated, and an update is not a complete effective membership inventory.' -Applicability (Get-ADAnalyzerPolicyApplicability $Gpo $item.Scope $Profile -Targeted:$item.Targeted -Disabled:$item.Disabled)
+        New-ADAnalyzerCheck -RuleId 'GPO.Preferences.LocalUsersGroups' -Status $status -Severity High -Category LocalUsersGroups -Target $checkTarget -Observed $item -Expected $approved -Evidence @{Path=$item.Source;Targeting=$item.Targeted;Disabled=$item.Disabled;Action=$item.Action} -Message 'Preference actions and member additions/removals are preserved. Targeting filters have not been evaluated, and an update is not a complete effective membership inventory.' -Applicability (Get-ADAnalyzerPolicyApplicability $Gpo $item.Scope $Profile -Targeted:$item.Targeted -Disabled:$item.Disabled)
     }
     if(-not $local.Count){New-ADAnalyzerCheck -RuleId 'GPO.Preferences.LocalUsersGroups' -Status NotConfigured -Severity High -Category LocalUsersGroups -Target ($target+'/LocalUsersGroups') -Observed $null -Expected $approved -Evidence $null -Message 'No Local Users and Groups preference was found in this GPO.' -Applicability Unknown}
 

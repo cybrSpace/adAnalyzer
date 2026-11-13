@@ -5,6 +5,7 @@ if(-not $RepositoryRoot){$RepositoryRoot=Split-Path -Parent (Split-Path -Parent 
 . (Join-Path $RepositoryRoot 'bin/ADProfile.ps1')
 . (Join-Path $RepositoryRoot 'bin/ADGpo.ps1')
 . (Join-Path $RepositoryRoot 'bin/ADPolicyAnalysis.ps1')
+. (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')
 $script:Passed=0;$script:Failed=0
 function Assert-Policy($Actual,[string]$Message){if(-not $Actual){throw $Message}}
 function Test-Policy([string]$Name,[scriptblock]$Body){try{& $Body;$script:Passed++;Write-Host "PASS $Name"}catch{$script:Failed++;Write-Host "FAIL $Name : $_";Write-Host $_.ScriptStackTrace}}
@@ -13,6 +14,75 @@ function New-RegistryFixture([string]$Key,[string]$ValueName,$Value,[int]$Type=4
 function Get-PolicyChecks($Policy,$Profile=$script:Profile,$Gpo=$script:Gpo){@(Test-ADAnalyzerGpoPolicy -Gpo $Gpo -Policy $Policy -Profile $Profile)}
 $script:Profile=Get-ADAnalyzerDefaultProfile
 $script:Gpo=[pscustomobject]@{Id=[guid]'11111111-1111-1111-1111-111111111111';Flags=0;Links=@()}
+
+function New-IdentityPreferenceFile([string]$Path,[object[]]$Entries,[string]$Scope='Computer'){
+    $document=[xml]'<Groups/>'
+    foreach($entry in $Entries){
+        $item=$document.CreateElement('Group');if($null -ne $entry.Uid){$item.SetAttribute('uid',[string]$entry.Uid)}
+        $properties=$document.CreateElement('Properties');$properties.SetAttribute('action','U');$properties.SetAttribute('groupSid','S-1-5-32-544');$properties.SetAttribute('groupName','Administrators')
+        $null=$item.AppendChild($properties);$null=$document.DocumentElement.AppendChild($item)
+    }
+    [pscustomobject]@{Scope=$Scope;Path=$Path;Kind='Preferences';Xml=$document.OuterXml}
+}
+function Get-IdentityPreferenceChecks($Policy){@(Get-PolicyChecks $Policy | Where-Object RuleId -eq 'GPO.Preferences.LocalUsersGroups')}
+Test-Policy 'GPP UID identities survive unrelated insertion item reorder and file reorder' {
+    $before=New-PolicyFixture;$before.XmlFiles=@(
+        (New-IdentityPreferenceFile 'Machine/Preferences/A.xml' @(@{Uid='alpha'},@{Uid='beta'})),
+        (New-IdentityPreferenceFile 'Machine/Preferences/B.xml' @(@{Uid='gamma'}))
+    )
+    $after=New-PolicyFixture;$after.XmlFiles=@(
+        $before.XmlFiles[1],(New-IdentityPreferenceFile 'Machine/Preferences/A.xml' @(@{Uid='unrelated'},@{Uid='beta'},@{Uid='alpha'}))
+    )
+    $source=ConvertTo-Json -InputObject $before -Depth 100 -Compress
+    $old=@(Get-IdentityPreferenceChecks $before);$new=@(Get-IdentityPreferenceChecks $after)
+    foreach($check in $old){$match=@($new | Where-Object {$_.Observed.Uid -eq $check.Observed.Uid});Assert-Policy ($match.Count -eq 1 -and $match[0].CheckId -eq $check.CheckId) 'Unrelated GPP change renumbered an existing UID'}
+    $comparison=Compare-ADAnalyzerAssessment @{SchemaVersion=1;Checks=$old} @{SchemaVersion=1;Checks=$new}
+    Assert-Policy ($comparison.Summary.Unchanged -eq 3 -and $comparison.Summary.New -eq 1 -and $comparison.Summary.Changed -eq 0) 'UID comparison introduced false drift'
+    Assert-Policy ($source -eq (ConvertTo-Json -InputObject $before -Depth 100 -Compress)) 'Identity evaluation mutated source'
+}
+Test-Policy 'GPP identity collisions remain local and missing UIDs remain file-local' {
+    $policy=New-PolicyFixture;$policy.XmlFiles=@(
+        (New-IdentityPreferenceFile 'Machine/Preferences/A.xml' @(@{Uid='dup'},@{Uid='dup'},@{Uid='dup/duplicate/1'},@{})),
+        (New-IdentityPreferenceFile 'Machine/Preferences/B.xml' @(@{Uid='dup'},@{})),
+        (New-IdentityPreferenceFile 'User/Preferences/A.xml' @(@{Uid='dup'}) User),
+        (New-IdentityPreferenceFile 'Machine/Preferences/A.xml/Uid' @(@{Uid='literal'})),
+        (New-IdentityPreferenceFile 'Machine/Preferences/A.xml' @(@{Uid='Uid/literal'}))
+    )
+    $old=@(Get-IdentityPreferenceChecks $policy)
+    Assert-Policy ($old.Count -eq 9 -and @($old | Group-Object CheckId | Where-Object Count -gt 1).Count -eq 0) 'Duplicate records were dropped or identities collided'
+    $reordered=New-PolicyFixture;$files=@($policy.XmlFiles);[array]::Reverse($files)
+    $reordered.XmlFiles=@((New-IdentityPreferenceFile 'Machine/Preferences/Other.xml' @(@{Uid='unrelated'})))+$files
+    $new=@(Get-IdentityPreferenceChecks $reordered)
+    $comparison=Compare-ADAnalyzerAssessment @{SchemaVersion=1;Checks=$old} @{SchemaVersion=1;Checks=$new}
+    Assert-Policy ($comparison.Summary.Unchanged -eq 9 -and $comparison.Summary.New -eq 1 -and $comparison.Summary.Changed -eq 0) 'File order or another family renumbered retained items'
+    $missing=@($old | Where-Object {-not $_.Observed.Uid})
+    Assert-Policy ($missing.Count -eq 2 -and @($missing | Where-Object {-not $_.Observed.ItemPath}).Count -eq 0) 'Missing UID lost its file-local path'
+}
+Test-Policy 'GPP literal identity components support long and non-ASCII UIDs without encoding limits' {
+    $uid=('x'*70000)+[char]0x00FC+'/duplicate/1:|'
+    $policy=New-PolicyFixture;$policy.XmlFiles=@(New-IdentityPreferenceFile 'Machine/Preferences/Long.xml' @(@{Uid=$uid},@{Uid='short'}))
+    $checks=@(Get-IdentityPreferenceChecks $policy)
+    Assert-Policy ($checks.Count -eq 2 -and $checks[0].Observed.Uid.Length -eq $uid.Length) 'Large UID was truncated or rejected'
+    Assert-Policy ($checks[0].CheckId -ne $checks[1].CheckId) 'Literal identity components collided'
+}
+Test-Policy 'repeated security source identities keep all rows and local occurrence numbers' {
+    $source='Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf';$name='Network access: Named Pipes that can be accessed anonymously'
+    $policy=New-PolicyFixture;$policy.SecuritySettings=@(
+        [pscustomobject]@{Scope='Computer';Source=$source;Kind='SecurityOptions';Name=$name;Value='LSARPC'},
+        [pscustomobject]@{Scope='Computer';Source=$source;Kind='SecurityOptions';Name=$name;Value='NETLOGON'},
+        [pscustomobject]@{Scope='User';Source='User/Microsoft/Windows NT/SecEdit/GptTmpl.inf';Kind='SecurityOptions';Name=$name;Value='SAMR'}
+    )
+    $policy.RegistrySettings=@(New-RegistryFixture 'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters' NullSessionPipes @('LSARPC') 7)
+    $before=ConvertTo-Json -InputObject $policy -Depth 100 -Compress
+    $old=@(Get-PolicyChecks $policy | Where-Object RuleId -eq GPO.Security.Server.NullSessionPipes)
+    $other=New-PolicyFixture;$other.SecuritySettings=$policy.SecuritySettings
+    $new=@(Get-PolicyChecks $other | Where-Object RuleId -eq GPO.Security.Server.NullSessionPipes)
+    Assert-Policy ($old.Count -eq 4 -and $new.Count -eq 3 -and @($old | Group-Object CheckId | Where-Object Count -gt 1).Count -eq 0) 'Repeated security rows were dropped or collided'
+    foreach($check in $new){Assert-Policy ($check.CheckId -in $old.CheckId -and $check.Status -eq 'Pass') 'Another source changed retained security identity or evaluation'}
+    $comparison=Compare-ADAnalyzerAssessment @{SchemaVersion=1;Checks=$old} @{SchemaVersion=1;Checks=$new}
+    Assert-Policy ($comparison.Summary.Unchanged -eq 3 -and $comparison.Summary.Changed -eq 1 -and $comparison.Summary.New -eq 0) 'Security comparison introduced false drift'
+    Assert-Policy ($before -eq (ConvertTo-Json -InputObject $policy -Depth 100 -Compress)) 'Security identity evaluation mutated source'
+}
 
 Test-Policy 'direct raw profiles reject secret-value rules before emitting any policy checks' {
     foreach($section in @('RegistryRules','ExpectedGpoSettings')){foreach($rule in @(

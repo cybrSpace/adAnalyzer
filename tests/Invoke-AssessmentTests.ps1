@@ -54,6 +54,26 @@ function New-RegistryIdentityFixture([string]$Name,[switch]$Deleted){
 }
 $temp=Join-Path ([IO.Path]::GetTempPath()) ('ad-assessment-'+[guid]::NewGuid().ToString('N'));$null=New-Item -Path $temp -ItemType Directory
 try {
+    Test-Assessment 'removing Registry.pol preserves an unchanged authoritative INF security check' {
+        $policies=@()
+        foreach($name in @('with-registry-source','without-registry-source')){
+            $root=Join-Path $temp $name;$inf=Join-Path $root 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf'
+            $null=[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($inf))
+            [IO.File]::WriteAllText($inf,"[Registry Values]`nMACHINE\Software\Microsoft\Windows\CurrentVersion\Policies\System\EnableLUA=4,0")
+            if($name -eq 'with-registry-source'){Write-AssessmentPol (Join-Path $root 'Machine/Registry.pol') @(@{Key='Software\Microsoft\Windows\CurrentVersion\Policies\System';Name='EnableLUA';Type=4;Bytes=[BitConverter]::GetBytes([uint32]1)})}
+            $gpo=[pscustomobject]@{Id=[guid]'11111111-1111-1111-1111-111111111111';Flags=0;Links=@()}
+            $policies+=Invoke-ADAnalyzerAssessment -DirectoryData (New-AssessmentFixture) -GpoData @([pscustomobject]@{Gpo=$gpo;Policy=(Read-ADAnalyzerGpo $root)})
+        }
+        $rule='GPO.Security.SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\EnableLUA'
+        $old=@($policies[0].Checks | Where-Object {$_.RuleId -eq $rule -and $_.Evidence.Path -like '*GptTmpl.inf'})
+        $new=@($policies[1].Checks | Where-Object {$_.RuleId -eq $rule -and $_.Evidence.Path -like '*GptTmpl.inf'})
+        Assert-Equal 1 $old.Count;Assert-Equal 1 $new.Count;Assert-Equal Fail $old[0].Status;Assert-Equal Fail $new[0].Status
+        Assert-Equal $old[0].CheckId $new[0].CheckId
+        $changes=@((Compare-ADAnalyzerAssessment $policies[0] $policies[1]).Changes | Where-Object RuleId -eq $rule.ToUpperInvariant())
+        Assert-Equal 1 @($changes | Where-Object Change -eq Unchanged).Count
+        Assert-Equal 1 @($changes | Where-Object {$_.Change -eq 'Changed' -and $_.Reason -eq 'NotObservedInDifference'}).Count
+        Assert-Equal 0 @($changes | Where-Object Change -eq New).Count
+    }
     Test-Assessment 'logical GPO paths are canonical and comparisons survive physical separator differences' {
         $root=Join-Path $temp 'logical-source';$null=[IO.Directory]::CreateDirectory((Join-Path $root 'Machine'));$null=[IO.Directory]::CreateDirectory((Join-Path $root 'User'))
         $script:LogicalSourceRoot=(Get-Item -LiteralPath $root).FullName
