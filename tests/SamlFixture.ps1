@@ -49,7 +49,7 @@ try{
         else{
             $savedPreference=$ErrorActionPreference
             try{$ErrorActionPreference='Continue';$fresh=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $path 2>&1);$freshExit=$LASTEXITCODE}finally{$ErrorActionPreference=$savedPreference}
-            Assert-Saml ($freshExit -ne 0 -and ($fresh -join ' ') -match 'Specify ConfigPath') 'Fresh CLI did not reach explicit-config guard'
+            Assert-Saml ($freshExit -ne 0 -and ($fresh -join ' ') -match 'Specify ConfigPath') ('Fresh CLI did not reach explicit-config guard; exit='+$freshExit+'; output='+($fresh -join ' | '))
             $json=Join-Path $WorkingDirectory 'config.json';[IO.File]::WriteAllText($json,(@{Url=$urls;Config=$config} | ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($true))
             $caught=$false;try{& $path | Out-Null}catch{$caught=$true};Assert-Saml ($caught -and $global:SamlProbe.Calls.Count -eq 0) 'CLI authenticated without explicit configuration'
             $csv=Join-Path $WorkingDirectory 'cli.csv';$rows=@(& $path -ConfigPath $json -Credential $credential -OutputPath $csv)
