@@ -67,6 +67,24 @@ foreach($spec in @(
     foreach($parameter in $spec.Parameters){if(-not $command.Parameters.ContainsKey($parameter)){throw ('Missing CIM parameter '+$spec.Name+'.'+$parameter)}}
 }
 Write-Host 'PASS CIM inventory operation metadata without connecting to a host'
+& {
+    . (Join-Path $RepositoryRoot 'etc/Get-LocalAdministrators.ps1')
+    $cloud='S-1-12-1-1-2-3-4'
+    $sid=[Security.Principal.SecurityIdentifier]::new($cloud)
+    $bytes=[byte[]]::new($sid.BinaryLength);$sid.GetBinaryForm($bytes,0)
+    foreach($value in @($cloud,([object]$bytes))){
+        $evidence=ConvertTo-LocalAdminSidEvidence -Value $value
+        if($evidence.SidValid -ne $true -or $evidence.SID -cne $cloud){throw 'Valid cloud SID failed native parsing'}
+    }
+    $bad=ConvertTo-LocalAdminSidEvidence -Value 'malformed'
+    $missing=ConvertTo-LocalAdminSidEvidence -Value $null
+    if($bad.SidValid -ne $false -or $null -ne $missing.SidValid){throw 'Invalid and absent native SID evidence were conflated'}
+}
+$entryType=[DirectoryServices.DirectoryEntry]
+if(-not [IDisposable].IsAssignableFrom($entryType) -or $null -eq $entryType.GetConstructor([type[]]@([string])) -or $null -eq $entryType.GetMethod('Invoke',[type[]]@([string],[object[]]))){throw 'Local ADSI ownership/invocation metadata is unavailable'}
+$localUser=Get-Command Get-LocalUser -CommandType Cmdlet -ErrorAction SilentlyContinue
+if($localUser -and -not $localUser.Parameters.ContainsKey('SID')){throw 'Local account lookup lacks exact SID support'}
+Write-Host 'PASS local-admin SID and ADSI metadata without account translation or enumeration'
 if(Get-Module -Name GroupPolicy){throw 'Unexpected external GroupPolicy module'}
 if($module.ExportedCmdlets.Count -or $module.ExportedVariables.Count){throw 'Internal AD commands or script variables leaked from the public package interface'}
 foreach($name in @('Get-ADAnalyzerGpo','Get-ADAnalyzerGpoReport','Read-ADAnalyzerGpo')){
