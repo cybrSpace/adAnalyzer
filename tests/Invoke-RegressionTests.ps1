@@ -14,6 +14,27 @@ namespace Microsoft.ActiveDirectory.Management.Provider { public class ADDriveIn
 $temporary=Join-Path ([IO.Path]::GetTempPath()) ('ad-entry-tests-'+[guid]::NewGuid().ToString('N'))
 $null=New-Item -Path $temporary -ItemType Directory
 try {
+    foreach($mode in @('Default','Explicit')){
+        Invoke-Test ('optional installer direct file entry is inert under WhatIf: '+$mode) {
+            $root=Join-Path $temporary ('installer entry '+$mode);$directory=Join-Path $root 'etc';$null=[IO.Directory]::CreateDirectory($directory)
+            $fingerprints=@{}
+            foreach($name in @('Install-DevelopmentTools.ps1','DevelopmentDependencies.psd1')){
+                $source=Join-Path (Join-Path $RepositoryRoot 'etc') $name;$destination=Join-Path $directory $name
+                [IO.File]::Copy($source,$destination)
+                $fingerprints[$destination]=[Convert]::ToBase64String([IO.File]::ReadAllBytes($source))
+            }
+            $installer=Join-Path $directory 'Install-DevelopmentTools.ps1';$extra=@()
+            $destination=if($mode -eq 'Explicit'){Join-Path $root 'explicit destination'}else{Join-Path $root 'tools/modules'}
+            if($mode -eq 'Explicit'){$extra=@('-Path',$destination)}
+            $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $installer -WhatIf @extra 2>&1)
+            Assert-Equal 0 $LASTEXITCODE
+            Assert-Equal 0 @($output | Where-Object {$_ -is [Management.Automation.ErrorRecord]}).Count
+            foreach($name in (Import-PowerShellDataFile -LiteralPath (Join-Path $directory 'DevelopmentDependencies.psd1')).Keys){Assert-True (($output -join ' ') -match [regex]::Escape($name)) ('Installer did not reach WhatIf for '+$name)}
+            Assert-Equal $false (Test-Path -LiteralPath $destination)
+            Assert-Equal 2 @(Get-ChildItem -LiteralPath $root -Recurse -File -Force).Count
+            foreach($path in $fingerprints.Keys){Assert-Equal $fingerprints[$path] ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)))}
+        }
+    }
     Invoke-Test 'all package PowerShell files parse without syntax errors' {
         foreach($file in Get-ChildItem -LiteralPath (Join-Path $RepositoryRoot 'bin') -File | Where-Object Extension -in '.ps1','.psm1') {
             $tokens=$null;$errors=$null;$null=[Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$tokens,[ref]$errors)
