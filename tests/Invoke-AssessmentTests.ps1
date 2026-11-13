@@ -21,8 +21,73 @@ function New-AssessmentFixture([string]$Domain='example.invalid') {
 function New-PolicyFixture {
     [pscustomobject]@{Path='fixture';SysvolVersion=1;SecuritySettings=@();RegistrySettings=@();XmlFiles=@();IniSettings=@();Files=@();UnparsedFiles=@()}
 }
+function Write-AssessmentPol([string]$Path,[array]$Records){
+    $null=[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Path))
+    $stream=[IO.File]::Create($Path);$writer=[IO.BinaryWriter]::new($stream)
+    try{
+        $writer.Write([Text.Encoding]::ASCII.GetBytes('PReg'));$writer.Write([uint32]1)
+        foreach($row in $Records){
+            $writer.Write([uint16]91)
+            $writer.Write([Text.Encoding]::Unicode.GetBytes($row.Key+[char]0));$writer.Write([uint16]59)
+            $writer.Write([Text.Encoding]::Unicode.GetBytes($row.Name+[char]0));$writer.Write([uint16]59)
+            $writer.Write([uint32]$row.Type);$writer.Write([uint16]59)
+            $writer.Write([uint32]$row.Bytes.Length);$writer.Write([uint16]59);$writer.Write([byte[]]$row.Bytes);$writer.Write([uint16]93)
+        }
+    }finally{$writer.Dispose();$stream.Dispose()}
+}
+function New-RegistryIdentityFixture([string]$Name,[switch]$Deleted){
+    $root=Join-Path $temp $Name;$templates=Join-Path $root 'templates'
+    $null=[IO.Directory]::CreateDirectory((Join-Path $templates 'en-US'))
+    [IO.File]::WriteAllText((Join-Path $templates 'fixture.admx'),'<policyDefinitions><policyNamespaces><target prefix="f" namespace="Fixture.Policies"/></policyNamespaces><policies><policy name="EnabledPolicy" class="Both" displayName="$(string.Title)" key="Software\Fixture" valueName="Enabled"><enabledValue><decimal value="1"/></enabledValue><disabledValue><delete/></disabledValue></policy></policies></policyDefinitions>')
+    [IO.File]::WriteAllText((Join-Path $templates 'en-US/fixture.adml'),'<policyDefinitionResources><resources><stringTable><string id="Title">Fixture title</string></stringTable></resources></policyDefinitionResources>')
+    foreach($side in @('Machine','User')){
+        $rows=@(@{Key='Software\Fixture';Name='Enabled';Type=4;Bytes=[BitConverter]::GetBytes([uint32]0)},@{Key='Software\Fixture';Name='Enabled';Type=4;Bytes=[BitConverter]::GetBytes([uint32]1)})
+        if($Deleted){$rows+=@{Key='Software\Fixture';Name='**del.Enabled';Type=1;Bytes=[byte[]]@()}}
+        $rows+=@{Key='Software\Fixture';Name='DefaultPassword';Type=1;Bytes=[Text.Encoding]::Unicode.GetBytes("REGISTRY_IDENTITY_FIXTURE_SECRET`0")}
+        if($side -eq 'Machine'){$rows+=@{Key='Software\Microsoft\Windows\CurrentVersion\Policies\System';Name='EnableLUA';Type=4;Bytes=[BitConverter]::GetBytes([uint32]1)}}
+        Write-AssessmentPol (Join-Path $root ($side+'/Registry.pol')) $rows
+    }
+    [IO.File]::WriteAllText((Join-Path $root 'GPT.INI'),"[General]`nVersion=1")
+    $policy=Read-ADAnalyzerGpo $root
+    $profile=@{Analysis=@{TemplatePath=$templates};RegistryRules=@(@{Id='FixtureEnabled';Hive='HKLM';Key='Software\Fixture';ValueName='Enabled';Expected=1;Type=4})}
+    [pscustomobject]@{Root=$root;Policy=$policy;Profile=$profile;Gpo=[pscustomobject]@{Id=[guid]'11111111-1111-1111-1111-111111111111';Version=1;Flags=0;Links=@()}}
+}
 $temp=Join-Path ([IO.Path]::GetTempPath()) ('ad-assessment-'+[guid]::NewGuid().ToString('N'));$null=New-Item -Path $temp -ItemType Directory
 try {
+    Test-Assessment 'registry template metadata uses final effective writes in each hive without altering raw inventory' {
+        foreach($deleted in @($false,$true)){
+            $fixture=New-RegistryIdentityFixture ('registry-effective-'+$deleted) -Deleted:$deleted
+            $before=ConvertTo-Json -InputObject $fixture.Policy -Depth 100 -Compress
+            $bytes=@{};foreach($file in Get-ChildItem -LiteralPath $fixture.Root -Recurse -File){$bytes[$file.FullName]=[Convert]::ToBase64String([IO.File]::ReadAllBytes($file.FullName))}
+            $result=Invoke-ADAnalyzerAssessment -DirectoryData (New-AssessmentFixture) -GpoData @($fixture) -Profile $fixture.Profile
+            $metadata=@($result.Checks | Where-Object {$_.RuleId -eq 'GPO.TEMPLATE_METADATA' -and $_.Observed.ValueName -eq 'Enabled'})
+            Assert-Equal 2 $metadata.Count;Assert-Equal 'HKCU,HKLM' (($metadata.Observed.Hive | Sort-Object) -join ',')
+            foreach($check in $metadata){
+                Assert-Equal Pass $check.Status
+                if($deleted){Assert-Equal Disabled $check.Observed.State;Assert-Equal $true $check.Observed.Deleted}
+                else{Assert-Equal Enabled $check.Observed.State;Assert-Equal 1 $check.Observed.Value;Assert-Equal $false $check.Observed.Deleted}
+            }
+            Assert-Equal 0 @($result.Checks | Group-Object CheckId | Where-Object Count -gt 1).Count
+            Assert-Equal $before (ConvertTo-Json -InputObject $fixture.Policy -Depth 100 -Compress)
+            foreach($path in $bytes.Keys){Assert-Equal $bytes[$path] ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)))}
+            Assert-True ((ConvertTo-Json -InputObject $result -Depth 100) -notmatch 'REGISTRY_IDENTITY_FIXTURE_SECRET|REDACTED') 'Secret escaped metadata assessment'
+        }
+    }
+    Test-Assessment 'identical GPO registry policies at different roots retain unchanged check identities' {
+        $a=New-RegistryIdentityFixture 'registry-root-a';$b=New-RegistryIdentityFixture 'registry-root-b'
+        $before=Invoke-ADAnalyzerAssessment -DirectoryData (New-AssessmentFixture) -GpoData @($a) -Profile $a.Profile
+        $after=Invoke-ADAnalyzerAssessment -DirectoryData (New-AssessmentFixture) -GpoData @($b) -Profile $b.Profile
+        $changes=@((Compare-ADAnalyzerAssessment $before $after).Changes | Where-Object RuleId -like 'GPO.*')
+        Assert-True ($changes.Count -gt 5) 'Registry assessment paths were not exercised'
+        Assert-Equal 0 @($changes | Where-Object Change -ne Unchanged).Count
+        foreach($pattern in @('GPO.SECURITY.*','GPO.EXPECTED.*','GPO.STOREDSECRET','GPO.TEMPLATE_METADATA')){Assert-True (@($changes | Where-Object RuleId -like $pattern).Count -gt 0) ('Missing assessment path '+$pattern)}
+        foreach($rule in @('GPO.Security.SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\EnableLUA','GPO.Expected.FixtureEnabled')){
+            $checks=@($after.Checks | Where-Object RuleId -eq $rule)
+            Assert-Equal 1 $checks.Count;Assert-Equal Pass $checks[0].Status
+            Assert-Equal 'Machine/Registry.pol' $checks[0].Evidence.Path
+        }
+        Assert-Equal 0 @($after.Checks | Where-Object {$_.RuleId -eq 'GPO.StoredSecret' -and $_.Observed -ne $true}).Count
+    }
     Test-Assessment 'offline assessment reports explicit coverage without directory calls' {
         $result=Invoke-ADAnalyzerAssessment -DirectoryData (New-AssessmentFixture)
         Assert-True ($result.Checks.Count -gt 0) 'No checks returned'

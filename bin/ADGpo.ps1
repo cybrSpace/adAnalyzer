@@ -210,7 +210,7 @@ function Read-ADAnalyzerGpo {
                     }
                 }
             } elseif($normalized -ieq ('{0}/Registry.pol' -f $pair[1])) {
-                $kind='RegistryPolicy';foreach($item in @(Read-AnalyzerRegistryPolicy $file.FullName $scope)){$null=$registry.Add($item)}
+                $kind='RegistryPolicy';foreach($item in @(Read-AnalyzerRegistryPolicy $file.FullName $scope)){$item.Source=$pair[1]+'/Registry.pol';$null=$registry.Add($item)}
             } elseif($file.Extension -ieq '.xml') {
                 $kind='Xml';$xml=Read-AnalyzerPolicyXml $file.FullName
                 $xmlKind=if($relative -match '(^|[\\/])Preferences[\\/]'){'Preferences'}else{'Xml'}

@@ -215,6 +215,29 @@ try {
         Assert-True $row.DeletionDirective 'Deletion marker lost';Assert-Equal 0 $row.RawData.Length
         Assert-True ($parsed.RegistrySettings | Where-Object ValueName -eq '').KeyOnly 'Key-only entry lost'
     }
+    Test-Gpo 'outer Registry.pol source identity is relative while low-level paths and bytes are preserved' {
+        $fingerprints=@{}
+        foreach($rootName in @('source-a','source-b')){foreach($side in @('Machine','User')){
+            $path=Join-Path (Join-Path $temp $rootName) ($side+'/Registry.pol')
+            Write-Pol $path @(@{Key='Software\Fixture';Name='Number';Type=4;Bytes=[BitConverter]::GetBytes([uint32]42)},@{Key='Software\Fixture';Name='Bytes';Type=3;Bytes=[byte[]]@(0,255,93,0)})
+            $fingerprints[$path]=[Convert]::ToBase64String([IO.File]::ReadAllBytes($path))
+            $scope=if($side -eq 'Machine'){'Computer'}else{'User'}
+            Assert-Equal $path (@(Read-AnalyzerRegistryPolicy $path $scope)[0].Source)
+        }}
+        foreach($rootName in @('source-a','source-b')){
+            $policy=Read-ADAnalyzerGpo (Join-Path $temp $rootName)
+            Assert-Equal 4 $policy.RegistrySettings.Count
+            foreach($scope in @('Computer','User')){
+                $rows=@($policy.RegistrySettings | Where-Object Scope -eq $scope)
+                $source=if($scope -eq 'Computer'){'Machine/Registry.pol'}else{'User/Registry.pol'}
+                Assert-Equal 0 @($rows | Where-Object Source -ne $source).Count
+                $number=$rows | Where-Object ValueName -eq Number;$bytes=$rows | Where-Object ValueName -eq Bytes
+                Assert-Equal 42 $number.Value;Assert-True ($number.Value -is [uint32]) 'DWORD type changed'
+                Assert-Equal '00-FF-5D-00' ([BitConverter]::ToString($bytes.Value));Assert-Equal '00-FF-5D-00' ([BitConverter]::ToString($bytes.RawData))
+            }
+        }
+        foreach($path in $fingerprints.Keys){Assert-Equal $fingerprints[$path] ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)))}
+    }
     Test-Gpo 'INI XML preferences and unsupported files remain visible' {
         Assert-Equal 65538 $parsed.SysvolVersion
         Assert-Equal 2 $parsed.XmlFiles.Count
