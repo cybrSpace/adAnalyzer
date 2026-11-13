@@ -83,15 +83,21 @@ function Format-WindowsServerException () {
         [Parameter(Mandatory = $true)]
         $value
     )
+    $message=$null
     switch ($constant['error'].Keys) { 
 
         'bad.user' {
 
-            if ($value -match ('({0})' -f ($contains['error'][$_]['value'] -join '|'))) {
+            if ($value -match ('({0})' -f ($constant['error'][$_]['value'] -join '|'))) {
 
-                $var['attempt']++
+                $syncRoot=$var.SyncRoot
+                [Threading.Monitor]::Enter($syncRoot)
+                try {
+                    $var['attempt']++
+                    $exceeded=$var['attempt'] -ge $constant['property']['limit']
+                } finally {[Threading.Monitor]::Exit($syncRoot)}
 
-                if ($var['attempt'] -ge $constant['property']['limit']) {
+                if ($exceeded) {
 
                     throw 'exceeded invalid attempt limit'
 
@@ -111,9 +117,14 @@ function Format-WindowsServerException () {
 
             if ($value -match ('({0})' -f ($constant['error'][$_]['value'] -join '|'))) {
 
-                $var['attempt']++
+                $syncRoot=$var.SyncRoot
+                [Threading.Monitor]::Enter($syncRoot)
+                try {
+                    $var['attempt']++
+                    $exceeded=$var['attempt'] -ge $constant['property']['limit']
+                } finally {[Threading.Monitor]::Exit($syncRoot)}
 
-                if ($var['attempt'] -ge $constant['property']['limit']) {
+                if ($exceeded) {
 
                     throw 'exceeded invalid attempt limit'
 

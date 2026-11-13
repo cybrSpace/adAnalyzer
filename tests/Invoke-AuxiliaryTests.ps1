@@ -93,6 +93,13 @@ function Get-ADObject {$script:ExternalCalls++;throw 'Actual directory query mus
 try {
     $script:ReportA=New-AuxiliaryReport -Name ('Fixture '+[char]0x00FC+' policy') -Id ([guid]'11111111-1111-1111-1111-111111111111')
     $script:ReportB=New-AuxiliaryReport -Name $script:ReportA.Gpo.DisplayName -Id ([guid]'22222222-2222-2222-2222-222222222222')
+    foreach($mode in @('Known','Unknown','Limits','Concurrent','ConcurrentLimit')){
+        Invoke-AuxiliaryTest ('formatter contract: '+$mode) {
+            $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File (Join-Path $RepositoryRoot 'tests/FormatterFixture.ps1') -RepositoryRoot $RepositoryRoot -Mode $mode)
+            Assert-Equal 0 $LASTEXITCODE
+            Assert-True (($output -join ' ') -match ('PASS formatter contract '+$mode)) 'Formatter child did not finish'
+        }
+    }
     foreach($mode in @('Inert','Delegate','Credentials','Errors','Worker','Cli')){
         Invoke-AuxiliaryTest ('connection contract: '+$mode) {
             $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File (Join-Path $RepositoryRoot 'tests/ConnectionFixture.ps1') -RepositoryRoot $RepositoryRoot -WorkingDirectory (Join-Path $script:Temporary ('connection-'+$mode)) -Mode $mode)
