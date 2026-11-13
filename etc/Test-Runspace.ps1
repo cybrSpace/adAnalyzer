@@ -1,6 +1,14 @@
+[CmdletBinding()]
+param(
+    [Alias('context')][string]$CliContext,
+    [Alias('principal')][string]$CliPrincipal,
+    [Alias('Credential')][pscredential]$CliCredential=[pscredential]::Empty
+)
+
 $constant = @{
 
     'module'   = 'WindowsServerHPA'
+    'HostGroupHelperPath' = (Join-Path $PSScriptRoot 'Get-ServerHPA.ps1')
 
     'property' = @{
         'skip'  = 3
@@ -59,43 +67,15 @@ $constant = @{
 
 }
 
-$constant['domain']['context'] = New-Object System.DirectoryServices.AccountManagement.PrincipalContext(
-    [System.DirectoryServices.AccountManagement.ContextType]::Domain, $constant['domain']['fqdn']
-)
-
-function Connect-WindowsServer () {
-
-    param (
-
-        $context, $principal, $domain
-
-    )
-
-    try {
-
-        $r = @{}
-
-        $r['context'] = New-System.DirectoryServices.AccountManagement.PrincipalContext(
-            [System.DirectoryServices.AccountManagement.ContextType]::Machine, $context
-        )
-
-        $r['principal'] = [System.DirectoryServices.AccountManagement.GroupPrincipal]::FindByIdentity(
-            $r['context'], [System.DirectoryServices.AccountManagement.IdentityType]::SamAccountName, $principal
-        )
-
-        if ($null -eq $r['principal'].Members -or [String]::IsNullOrEmpty($r['principal'].Members.Count)) {
-
-            $r['principal'] = New-Object System.DirectoryServices.DirectoryEntry(($r['principal'].GetUnderlyingObject()).Path)
-
-        }
-
-    }
-    catch {
-
-        throw $_.Exception.Message
-
-    }
-
+function Connect-WindowsServer {
+    [CmdletBinding()]
+    param([string]$context,[string]$principal,$domain,[pscredential]$Credential=[pscredential]::Empty)
+    $ErrorActionPreference='Stop'
+    # Pool workers clone function definitions, so use the absolute configured dependency path.
+    $helperPath=[string]$constant['HostGroupHelperPath']
+    if([string]::IsNullOrWhiteSpace($helperPath) -or -not [IO.File]::Exists($helperPath)){throw 'Host-group reader dependency is unavailable.'}
+    . $helperPath
+    Get-ServerHPA -Computer $context -Target $principal -Credential $Credential
 }
 
 function Format-WindowsServerException () {
@@ -241,8 +221,7 @@ function Initialize-RunspacePool {
 $var = [hashtable]::Synchronized(@{})
 $tbl = [hashtable]::Synchronized(@{})
 
-$srv = [ordered]@{
-    'name' = 'srv1'
+if($MyInvocation.InvocationName -ne '.'){
+    if([string]::IsNullOrWhiteSpace($CliContext) -or [string]::IsNullOrWhiteSpace($CliPrincipal)){throw 'Specify context and principal for an explicit host-group read.'}
+    Connect-WindowsServer -context $CliContext -principal $CliPrincipal -Credential $CliCredential
 }
-$tbl[$srv['name']] = $srv
-Connect-WindowsServer -context $srv['name'] -principal $constant['target']['principal'] -domain $constant['domain']['context']
