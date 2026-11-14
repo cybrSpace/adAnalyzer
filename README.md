@@ -119,6 +119,8 @@ An OS lifecycle profile uses `Policy.SupportedOperatingSystems` entries such as 
 
 Exceptions use `@{RuleId='RULE.ID';Target='exact identity or wildcard';Owner='team';Reason='justification';Expires='2026-12-01T00:00:00Z'}`. A current exception attaches suppression metadata while retaining the original status and evidence. Expired exceptions do not suppress a finding.
 
+Profiles reject duplicate audit subcategory GUIDs and equivalent certificate endpoints before observations start. Audit GUID formatting and case do not create separate rules; combine success/failure flags in one rule. Certificate identity uses host, effective port (443 by default), and effective TLS server name (host by default).
+
 ## Baseline imports
 
 Extract a matching Microsoft Security Compliance Toolkit GPO backup and pass its `DomainSysvol/GPO` root (containing Machine/User) to `Import-ADAnalyzerBaseline -GpoPath <root> -Name <name> -Version <version>`. The importer replays Registry.pol directives, retains types, aggregates multi-value security settings and rejects conflicting inputs. Its returned profile can be saved as JSON. Policy Analyzer/LGPO remain optional reference tools; neither is required by the runtime. Download baselines from the [Microsoft Security Compliance Toolkit](https://www.microsoft.com/en-us/download/details.aspx?id=55319).

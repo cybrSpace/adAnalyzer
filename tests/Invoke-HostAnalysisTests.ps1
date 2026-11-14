@@ -47,6 +47,27 @@ Test-HostPolicy 'host services and explicit registry overrides are evaluated fro
     Assert-Equal Pass ($checks | Where-Object RuleId -eq HOST.SERVICE).Status
     Assert-Equal Pass ($checks | Where-Object RuleId -eq HOST.REGISTRY).Status
 }
+Test-HostPolicy 'duplicate canonical audit and certificate identities fail before observations' {
+    foreach($kind in @('Audit','Tls')){
+        $copy=Get-ADAnalyzerDefaultProfile
+        if($kind -eq 'Audit'){$copy.Host.AuditRules=@(@{SubcategoryGuid='0cce9215-69ae-11d9-bed3-505054503030';Flags=1},@{SubcategoryGuid='{0CCE9215-69AE-11D9-BED3-505054503030}';Flags=2})}
+        else{$copy.Host.CertificateEndpoints=@(@{HostName='dc.example.invalid'},@{HostName='DC.EXAMPLE.INVALID';Port=443;ServerName='dc.example.invalid'})}
+        $before=ConvertTo-Json -InputObject $copy -Depth 50 -Compress
+        $audit=$script:AuditCalls;$tls=$script:TlsCalls;$emitted=[Collections.Generic.List[object]]::new();$caught=$null
+        try{Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy | ForEach-Object {$emitted.Add($_)}}catch{$caught=$_}
+        Assert-True ($null -ne $caught -and $caught.Exception.Message -match 'Duplicate host (audit|certificate)') 'Ambiguous profile was not rejected'
+        Assert-Equal 0 $emitted.Count;Assert-Equal $audit $script:AuditCalls;Assert-Equal $tls $script:TlsCalls
+        Assert-Equal $before (ConvertTo-Json -InputObject $copy -Depth 50 -Compress)
+    }
+    $copy=Get-ADAnalyzerDefaultProfile
+    $copy.Host.AuditRules=@(@{SubcategoryGuid='0cce9215-69ae-11d9-bed3-505054503030';Flags=1},@{SubcategoryGuid='0cce9216-69ae-11d9-bed3-505054503030';Flags=2})
+    $copy.Host.CertificateEndpoints=@(@{HostName='dc.example.invalid'},@{HostName='dc.example.invalid';Port=636},@{HostName='dc.example.invalid';ServerName='other.example.invalid'})
+    $checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy)
+    Assert-Equal 0 @($checks | Group-Object CheckId | Where-Object Count -gt 1).Count
+    $audit=@($checks | Where-Object RuleId -eq HOST.AUDIT_POLICY)
+    Assert-Equal 2 $audit.Count;Assert-Equal (New-ADAnalyzerCheck -RuleId HOST.AUDIT_POLICY -Target ($hostRecord.ComputerName+'/Audit/0cce9215-69ae-11d9-bed3-505054503030') -Status Pass).CheckId $audit[0].CheckId
+    Assert-Equal 3 @($checks | Where-Object RuleId -eq HOST.TLS_CERTIFICATE).Count
+}
 Test-HostPolicy 'declared host registry types require observed matching type evidence' {
     $copy=Get-ADAnalyzerDefaultProfile;$copy.Host.RegistryRules=@(@{Key='SYSTEM\Fixture';ValueName='Enabled';Expected=0;Type=4})
     $record=[pscustomobject]@{ComputerName='fixture';Services=@();Registry=@([pscustomobject]@{Path='SYSTEM\Fixture';Name='Enabled';Status='Observed';Value=0})}

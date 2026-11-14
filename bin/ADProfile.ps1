@@ -175,15 +175,20 @@ function Import-ADAnalyzerProfile {
         if($rule.Contains('Operator') -and $rule.Operator -notin @('Equals','NotEquals','In','NotIn','Minimum','Maximum')){throw 'Unsupported host registry operator'}
         if(-not $hostRegistryIds.Add((Get-ADAnalyzerHostRuleIdentity -Rule $rule -Target ($rule.Key+'/'+$rule.ValueName) -Parts @($rule.Key,$rule.ValueName)))){throw 'Duplicate host registry rule identity; use distinct Id values for separate expectations'}
     }
+    $hostAuditIds=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach($rule in @($result.Host.AuditRules)) {
         $id=[guid]::Empty
         if(-not [guid]::TryParse([string]$rule.SubcategoryGuid,[ref]$id) -or [int]$rule.Flags -notin 1,2,3){throw 'Host audit rules require SubcategoryGuid and Flags 1, 2, or 3'}
+        if(-not $hostAuditIds.Add($id.ToString('D'))){throw 'Duplicate host audit subcategory identity; combine required flags in one rule'}
     }
     foreach($hash in $result.DependencyHashes.Values){if([string]$hash -notmatch '^[a-fA-F0-9]{64}$'){throw 'DependencyHashes values must be SHA256 hex strings'}}
+    $hostCertificateIds=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach($endpoint in @($result.Host.CertificateEndpoints)) {
         if($endpoint.HostName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$'){throw 'Certificate endpoint HostName must be a DNS/NetBIOS name or IPv4 address'}
         if($endpoint.Contains('Port') -and ([int]$endpoint.Port -lt 1 -or [int]$endpoint.Port -gt 65535)){throw 'Certificate endpoint Port must be 1..65535'}
         if($endpoint.Contains('MinimumRemainingDays') -and [int]$endpoint.MinimumRemainingDays -lt 0){throw 'Certificate minimum remaining days must be nonnegative'}
+        $hostName=[string]$endpoint.HostName;$port=if($endpoint.Port){[int]$endpoint.Port}else{443};$serverName=if($endpoint.ServerName){[string]$endpoint.ServerName}else{$hostName}
+        if(-not $hostCertificateIds.Add(('{0}:{1}/{2}' -f $hostName,$port,$serverName))){throw 'Duplicate host certificate endpoint identity; use one rule per host, port, and server name'}
     }
     return $result
 }
