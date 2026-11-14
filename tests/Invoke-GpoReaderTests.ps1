@@ -77,6 +77,22 @@ $records=@(
 Write-Pol $pol $records
 try {
     $parsed=Read-ADAnalyzerGpo $policyRoot
+    Test-Gpo 'binary registry values with slash-containing names retain distinct policy identities' {
+        foreach($name in @('ADProfile','ADPolicyAnalysis')){. (Join-Path $RepositoryRoot ('bin/'+$name+'.ps1'))}
+        $root=Join-Path $temp 'registry-identities'
+        Write-Pol (Join-Path $root 'Machine/Registry.pol') @(
+            @{Key='Software\Fixture';Name='Child\Setting';Type=4;Bytes=[BitConverter]::GetBytes([uint32]1)},
+            @{Key='Software\Fixture\Child';Name='Setting';Type=4;Bytes=[BitConverter]::GetBytes([uint32]2)}
+        )
+        $data=Read-ADAnalyzerGpo $root
+        $profile=Get-ADAnalyzerDefaultProfile;$profile.RegistryRules=@(
+            @{Id='Parent';Hive='HKLM';Key='Software\Fixture';ValueName='Child\Setting';Type=4;Expected=1},
+            @{Id='Child';Hive='HKLM';Key='Software\Fixture\Child';ValueName='Setting';Type=4;Expected=2}
+        )
+        $gpo=[pscustomobject]@{Id=[guid]::Empty;Flags=0;Links=@()}
+        $checks=@(Test-ADAnalyzerGpoPolicy $gpo $data $profile | Where-Object RuleId -like 'GPO.Expected.*')
+        Assert-True ($data.RegistrySettings.Count -eq 2 -and $checks.Count -eq 2 -and @($checks | Where-Object Status -ne Pass).Count -eq 0) 'Binary reader assessment conflated distinct tuples'
+    }
     Test-Gpo 'reader returns only boolean presence for XML registry and INI secrets' {
         $secretRoot=Join-Path $temp 'secret-presence'
         $secretXml=Join-Path $secretRoot 'Machine/Preferences/Groups/Groups.xml'

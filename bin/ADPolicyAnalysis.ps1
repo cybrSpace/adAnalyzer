@@ -177,12 +177,12 @@ function Get-ADAnalyzerEffectiveRegistryRecords {
     param([object[]]$RegistrySettings)
     $state=@{}
     foreach($row in @($RegistrySettings)){
-        $base=([string]$row.Hive+'\'+([string]$row.Key).TrimEnd('\')+'\')
+        $keyPath=([string]$row.Key).TrimEnd('\')
         $name=[string]$row.ValueName
-        if($name -match '^\*\*del\.(.*)$'){$state[$base+$Matches[1]]=[pscustomobject]@{Hive=$row.Hive;Key=$row.Key;ValueName=$Matches[1];Value=$null;Type=$row.Type;Scope=$row.Scope;Source=$row.Source;Deleted=$true};continue}
+        if($name -match '^\*\*del\.(.*)$'){$state[(Join-ADAnalyzerPolicyIdentity @($row.Hive,$keyPath,$Matches[1]))]=[pscustomobject]@{Hive=$row.Hive;Key=$row.Key;ValueName=$Matches[1];Value=$null;Type=$row.Type;Scope=$row.Scope;Source=$row.Source;Deleted=$true};continue}
         if($name -ieq '**DeleteValues'){
             $data=if($row.Value -is [byte[]]){[Text.Encoding]::Unicode.GetString($row.Value).TrimEnd([char]0)}else{[string]$row.Value}
-            foreach($entry in @($data -split ';' | Where-Object {$_})){$state[$base+$entry]=[pscustomobject]@{Hive=$row.Hive;Key=$row.Key;ValueName=$entry;Value=$null;Type=$row.Type;Scope=$row.Scope;Source=$row.Source;Deleted=$true}}
+            foreach($entry in @($data -split ';' | Where-Object {$_})){$state[(Join-ADAnalyzerPolicyIdentity @($row.Hive,$keyPath,$entry))]=[pscustomobject]@{Hive=$row.Hive;Key=$row.Key;ValueName=$entry;Value=$null;Type=$row.Type;Scope=$row.Scope;Source=$row.Source;Deleted=$true}}
             continue
         }
         if($name -ieq '**DelVals'){
@@ -192,13 +192,14 @@ function Get-ADAnalyzerEffectiveRegistryRecords {
         if($name -ieq '**DeleteKeys'){
             $data=if($row.Value -is [byte[]]){[Text.Encoding]::Unicode.GetString($row.Value).TrimEnd([char]0)}else{[string]$row.Value}
             foreach($entry in @($data -split ';' | Where-Object {$_})){
-                $prefix=$base+$entry.TrimEnd('\')+'\'
-                foreach($key in @($state.Keys | Where-Object {$_.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)})){if($null -ne $state[$key].PSObject.Properties['Value']){$state[$key].Value=$null};if($null -ne $state[$key].PSObject.Properties['SecretPresent']){$state[$key].SecretPresent=$false};$state[$key].Deleted=$true}
+                $targetKey=$keyPath+'\'+$entry.TrimEnd('\')
+                $prefix=$targetKey+'\'
+                foreach($key in @($state.Keys | Where-Object {$state[$_].Hive -ieq $row.Hive -and ($state[$_].Key -ieq $targetKey -or ([string]$state[$_].Key).StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase))})){if($null -ne $state[$key].PSObject.Properties['Value']){$state[$key].Value=$null};if($null -ne $state[$key].PSObject.Properties['SecretPresent']){$state[$key].SecretPresent=$false};$state[$key].Deleted=$true}
             }
             continue
         }
         if($name.StartsWith('**')){continue}
-        if(-not $row.KeyOnly){$copy=[ordered]@{};foreach($property in $row.PSObject.Properties){$copy[$property.Name]=$property.Value};$copy.Deleted=$false;$state[$base+$name]=[pscustomobject]$copy}
+        if(-not $row.KeyOnly){$copy=[ordered]@{};foreach($property in $row.PSObject.Properties){$copy[$property.Name]=$property.Value};$copy.Deleted=$false;$state[(Join-ADAnalyzerPolicyIdentity @($row.Hive,$keyPath,$name))]=[pscustomobject]$copy}
     }
     $state.Values
 }

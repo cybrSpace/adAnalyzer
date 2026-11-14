@@ -315,6 +315,33 @@ Test-Policy 'registry deletion follows file order and means NotConfigured' {
     )
     Assert-Policy (((Get-PolicyChecks $policy) | Where-Object RuleId -eq GPO.Security.Lsa.LmCompatibilityLevel).Status -eq 'NotConfigured') 'Deleted policy still assessed the stale value'
 }
+Test-Policy 'registry tuple identities preserve slash-containing value names and deletion boundaries' {
+    $a=New-RegistryFixture 'Software\Fixture' 'Child\Setting' 1
+    $b=New-RegistryFixture 'Software\Fixture\Child' 'Setting' 2
+    $policy=New-PolicyFixture;$policy.RegistrySettings=@($a,$b)
+    $before=ConvertTo-Json -InputObject $policy -Depth 30 -Compress
+    $profile=Get-ADAnalyzerDefaultProfile;$profile.RegistryRules=@(
+        @{Id='ParentValue';Hive='HKLM';Key=$a.Key;ValueName=$a.ValueName;Type=4;Expected=1},
+        @{Id='ChildValue';Hive='HKLM';Key=$b.Key;ValueName=$b.ValueName;Type=4;Expected=2}
+    )
+    $checks=@(Get-PolicyChecks $policy $profile | Where-Object RuleId -like 'GPO.Expected.*')
+    Assert-Policy ($checks.Count -eq 2 -and @($checks | Where-Object Status -ne Pass).Count -eq 0) 'Distinct registry tuples collided'
+    foreach($directive in @('**del.Child\Setting','**DeleteValues')){
+        $data=if($directive -eq '**DeleteValues'){'Child\Setting'}else{$null}
+        $rows=@(Get-ADAnalyzerEffectiveRegistryRecords @($a,$b,(New-RegistryFixture $a.Key $directive $data 0)))
+        Assert-Policy ($rows.Count -eq 2 -and ($rows | Where-Object Key -eq $a.Key).Deleted -and -not ($rows | Where-Object Key -eq $b.Key).Deleted) 'Value deletion crossed tuple boundaries'
+    }
+    $secret=[pscustomobject]@{Scope='Computer';Hive='HKLM';Key=$a.Key;ValueName='Child\DefaultPassword';SecretPresent=$true;Type=1;Source='Machine/Registry.pol';KeyOnly=$false}
+    $rows=@(Get-ADAnalyzerEffectiveRegistryRecords @($secret,$b,(New-RegistryFixture 'Software\Fixture\Child\Grandchild' Setting 3),(New-RegistryFixture $a.Key '**DeleteKeys' 'Child' 0)))
+    $parent=$rows | Where-Object Key -eq $a.Key
+    Assert-Policy ($rows.Count -eq 3 -and -not $parent.Deleted -and $parent.SecretPresent -and @($rows | Where-Object {$_.Key -ne $a.Key -and -not $_.Deleted}).Count -eq 0) 'Subtree deletion used value-name separators as key boundaries'
+    $policy.RegistrySettings=@($secret,(New-RegistryFixture $a.Key '**DeleteKeys' 'Child' 0))
+    Assert-Policy (@(Get-PolicyChecks $policy | Where-Object RuleId -eq GPO.StoredSecret).Count -eq 1) 'Subtree deletion concealed parent secret presence'
+    $rows=@(Get-ADAnalyzerEffectiveRegistryRecords @($a,(New-RegistryFixture 'software\fixture' 'child\setting' 7)))
+    Assert-Policy ($rows.Count -eq 1 -and $rows[0].Value -eq 7) 'Case-insensitive last-write-wins changed'
+    $policy.RegistrySettings=@($a,$b)
+    Assert-Policy ($before -ceq (ConvertTo-Json -InputObject $policy -Depth 30 -Compress)) 'Effective-state calculation mutated source'
+}
 Test-Policy 'user rights use exact approved SIDs and support an empty allowlist' {
     $profile=Get-ADAnalyzerDefaultProfile;$profile.Policy.AllowedUserRightSids=@{SeDebugPrivilege=@('S-1-5-32-544');SeDenyNetworkLogonRight=@()}
     $policy=New-PolicyFixture;$policy.SecuritySettings=@(
