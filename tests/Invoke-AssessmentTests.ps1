@@ -54,6 +54,18 @@ function New-RegistryIdentityFixture([string]$Name,[switch]$Deleted){
 }
 $temp=Join-Path ([IO.Path]::GetTempPath()) ('ad-assessment-'+[guid]::NewGuid().ToString('N'));$null=New-Item -Path $temp -ItemType Directory
 try {
+    Test-Assessment 'registry metadata identities preserve literal component separators' {
+        $fixture=New-RegistryIdentityFixture 'metadata-separators'
+        $fixture.Policy.RegistrySettings=@(
+            [pscustomobject]@{Hive='HKLM';Scope='Computer';Key='Software\Fixture';ValueName='part/Enabled';Value=1;Type=4;Source='Machine/Registry.pol'},
+            [pscustomobject]@{Hive='HKLM';Scope='Computer';Key='Software\Fixture/part';ValueName='Enabled';Value=2;Type=4;Source='Machine/Registry.pol'}
+        )
+        $before=ConvertTo-Json -InputObject $fixture.Policy -Depth 50 -Compress
+        $result=Invoke-ADAnalyzerAssessment -DirectoryData (New-AssessmentFixture) -GpoData @([pscustomobject]@{Gpo=$fixture.Gpo;Policy=$fixture.Policy}) -Profile $fixture.Profile
+        $checks=@($result.Checks | Where-Object RuleId -eq GPO.TEMPLATE_METADATA)
+        Assert-Equal 2 $checks.Count;Assert-Equal 2 @($checks.CheckId | Select-Object -Unique).Count
+        Assert-Equal $before (ConvertTo-Json -InputObject $fixture.Policy -Depth 50 -Compress)
+    }
     Test-Assessment 'removing Registry.pol preserves an unchanged authoritative INF security check' {
         $policies=@()
         foreach($name in @('with-registry-source','without-registry-source')){

@@ -25,6 +25,24 @@ function New-IdentityPreferenceFile([string]$Path,[object[]]$Entries,[string]$Sc
     [pscustomobject]@{Scope=$Scope;Path=$Path;Kind='Preferences';Xml=$document.OuterXml}
 }
 function Get-IdentityPreferenceChecks($Policy){@(Get-PolicyChecks $Policy | Where-Object RuleId -eq 'GPO.Preferences.LocalUsersGroups')}
+Test-Policy 'XML credential and named secret duplicates retain unique stable assessment identities' {
+    foreach($name in @('ADDirectoryAnalysis','ADAssessment')){. (Join-Path $RepositoryRoot ('bin/'+$name+'.ps1'))}
+    $xml='<Groups><User uid="dup"><Properties action="U" userName="one" cpassword="fixture-a"/></User><User uid="dup"><Properties action="U" userName="two" cpassword="fixture-b"/></User><User uid="named"><Properties name="DefaultPassword" value="fixture-c"/></User><User uid="named"><Properties name="DefaultPassword" value="fixture-d"/></User><User uid="unique"><Properties action="U" cpassword="fixture-e"/></User></Groups>'
+    $policy=New-PolicyFixture;$policy.XmlFiles=@([pscustomobject]@{Scope='Computer';Path='Machine/Preferences/Groups/Groups.xml';Xml=$xml})
+    $before=ConvertTo-Json -InputObject $policy -Depth 50 -Compress
+    $old=@(Get-PolicyChecks $policy | Where-Object {$_.RuleId -in 'GPO.Preferences.CPassword','GPO.StoredSecret'})
+    Assert-Policy ($old.Count -eq 5 -and @($old | Group-Object CheckId | Where-Object Count -gt 1).Count -eq 0) 'Duplicate secret records collided or were dropped'
+    $projected=New-PolicyFixture;$projected.XmlFiles=@([pscustomobject]@{Scope='Computer';Path=$policy.XmlFiles[0].Path;Xml=(ConvertTo-ADAnalyzerSecretIndicatorXml ([xml]$xml)).OuterXml})
+    $new=@(Get-PolicyChecks $projected | Where-Object {$_.RuleId -in 'GPO.Preferences.CPassword','GPO.StoredSecret'})
+    Assert-Policy (($old.CheckId -join ',') -eq ($new.CheckId -join ',')) 'Projection changed secret identities'
+    $projected.XmlFiles[0].Xml=$projected.XmlFiles[0].Xml.Replace('<Groups>','<Groups><User uid="unrelated/duplicate/1"><Properties action="U" cpasswordPresent="true"/></User>')
+    $inserted=@(Get-PolicyChecks $projected | Where-Object {$_.RuleId -in 'GPO.Preferences.CPassword','GPO.StoredSecret'})
+    Assert-Policy (@($old | Where-Object {$_.CheckId -notin $inserted.CheckId}).Count -eq 0) 'Unrelated UID insertion renumbered secret records'
+    $result=Invoke-ADAnalyzerAssessment -DirectoryData ([pscustomobject]@{Users=@();Computers=@();ServiceAccounts=@();Errors=@()}) -GpoData @([pscustomobject]@{Gpo=$script:Gpo;Policy=$policy}) -Profile $script:Profile
+    Assert-Policy (@($result.Checks | Group-Object CheckId | Where-Object Count -gt 1).Count -eq 0) 'Public assessment retained duplicate identities'
+    Assert-Policy (($result | ConvertTo-Json -Depth 100) -notmatch 'fixture-[a-e]') 'Assessment retained secret payloads'
+    Assert-Policy ($before -ceq (ConvertTo-Json -InputObject $policy -Depth 50 -Compress)) 'Secret evaluation mutated source'
+}
 Test-Policy 'GPP UID identities survive unrelated insertion item reorder and file reorder' {
     $before=New-PolicyFixture;$before.XmlFiles=@(
         (New-IdentityPreferenceFile 'Machine/Preferences/A.xml' @(@{Uid='alpha'},@{Uid='beta'})),

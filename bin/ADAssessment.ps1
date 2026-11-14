@@ -20,7 +20,7 @@ function Invoke-ADAnalyzerAssessment {
         foreach($check in @(Test-ADAnalyzerGpoPolicy -Gpo $gpo.Gpo -Policy $gpo.Policy -Profile $configuration)){$null=$checks.Add($check)}
         if($configuration.Analysis.TemplatePath) {
             foreach($record in @(Resolve-ADAnalyzerRegistryPolicy -RegistrySettings @(Get-ADAnalyzerEffectiveRegistryRecords $gpo.Policy.RegistrySettings) -TemplatePath $configuration.Analysis.TemplatePath -Language $configuration.Analysis.Language)) {
-                $label='{0}/{1}/{2}/{3}' -f $gpo.Gpo.Id,$record.Hive,$record.Key,$record.ValueName
+                $label=Join-ADAnalyzerPolicyIdentity @([string]$gpo.Gpo.Id,$record.Hive,$record.Key,$record.ValueName)
                 $status=if($record.MetadataStatus -eq 'Resolved'){'Pass'}else{'Unknown'}
                 $null=$checks.Add((New-ADAnalyzerCheck -RuleId 'GPO.TEMPLATE_METADATA' -Status $status -Category Metadata -Target $label -Observed $record -Expected 'Matching ADMX/ADML metadata' -Message 'Metadata enrichment does not establish policy applicability'))
             }

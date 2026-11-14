@@ -263,7 +263,7 @@ function Test-ADAnalyzerGpoPolicy {
     $identity=[string](Get-ADAnalyzerPolicyValue $Gpo Id (Get-ADAnalyzerPolicyValue $Gpo DisplayName 'offline'))
     $target='GPO:'+ $identity
     $xmlRecords=@(Get-ADAnalyzerPolicyXmlRecords $Policy.XmlFiles)
-    $secretCount=0;$xmlErrors=0
+    $secretCount=0;$xmlErrors=0;$xmlSecretChecks=[Collections.Generic.List[object]]::new()
     foreach($xmlRecord in $xmlRecords){
         if(-not $xmlRecord.Valid){$xmlErrors++;New-ADAnalyzerCheck -RuleId 'GPO.Xml.Readable' -Status Unreadable -Severity Medium -Category PolicyCoverage -Target ($target+'/'+$xmlRecord.File.Path) -Observed 'Unreadable XML' -Expected 'Well-formed XML without DTDs' -Evidence @{Path=$xmlRecord.File.Path} -Message 'XML could not be parsed; its content was not included in the assessment.' -Applicability Unknown;continue}
         foreach($attribute in @($xmlRecord.Document.SelectNodes('//@*') | Where-Object {($_.LocalName -ieq 'cpassword' -and -not [string]::IsNullOrEmpty($_.Value)) -or ($_.LocalName -ieq 'cpasswordPresent' -and $_.Value -ieq 'true')})){
@@ -271,7 +271,7 @@ function Test-ADAnalyzerGpoPolicy {
             $safe=[ordered]@{Path=$xmlRecord.File.Path;ItemUid=(Get-ADAnalyzerXmlAttribute $item uid);ItemName=(Get-ADAnalyzerXmlAttribute $item name);Account=(Get-ADAnalyzerXmlAttribute $attribute.OwnerElement userName);SecretPresent=$true}
             $attributePath=(Get-ADAnalyzerPolicyXmlPath $attribute.OwnerElement)+'/@cpassword'
             $safe['Attribute']='cpassword';$safe['ItemPath']=$attributePath
-            New-ADAnalyzerCheck -RuleId 'GPO.Preferences.CPassword' -Status Fail -Severity Critical -Category CredentialExposure -Target ($target+'/'+$xmlRecord.File.Path+'/'+$attributePath) -Observed $true -Expected $false -Evidence $safe -Message 'A recoverable preference credential remains in stored policy. Remove the exposed credential and rotate the affected password; only its presence is reported.' -Applicability Configured
+            $xmlSecretChecks.Add(@{RuleId='GPO.Preferences.CPassword';Status='Fail';Severity='Critical';Category='CredentialExposure';Target=(Join-ADAnalyzerPolicyIdentity @($target,$xmlRecord.File.Scope,$xmlRecord.File.Path,$attributePath));Observed=$true;Expected=$false;Evidence=$safe;Message='A recoverable preference credential remains in stored policy. Remove the exposed credential and rotate the affected password; only its presence is reported.';Applicability='Configured'})
         }
         $presenceDocument=ConvertTo-ADAnalyzerSecretIndicatorXml $xmlRecord.Document
         foreach($record in @($presenceDocument.SelectNodes('//*[@SecretPresent]'))){
@@ -279,8 +279,15 @@ function Test-ADAnalyzerGpoPolicy {
             if(-not $name){continue}
             $present=$record.GetAttribute('SecretPresent') -ieq 'true'
             $itemPath=Get-ADAnalyzerPolicyXmlPath $record
-            $location=('{0}/{1}/{2}' -f $xmlRecord.File.Scope,$xmlRecord.File.Path,$itemPath)
-            New-ADAnalyzerCheck -RuleId 'GPO.StoredSecret' -Status $(if($present){'Fail'}else{'Pass'}) -Severity Critical -Category CredentialExposure -Target ($target+'/'+$location) -Observed $present -Expected $false -Evidence @{SecretPresent=$present;Path=$xmlRecord.File.Path;Scope=$xmlRecord.File.Scope;ItemPath=$itemPath;SettingName=$name} -Message 'Only the presence of a named XML secret is reported; its value is omitted.' -Applicability Configured
+            $location=Join-ADAnalyzerPolicyIdentity @($target,$xmlRecord.File.Scope,$xmlRecord.File.Path,$itemPath)
+            $xmlSecretChecks.Add(@{RuleId='GPO.StoredSecret';Status=$(if($present){'Fail'}else{'Pass'});Severity='Critical';Category='CredentialExposure';Target=$location;Observed=$present;Expected=$false;Evidence=@{SecretPresent=$present;Path=$xmlRecord.File.Path;Scope=$xmlRecord.File.Scope;ItemPath=$itemPath;SettingName=$name};Message='Only the presence of a named XML secret is reported; its value is omitted.';Applicability='Configured'})
+        }
+    }
+    foreach($family in @($xmlSecretChecks | Group-Object RuleId)){
+        $targets=@(Resolve-ADAnalyzerPolicyIdentityCollisions @($family.Group | ForEach-Object {$_.Target}))
+        for($index=0;$index -lt $family.Group.Count;$index++){
+            $arguments=$family.Group[$index];$arguments.Target=$targets[$index]
+            New-ADAnalyzerCheck @arguments
         }
     }
     if(-not $secretCount){New-ADAnalyzerCheck -RuleId 'GPO.Preferences.CPassword' -Status $(if($xmlErrors){'Unknown'}else{'Pass'}) -Severity Critical -Category CredentialExposure -Target ($target+'/cpassword') -Observed $(if($xmlErrors){$null}else{$false}) -Expected $false -Evidence @{SecretPresent=$(if($xmlErrors){$null}else{$false});UnreadableXmlFiles=$xmlErrors} -Message 'Assessed XML contains no nonempty cpassword attribute; unreadable files prevent a complete conclusion.' -Applicability Configured}
