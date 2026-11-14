@@ -408,6 +408,7 @@ function Test-ADAnalyzerGpoPolicy {
     $policySection=Get-ADAnalyzerPolicyValue $Profile Policy @{}
     $approvedValue=@('S-1-5-32-544')
     if($policySection -is [Collections.IDictionary] -and $policySection.Contains('ApprovedLocalAdminSids')){$approvedValue=$policySection['ApprovedLocalAdminSids']}
+    elseif($null -ne $policySection -and $null -ne $policySection.PSObject.Properties['ApprovedLocalAdminSids']){$approvedValue=$policySection.PSObject.Properties['ApprovedLocalAdminSids'].Value}
     $approvedValid=Test-ADAnalyzerPolicySidList $approvedValue
     $approved=@($approvedValue)
     $restricted=@(ConvertFrom-ADAnalyzerRestrictedGroups $Policy.IniSettings)

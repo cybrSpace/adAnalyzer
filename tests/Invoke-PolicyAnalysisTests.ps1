@@ -404,6 +404,13 @@ Test-Policy 'modern policy principals enforce SID bounds and consumed allowlist 
     Assert-Policy (((Get-PolicyChecks $policy $profile) | Where-Object RuleId -eq GPO.RestrictedGroups.LocalAdministrators).Status -eq 'Pass') 'Explicit empty local administrator allowlist was lost'
     $profile.Policy.ApprovedLocalAdminSids=$null
     Assert-Policy (((Get-PolicyChecks $policy $profile) | Where-Object RuleId -eq GPO.RestrictedGroups.LocalAdministrators).Status -eq 'Invalid') 'Null local administrator allowlist was treated as empty'
+    $policy=New-PolicyFixture;$policy.XmlFiles=@([pscustomobject]@{Scope='Computer';Path='Groups.xml';Xml='<Groups><Group><Properties action="U" groupSid="S-1-5-32-544"><Members><Member sid="S-1-5-32-544" action="ADD"/></Members></Properties></Group></Groups>'})
+    foreach($objectSection in @($false,$true)){foreach($case in @(@{Value=@();Status='Fail'},@{Value=$null;Status='Invalid'},@{Value=@('S-1-5-32-544');Status='Pass'},@{Value='S-1-5-32-544';Status='Pass'})){
+        $profile=Get-ADAnalyzerDefaultProfile;$profile.Policy.ApprovedLocalAdminSids=$case.Value
+        if($objectSection){$profile.Policy=[pscustomobject]$profile.Policy}
+        $check=Get-PolicyChecks $policy $profile | Where-Object RuleId -eq GPO.Preferences.LocalUsersGroups
+        Assert-Policy ($check.Status -eq $case.Status) 'Object/dictionary policy sections disagree on explicit local administrator allowlist'
+    }}
 }
 Test-Policy 'custom top-level rules assess values and preserve missing state' {
     $profile=Get-ADAnalyzerDefaultProfile;$profile.RegistryRules=@(@{Id='Fixture';Hive='HKLM';Key='Software\Fixture';ValueName='Level';Operator='Minimum';Expected=2},@{Id='EmptyList';Hive='HKLM';Key='Software\Fixture';ValueName='Empty';Expected=@()})
