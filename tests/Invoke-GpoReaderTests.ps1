@@ -77,6 +77,21 @@ $records=@(
 Write-Pol $pol $records
 try {
     $parsed=Read-ADAnalyzerGpo $policyRoot
+    Test-Gpo 'mixed raw and presence XML reaches assessment as one credential location' {
+        foreach($name in @('ADProfile','ADPolicyAnalysis','ADDirectoryAnalysis','ADOperations','ADAssessment')){. (Join-Path $RepositoryRoot ('bin/'+$name+'.ps1'))}
+        $root=Join-Path $temp 'mixed-credential-owner';$path=Join-Path $root 'Machine/Preferences/Groups/Groups.xml'
+        $xml='<Groups><User uid="one"><Properties action="U" cpassword="fixture-mixed-secret" cpasswordPresent="false"/></User></Groups>'
+        Write-Text $path $xml
+        $gpo=[pscustomobject]@{Id=[guid]::Empty;Flags=0;Links=@()};$profile=Get-ADAnalyzerDefaultProfile
+        $data=Read-ADAnalyzerGpo $root
+        $raw=$data.PSObject.Copy();$raw.XmlFiles=@([pscustomobject]@{Scope='Computer';Path='Machine/Preferences/Groups/Groups.xml';Xml=$xml})
+        $before=@(Test-ADAnalyzerGpoPolicy $gpo $raw $profile | Where-Object RuleId -eq GPO.Preferences.CPassword)
+        $result=Invoke-ADAnalyzerAssessment -DirectoryData ([pscustomobject]@{Users=@();Computers=@();ServiceAccounts=@();Errors=@()}) -GpoData @([pscustomobject]@{Gpo=$gpo;Policy=$data}) -Profile $profile
+        $after=@($result.Checks | Where-Object RuleId -eq GPO.Preferences.CPassword)
+        Assert-True ($before.Count -eq 1 -and $after.Count -eq 1 -and $before[0].CheckId -eq $after[0].CheckId -and $after[0].Observed) 'Reader changed credential owner identity'
+        Assert-True (($result | ConvertTo-Json -Depth 100) -notmatch 'fixture-mixed-secret') 'Assessment exposed credential'
+        Assert-Equal $xml (Get-Content -LiteralPath $path -Raw)
+    }
     Test-Gpo 'binary registry values with slash-containing names retain distinct policy identities' {
         foreach($name in @('ADProfile','ADPolicyAnalysis')){. (Join-Path $RepositoryRoot ('bin/'+$name+'.ps1'))}
         $root=Join-Path $temp 'registry-identities'

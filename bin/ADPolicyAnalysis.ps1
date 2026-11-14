@@ -285,7 +285,9 @@ function Test-ADAnalyzerGpoPolicy {
     $secretCount=0;$xmlErrors=0;$xmlSecretChecks=[Collections.Generic.List[object]]::new()
     foreach($xmlRecord in $xmlRecords){
         if(-not $xmlRecord.Valid){$xmlErrors++;New-ADAnalyzerCheck -RuleId 'GPO.Xml.Readable' -Status Unreadable -Severity Medium -Category PolicyCoverage -Target ($target+'/'+$xmlRecord.File.Path) -Observed 'Unreadable XML' -Expected 'Well-formed XML without DTDs' -Evidence @{Path=$xmlRecord.File.Path} -Message 'XML could not be parsed; its content was not included in the assessment.' -Applicability Unknown;continue}
+        $credentialOwners=[Collections.Generic.HashSet[Xml.XmlElement]]::new()
         foreach($attribute in @($xmlRecord.Document.SelectNodes('//@*') | Where-Object {($_.LocalName -ieq 'cpassword' -and -not [string]::IsNullOrEmpty($_.Value)) -or ($_.LocalName -ieq 'cpasswordPresent' -and $_.Value -ieq 'true')})){
+            if(-not $credentialOwners.Add($attribute.OwnerElement)){continue}
             $secretCount++;$item=$attribute.OwnerElement.ParentNode
             $safe=[ordered]@{Path=$xmlRecord.File.Path;ItemUid=(Get-ADAnalyzerXmlAttribute $item uid);ItemName=(Get-ADAnalyzerXmlAttribute $item name);Account=(Get-ADAnalyzerXmlAttribute $attribute.OwnerElement userName);SecretPresent=$true}
             $attributePath=(Get-ADAnalyzerPolicyXmlPath $attribute.OwnerElement)+'/@cpassword'

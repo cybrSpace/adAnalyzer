@@ -25,6 +25,21 @@ function New-IdentityPreferenceFile([string]$Path,[object[]]$Entries,[string]$Sc
     [pscustomobject]@{Scope=$Scope;Path=$Path;Kind='Preferences';Xml=$document.OuterXml}
 }
 function Get-IdentityPreferenceChecks($Policy){@(Get-PolicyChecks $Policy | Where-Object RuleId -eq 'GPO.Preferences.LocalUsersGroups')}
+Test-Policy 'raw credentials and presence markers describe one XML owner' {
+    foreach($attributes in @('cpassword="fixture-secret" cpasswordPresent="true"','cpassword="fixture-secret" cpasswordPresent="false"','cpassword="" cpasswordPresent="true"','cpassword="" cpasswordPresent="false"')){
+        $xml='<Groups><User uid="same"><Properties '+$attributes+'/></User><User uid="same"><Properties '+$attributes+'/></User></Groups>'
+        $ids=@();$counts=@()
+        foreach($text in @($xml,(ConvertTo-ADAnalyzerSecretIndicatorXml ([xml]$xml)).OuterXml)){
+            $policy=New-PolicyFixture;$policy.XmlFiles=@([pscustomobject]@{Scope='Computer';Path='Groups.xml';Xml=$text})
+            $checks=@(Get-PolicyChecks $policy | Where-Object RuleId -eq GPO.Preferences.CPassword)
+            $ids+=,($checks.CheckId -join ',');$counts+=@($checks | Where-Object Status -eq Fail).Count
+            Assert-Policy (@($checks | Group-Object CheckId | Where-Object Count -gt 1).Count -eq 0) 'Distinct owners collided'
+            Assert-Policy (($checks | ConvertTo-Json -Depth 50) -notmatch 'fixture-secret') 'Credential value escaped'
+        }
+        $expected=if($attributes -eq 'cpassword="" cpasswordPresent="false"'){0}else{2}
+        Assert-Policy ($counts[0] -eq $expected -and $counts[1] -eq $expected -and $ids[0] -eq $ids[1]) 'One owner counted twice or changed identity after projection'
+    }
+}
 Test-Policy 'XML credential and named secret duplicates retain unique stable assessment identities' {
     foreach($name in @('ADDirectoryAnalysis','ADAssessment')){. (Join-Path $RepositoryRoot ('bin/'+$name+'.ps1'))}
     $xml='<Groups><User uid="dup"><Properties action="U" userName="one" cpassword="fixture-a"/></User><User uid="dup"><Properties action="U" userName="two" cpassword="fixture-b"/></User><User uid="named"><Properties name="DefaultPassword" value="fixture-c"/></User><User uid="named"><Properties name="DefaultPassword" value="fixture-d"/></User><User uid="unique"><Properties action="U" cpassword="fixture-e"/></User></Groups>'
