@@ -77,6 +77,33 @@ $records=@(
 Write-Pol $pol $records
 try {
     $parsed=Read-ADAnalyzerGpo $policyRoot
+    Test-Gpo 'zero-byte numeric records remain key-only inventory rather than effective values' {
+        foreach($name in @('ADProfile','ADPolicyAnalysis')){. (Join-Path $RepositoryRoot ('bin/'+$name+'.ps1'))}
+        foreach($type in @(4,5,11)){
+            $root=Join-Path $temp ('zero-width-'+$type);$path=Join-Path $root 'Machine/Registry.pol'
+            Write-Pol $path @(@{Key='Software\Fixture';Name='EmptyNumber';Type=$type;Bytes=[byte[]]@()})
+            $bytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes($path));$data=Read-ADAnalyzerGpo $root
+            $profile=Get-ADAnalyzerDefaultProfile;$profile.RegistryRules=@(@{Id='EmptyNumber';Hive='HKLM';Key='Software\Fixture';ValueName='EmptyNumber';Type=$type;Expected=@()})
+            $check=Test-ADAnalyzerGpoPolicy ([pscustomobject]@{Id=[guid]::Empty;Flags=0;Links=@()}) $data $profile | Where-Object RuleId -eq GPO.Expected.EmptyNumber
+            Assert-True ($data.RegistrySettings.Count -eq 1 -and $data.RegistrySettings[0].KeyOnly -and $check.Status -eq 'NotConfigured') 'Missing numeric payload became an effective value'
+            Assert-Equal $bytes ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)))
+        }
+        $path=Join-Path $temp 'numeric-controls.pol'
+        Write-Pol $path @(
+            @{Key='Software\Fixture';Name='Dword';Type=4;Bytes=[byte[]]@(0,0,0,0)},
+            @{Key='Software\Fixture';Name='BigEndian';Type=5;Bytes=[byte[]]@(0,0,0,0)},
+            @{Key='Software\Fixture';Name='Qword';Type=11;Bytes=[byte[]]@(0,0,0,0,0,0,0,0)},
+            @{Key='Software\Fixture';Name='';Type=0;Bytes=[byte[]]@()},
+            @{Key='Software\Other';Name='';Type=4;Bytes=[byte[]]@()},
+            @{Key='Software\Fixture';Name='Binary';Type=3;Bytes=[byte[]]@()},
+            @{Key='Software\Fixture';Name='**del.Dword';Type=4;Bytes=[byte[]]@()}
+        )
+        $rows=@(Read-AnalyzerRegistryPolicy $path Computer)
+        foreach($row in $rows[0..2]){Assert-True ($row.Value -eq 0 -and -not $row.KeyOnly -and $row.Value -is [ValueType]) 'Valid numeric zero changed'}
+        Assert-True ($rows[3].KeyOnly -and $rows[4].KeyOnly -and -not $rows[5].KeyOnly -and $rows[5].Value.Length -eq 0 -and $rows[6].DeletionDirective -and -not $rows[6].KeyOnly) 'Key-only binary or directive compatibility changed'
+        Assert-True ((Get-ADAnalyzerEffectiveRegistryRecords $rows | Where-Object ValueName -eq Dword).Deleted) 'Zero-byte numeric-declared deletion stopped replaying'
+        foreach($type in @(4,5,11)){Write-Pol $path @(@{Key='Software\Fixture';Name='Bad';Type=$type;Bytes=[byte[]]@(1,2)});Assert-Throws {Read-AnalyzerRegistryPolicy $path Computer}}
+    }
     Test-Gpo 'mixed raw and presence XML reaches assessment as one credential location' {
         foreach($name in @('ADProfile','ADPolicyAnalysis','ADDirectoryAnalysis','ADOperations','ADAssessment')){. (Join-Path $RepositoryRoot ('bin/'+$name+'.ps1'))}
         $root=Join-Path $temp 'mixed-credential-owner';$path=Join-Path $root 'Machine/Preferences/Groups/Groups.xml'

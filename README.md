@@ -89,6 +89,8 @@ Offline `InputObject` uses the `{Gpo, Policy}` shape returned by `Get-ADAnalyzer
 
 Credential-exposure and template-metadata check identities preserve their component boundaries. Separate XML credential locations remain separate even when UIDs repeat; a raw credential attribute and presence marker on the same element count once. Snapshots saved before this identity correction may report identity changes when compared with new scans.
 
+Zero-byte ordinary DWORD, big-endian DWORD, and QWORD records remain in the reader inventory as `KeyOnly` records; they do not establish an effective numeric value or satisfy a value baseline. Valid numeric zero still requires 4, 4, or 8 payload bytes respectively. Empty binary values and deletion directives retain their existing behavior. This follows the documented [zero-field key-creation interpretation](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/policy/registry-policy-file-format) without discarding the original policy record.
+
 ## Profiles and assessment coverage
 
 `Import-ADAnalyzerProfile` merges a JSON or restricted PSD1 data file with fresh defaults, validates input, and rejects unknown settings. `Get-ADAnalyzerDefaultProfile` shows every supported key. Profiles control account/password/lockout thresholds, account-role evidence, approved SIDs, custom registry expectations, OS lifecycle/build rules, and remediation approvals. `profiles/default.psd1` is inert; `profiles/example.psd1` documents customization. Profile files are data and cannot contain executable PowerShell scripts.

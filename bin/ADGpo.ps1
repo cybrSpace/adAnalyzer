@@ -58,7 +58,7 @@ function Read-AnalyzerRegistryPolicy {
                 11 {if($size -ne 8){throw 'Invalid QWORD length'};[BitConverter]::ToUInt64($bytes,0)}
                 default {,$bytes}
             }}
-            ConvertTo-ADAnalyzerSecretRecord ([pscustomobject]@{Scope=$Scope;Hive=$(if($Scope -eq 'Computer'){'HKLM'}else{'HKCU'});Key=$strings[0];ValueName=$strings[1];Type=$type;Value=$value;RawData=$bytes;KeyOnly=($size -eq 0 -and $strings[1] -eq '');DeletionDirective=$strings[1].StartsWith('**');Source=$Path})
+            ConvertTo-ADAnalyzerSecretRecord ([pscustomobject]@{Scope=$Scope;Hive=$(if($Scope -eq 'Computer'){'HKLM'}else{'HKCU'});Key=$strings[0];ValueName=$strings[1];Type=$type;Value=$value;RawData=$bytes;KeyOnly=($size -eq 0 -and ($strings[1] -eq '' -or ($type -in 4,5,11 -and -not $strings[1].StartsWith('**'))));DeletionDirective=$strings[1].StartsWith('**');Source=$Path})
         }
     } catch {throw "Unable to parse '$Path': $($_.Exception.Message)"}
     finally {$reader.Dispose();$stream.Dispose()}
