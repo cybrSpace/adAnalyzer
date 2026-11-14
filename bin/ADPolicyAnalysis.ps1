@@ -99,12 +99,30 @@ function ConvertTo-ADAnalyzerPolicyBoolean {
     [pscustomobject]@{Valid=$false;Value=$null}
 }
 
+function Test-ADAnalyzerPolicySid {
+    param($Value)
+    # MS-DTYP 2.4.2.1: decimal authority below 2^32, otherwise 12 hex digits.
+    if($Value -isnot [string] -or $Value -notmatch '^S-1-(?:0|[1-9][0-9]{0,9}|0x[0-9a-f]{12})(?:-(?:0|[1-9][0-9]{0,9})){1,15}$'){return $false}
+    $parts=$Value.Split('-');[uint64]$authority=0
+    if($parts[2].StartsWith('0x',[StringComparison]::OrdinalIgnoreCase)){
+        if(-not [uint64]::TryParse($parts[2].Substring(2),[Globalization.NumberStyles]::AllowHexSpecifier,[Globalization.CultureInfo]::InvariantCulture,[ref]$authority) -or $authority -lt 4294967296){return $false}
+    }elseif(-not [uint64]::TryParse($parts[2],[ref]$authority) -or $authority -gt 4294967295){return $false}
+    for($index=3;$index -lt $parts.Count;$index++){[uint32]$part=0;if(-not [uint32]::TryParse($parts[$index],[ref]$part)){return $false}}
+    return $true
+}
+function Test-ADAnalyzerPolicySidList {
+    param($Value)
+    if($null -eq $Value -or ($Value -isnot [string] -and $Value -isnot [Collections.IList])){return $false}
+    foreach($sid in $Value){if(-not (Test-ADAnalyzerPolicySid $sid)){return $false}}
+    return $true
+}
 function ConvertFrom-ADAnalyzerPolicyPrincipal {
     param([string]$Value)
-    $token=$Value.Trim().TrimStart('*')
-    $sid=$null;$valid=$true
-    if($token -match '^S-\d+(-\d+)+$'){$sid=$token}
-    elseif($Value.StartsWith('*') -or $token -match '^S-\d'){$valid=$false}
+    $token=$Value.Trim();$marked=$token.StartsWith('*')
+    if($marked){$token=$token.Substring(1)}
+    $sid=$null;$valid=-not [string]::IsNullOrWhiteSpace($token)
+    if(Test-ADAnalyzerPolicySid $token){$sid=$token}
+    elseif($marked -or $token -match '^S-\d'){$valid=$false}
     [pscustomobject]@{Sid=$sid;Name=$(if(-not $sid){$token}else{$null});Valid=$valid}
 }
 
@@ -159,6 +177,7 @@ function ConvertFrom-ADAnalyzerLocalUsersGroups {
             foreach($member in @($(if($properties){$properties.SelectNodes('./*[local-name()="Members"]/*[local-name()="Member"]')}))){
                 $sid=Get-ADAnalyzerXmlAttribute $member sid
                 $principal=ConvertFrom-ADAnalyzerPolicyPrincipal $(if($sid){$sid}else{Get-ADAnalyzerXmlAttribute $member name})
+                if($sid -and -not (Test-ADAnalyzerPolicySid $sid)){$principal.Valid=$false}
                 $members+= [pscustomobject]@{Sid=$principal.Sid;Name=$principal.Name;Valid=$principal.Valid;Action=(Get-ADAnalyzerXmlAttribute $member action).ToUpperInvariant()}
             }
             $action=(Get-ADAnalyzerXmlAttribute $properties action).ToUpperInvariant()
@@ -167,7 +186,7 @@ function ConvertFrom-ADAnalyzerLocalUsersGroups {
             $targetSid=Get-ADAnalyzerXmlAttribute $properties groupSid
             if($item.LocalName -eq 'User'){$targetSid=Get-ADAnalyzerXmlAttribute $properties userSid (Get-ADAnalyzerXmlAttribute $properties sid)}
             $targetName=Get-ADAnalyzerXmlAttribute $properties $(if($item.LocalName -eq 'Group'){'groupName'}else{'userName'})
-            $sidValid=-not $targetSid -or $targetSid -match '^S-\d+(-\d+)+$'
+            $sidValid=-not $targetSid -or (Test-ADAnalyzerPolicySid $targetSid)
             [pscustomobject]@{Scope=$record.File.Scope;Source=$record.File.Path;Kind=$item.LocalName;Uid=(Get-ADAnalyzerXmlAttribute $item uid);ItemPath=(Get-ADAnalyzerPolicyXmlPath $item);Name=$targetName;Sid=$targetSid;Action=$action;Disabled=($disabled -in '1','true');AccountDisabled=(Get-ADAnalyzerXmlAttribute $properties disabled);PasswordNeverExpires=(Get-ADAnalyzerXmlAttribute $properties neverExpires);Targeted=($null -ne $filters -and $filters.HasChildNodes);Filters=(Get-ADAnalyzerPresencePolicyXml $filters);DeleteAllUsers=(Get-ADAnalyzerXmlAttribute $properties deleteAllUsers '0') -in '1','true';DeleteAllGroups=(Get-ADAnalyzerXmlAttribute $properties deleteAllGroups '0') -in '1','true';RemovePolicy=(Get-ADAnalyzerXmlAttribute $item removePolicy '0') -in '1','true';Members=$members;Valid=($null -ne $properties -and $sidValid -and $disabled -in '0','1','true','false' -and $action -in 'C','U','R','D' -and @($members | Where-Object {-not $_.Valid -or $_.Action -notin 'ADD','REMOVE'}).Count -eq 0)}
         }
     }
@@ -386,14 +405,18 @@ function Test-ADAnalyzerGpoPolicy {
         }
     }
 
-    $approved=@(Get-ADAnalyzerPolicyProfileValue $Profile ApprovedLocalAdminSids @('S-1-5-32-544'))
+    $policySection=Get-ADAnalyzerPolicyValue $Profile Policy @{}
+    $approvedValue=@('S-1-5-32-544')
+    if($policySection -is [Collections.IDictionary] -and $policySection.Contains('ApprovedLocalAdminSids')){$approvedValue=$policySection['ApprovedLocalAdminSids']}
+    $approvedValid=Test-ADAnalyzerPolicySidList $approvedValue
+    $approved=@($approvedValue)
     $restricted=@(ConvertFrom-ADAnalyzerRestrictedGroups $Policy.IniSettings)
     foreach($group in $restricted){
         $candidates=@();$privileged=$group.GroupSid -eq 'S-1-5-32-544' -or $group.GroupName -ieq 'Administrators'
         if($group.Mode -ieq 'Memberof'){$privileged=@($group.Members | Where-Object {$_.Sid -eq 'S-1-5-32-544' -or $_.Name -ieq 'Administrators'}).Count -gt 0;$candidates=@([pscustomobject]@{Sid=$group.GroupSid;Name=$group.GroupName})}else{$candidates=@($group.Members)}
         $unknown=@($candidates | Where-Object {-not $_.Sid}).Count -gt 0
         $bad=@($candidates | Where-Object {$_.Sid -and $approved -notcontains $_.Sid})
-        $status=if(-not $group.Valid){'Invalid'}elseif(-not $privileged){'NotApplicable'}elseif($bad.Count){'Fail'}elseif($unknown){'Unknown'}else{'Pass'}
+        $status=if(-not $group.Valid -or -not $approvedValid){'Invalid'}elseif(-not $privileged){'NotApplicable'}elseif($bad.Count){'Fail'}elseif($unknown){'Unknown'}else{'Pass'}
         New-ADAnalyzerCheck -RuleId 'GPO.RestrictedGroups.LocalAdministrators' -Status $status -Severity High -Category RestrictedGroups -Target ($target+'/'+$group.Scope+'/'+$group.Source+'/'+$group.SettingName) -Observed $group -Expected $approved -Evidence @{Path=$group.Source;Mode=$group.Mode} -Message 'Members replaces the configured membership; MemberOf requires inclusion. Names without a SID cannot be approved by the SID allowlist.' -Applicability (Get-ADAnalyzerPolicyApplicability $Gpo $group.Scope $Profile)
     }
     if(-not $restricted.Count){New-ADAnalyzerCheck -RuleId 'GPO.RestrictedGroups.LocalAdministrators' -Status NotConfigured -Severity High -Category RestrictedGroups -Target ($target+'/RestrictedGroups') -Observed $null -Expected $approved -Evidence $null -Message 'No Restricted Groups configuration was found in this GPO.' -Applicability Unknown}
@@ -407,7 +430,7 @@ function Test-ADAnalyzerGpoPolicy {
         $checkTarget=$itemTargets[$itemIndex];$itemIndex++;$privileged=$item.Sid -eq 'S-1-5-32-544' -or $item.Name -ieq 'Administrators'
         $additions=@($item.Members | Where-Object Action -eq 'ADD');$unknown=@($additions | Where-Object {-not $_.Sid}).Count -gt 0
         $bad=@($additions | Where-Object {$_.Sid -and $approved -notcontains $_.Sid})
-        $status=if(-not $item.Valid){'Invalid'}elseif($item.Disabled -or $item.Action -eq 'D'){'NotApplicable'}elseif($item.Kind -ne 'Group' -or -not $privileged){'Unknown'}elseif($bad.Count){'Fail'}elseif($unknown){'Unknown'}else{'Pass'}
+        $status=if(-not $item.Valid -or -not $approvedValid){'Invalid'}elseif($item.Disabled -or $item.Action -eq 'D'){'NotApplicable'}elseif($item.Kind -ne 'Group' -or -not $privileged){'Unknown'}elseif($bad.Count){'Fail'}elseif($unknown){'Unknown'}else{'Pass'}
         New-ADAnalyzerCheck -RuleId 'GPO.Preferences.LocalUsersGroups' -Status $status -Severity High -Category LocalUsersGroups -Target $checkTarget -Observed $item -Expected $approved -Evidence @{Path=$item.Source;Targeting=$item.Targeted;Disabled=$item.Disabled;Action=$item.Action} -Message 'Preference actions and member additions/removals are preserved. Targeting filters have not been evaluated, and an update is not a complete effective membership inventory.' -Applicability (Get-ADAnalyzerPolicyApplicability $Gpo $item.Scope $Profile -Targeted:$item.Targeted -Disabled:$item.Disabled)
     }
     if(-not $local.Count){New-ADAnalyzerCheck -RuleId 'GPO.Preferences.LocalUsersGroups' -Status NotConfigured -Severity High -Category LocalUsersGroups -Target ($target+'/LocalUsersGroups') -Observed $null -Expected $approved -Evidence $null -Message 'No Local Users and Groups preference was found in this GPO.' -Applicability Unknown}
@@ -416,8 +439,8 @@ function Test-ADAnalyzerGpoPolicy {
     foreach($right in @($Policy.SecuritySettings | Where-Object Kind -eq 'UserRightsAssignment')){
         $principals=@($right.Value | ForEach-Object {ConvertFrom-ADAnalyzerPolicyPrincipal ([string]$_)})
         $hasAllowlist=$rights -is [Collections.IDictionary] -and $rights.Contains($right.Name)
-        $expected=$null;if($hasAllowlist){$expected=@($rights[$right.Name])}
-        $status=if(@($principals | Where-Object {-not $_.Valid}).Count){'Invalid'}elseif(-not $hasAllowlist -or @($principals | Where-Object {-not $_.Sid}).Count){'Unknown'}elseif(@($principals | Where-Object {@($expected) -notcontains $_.Sid}).Count){'Fail'}else{'Pass'}
+        $expected=$null;$allowlistValid=$false;if($hasAllowlist){$allowlistValid=Test-ADAnalyzerPolicySidList $rights[$right.Name];$expected=@($rights[$right.Name])}
+        $status=if(@($principals | Where-Object {-not $_.Valid}).Count -or ($hasAllowlist -and -not $allowlistValid)){'Invalid'}elseif(-not $hasAllowlist -or @($principals | Where-Object {-not $_.Sid}).Count){'Unknown'}elseif(@($principals | Where-Object {@($expected) -notcontains $_.Sid}).Count){'Fail'}else{'Pass'}
         New-ADAnalyzerCheck -RuleId ('GPO.UserRights.'+$right.Name) -Status $status -Severity High -Category UserRightsAssignment -Target ($target+'/'+$right.Scope+'/'+$right.Source+'/'+$right.Name) -Observed $principals -Expected $expected -Evidence @{Path=$right.Source;Right=$right.Name} -Message 'User rights are compared with exact approved SIDs, never principal-name substrings. An unspecified allowlist is Unknown.' -Applicability (Get-ADAnalyzerPolicyApplicability $Gpo $right.Scope $Profile)
     }
     if($rights -is [Collections.IDictionary]){foreach($name in $rights.Keys){if(-not @($Policy.SecuritySettings | Where-Object {$_.Kind -eq 'UserRightsAssignment' -and $_.Name -eq $name}).Count){New-ADAnalyzerCheck -RuleId ('GPO.UserRights.'+$name) -Status NotConfigured -Severity High -Category UserRightsAssignment -Target ($target+'/UserRights/'+$name) -Observed $null -Expected $rights[$name] -Evidence $null -Message 'This configured baseline right is absent from this GPO.' -Applicability Unknown}}}

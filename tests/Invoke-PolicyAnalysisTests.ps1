@@ -370,6 +370,41 @@ Test-Policy 'user rights use exact approved SIDs and support an empty allowlist'
     Assert-Policy (($checks | Where-Object RuleId -eq GPO.UserRights.SeDebugPrivilege).Status -eq 'Unknown') 'A principal-name substring was treated as an approved SID'
     Assert-Policy (($checks | Where-Object RuleId -eq GPO.UserRights.SeDenyNetworkLogonRight).Status -eq 'Pass') 'Explicit empty allowlist was treated as unspecified'
 }
+Test-Policy 'modern policy principals enforce SID bounds and consumed allowlist shape' {
+    $valid=@('S-1-5-32-544','S-1-4294967295-4294967295','S-1-0xffffffffffff-4294967295')
+    $invalid=@('S-1-5-4294967296','S-1-281474976710656-1','S-1-4294967296-1','S-2-5-1','S-1-5-0544',('S-1-5'+('-1'*16)),('S-1-'+[char]0x0665+'-1'),'**S-1-5-32-544','')
+    foreach($sid in $valid+$invalid){
+        $good=$sid -in $valid
+        $policy=New-PolicyFixture;$policy.SecuritySettings=@([pscustomobject]@{Kind='UserRightsAssignment';Name='SeDebugPrivilege';Value=@('*'+$sid);Scope='Computer';Source='Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf'})
+        $profile=Get-ADAnalyzerDefaultProfile;$profile.Policy.AllowedUserRightSids=@{SeDebugPrivilege=@($sid)}
+        $check=Get-PolicyChecks $policy $profile | Where-Object RuleId -eq GPO.UserRights.SeDebugPrivilege
+        Assert-Policy ($check.Status -eq $(if($good){'Pass'}else{'Invalid'})) ('Unexpected user-right SID outcome: '+$sid)
+        $policy.IniSettings=@([pscustomobject]@{Section='Group Membership';Name='*S-1-5-32-544__Members';Value=('*'+$sid);Scope='Computer';Source='Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf'})
+        $group=@(ConvertFrom-ADAnalyzerRestrictedGroups $policy.IniSettings)[0]
+        Assert-Policy ($group.Valid -eq $good) 'Restricted Groups SID validation diverged'
+        if($sid){
+            $policy.XmlFiles=@([pscustomobject]@{Scope='Computer';Path='Groups.xml';Xml=('<Groups><Group><Properties action="U" groupSid="'+$sid+'"><Members><Member sid="'+$sid+'" action="ADD"/></Members></Properties></Group></Groups>')})
+            Assert-Policy (@(ConvertFrom-ADAnalyzerLocalUsersGroups $policy.XmlFiles)[0].Valid -eq $good) 'GPP SID validation diverged'
+        }
+    }
+    foreach($allow in @($null,@{Sid='S-1-5-32-544'},@(@('S-1-5-32-544','S-1-5-32-545'),'S-1-5-32-546'),'S-1-5-4294967296')){
+        $profile=Get-ADAnalyzerDefaultProfile;$profile.Policy.AllowedUserRightSids=@{SeDebugPrivilege=$allow}
+        $policy=New-PolicyFixture;$policy.SecuritySettings=@([pscustomobject]@{Kind='UserRightsAssignment';Name='SeDebugPrivilege';Value=@('*S-1-5-32-544');Scope='Computer';Source='GptTmpl.inf'})
+        Assert-Policy (((Get-PolicyChecks $policy $profile) | Where-Object RuleId -eq GPO.UserRights.SeDebugPrivilege).Status -eq 'Invalid') 'Malformed allowlist produced a valid approval'
+    }
+    $principal=ConvertFrom-ADAnalyzerPolicyPrincipal 'Localized User'
+    Assert-Policy ($principal.Valid -and -not $principal.Sid -and $principal.Name -eq 'Localized User') 'Unresolved names must remain available'
+    $policy=New-PolicyFixture;$policy.XmlFiles=@([pscustomobject]@{Scope='Computer';Path='Groups.xml';Xml='<Groups><Group><Properties action="U" groupSid="S-1-5-32-544"><Members><Member sid="Administrators" action="ADD"/></Members></Properties></Group></Groups>'})
+    Assert-Policy (-not @(ConvertFrom-ADAnalyzerLocalUsersGroups $policy.XmlFiles)[0].Valid) 'Explicit non-SID attribute became a principal name'
+    $profile=Get-ADAnalyzerDefaultProfile;$profile.Policy.ApprovedLocalAdminSids=@('S-1-5-4294967296')
+    $policy.XmlFiles[0].Xml=$policy.XmlFiles[0].Xml.Replace('sid="Administrators"','sid="S-1-5-32-544"')
+    Assert-Policy (((Get-PolicyChecks $policy $profile) | Where-Object RuleId -eq GPO.Preferences.LocalUsersGroups).Status -eq 'Invalid') 'Invalid local administrator allowlist accepted'
+    $policy=New-PolicyFixture;$policy.IniSettings=@([pscustomobject]@{Section='Group Membership';Name='*S-1-5-32-544__Members';Value='';Scope='Computer';Source='Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf'})
+    $profile.Policy.ApprovedLocalAdminSids=@()
+    Assert-Policy (((Get-PolicyChecks $policy $profile) | Where-Object RuleId -eq GPO.RestrictedGroups.LocalAdministrators).Status -eq 'Pass') 'Explicit empty local administrator allowlist was lost'
+    $profile.Policy.ApprovedLocalAdminSids=$null
+    Assert-Policy (((Get-PolicyChecks $policy $profile) | Where-Object RuleId -eq GPO.RestrictedGroups.LocalAdministrators).Status -eq 'Invalid') 'Null local administrator allowlist was treated as empty'
+}
 Test-Policy 'custom top-level rules assess values and preserve missing state' {
     $profile=Get-ADAnalyzerDefaultProfile;$profile.RegistryRules=@(@{Id='Fixture';Hive='HKLM';Key='Software\Fixture';ValueName='Level';Operator='Minimum';Expected=2},@{Id='EmptyList';Hive='HKLM';Key='Software\Fixture';ValueName='Empty';Expected=@()})
     $profile.ExpectedGpoSettings=@(@{Id='Missing';Kind='Account';Name='CustomSetting';Expected=1})
