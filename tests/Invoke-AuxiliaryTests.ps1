@@ -156,7 +156,50 @@ try {
             Assert-True (($output -join ' ') -match ('PASS group inventory '+$mode)) 'Group inventory child did not finish'
         }
     }
-    foreach($scriptName in @('Get-LocalGroup.ps1','Get-LocalGroup copy.ps1')){foreach($mode in @('Inert','Success','Pipeline','Failures','Validation','Cli')){
+    $nameFixture=Join-Path $script:Temporary 'computer-admin-name-fixture.ps1'
+    Write-FixtureText $nameFixture @"
+param([string]`$Root,[string]`$WorkingDirectory)
+`$ErrorActionPreference='Stop'
+`$path=Join-Path `$Root 'etc/Get-ComputerADSI.ps1'
+`$tokens=`$null;`$errors=`$null;`$ast=[Management.Automation.Language.Parser]::ParseFile(`$path,[ref]`$tokens,[ref]`$errors)
+if(`$errors.Count -or -not `$ast.Find({param(`$n)`$n -is [Management.Automation.Language.FunctionDefinitionAst] -and `$n.Name -eq 'Get-ComputerAdministratorName'},`$true)){throw 'Missing explicit computer administrator name reader'}
+`$global:NameAdapter=@{Calls=0;Fault=`$false}
+function Add-Type {throw 'Unexpected native framework load'}
+function Get-Credential {throw 'Unexpected credential prompt'}
+`$null=[IO.Directory]::CreateDirectory(`$WorkingDirectory)
+`$copy=Join-Path `$WorkingDirectory 'Get-ComputerADSI.ps1';[IO.File]::Copy(`$path,`$copy)
+[IO.File]::WriteAllText((Join-Path `$WorkingDirectory 'Get-LocalGroup.ps1'),@'
+param(`$CliComputerName,`$CliCredential)
+function Get-LocalGroupMember {
+ param(`$ComputerName,`$Credential,[switch]`$IncludeName)
+ `$global:NameAdapter.Calls++;`$global:NameAdapter.Computers=`$ComputerName;`$global:NameAdapter.Credential=`$Credential;`$global:NameAdapter.IncludeName=[bool]`$IncludeName
+ [pscustomobject]@{Name='Display One';samaccountname='sam-one'}
+ if(`$global:NameAdapter.Fault){throw 'fixture late member error'}
+ [pscustomobject]@{Name='Display Two';samaccountname='sam-two'}
+}
+'@)
+`$computerName='caller-target';`$credential='caller-login'
+`$output=@(. `$copy)
+if(`$output.Count -or `$global:NameAdapter.Calls -or `$computerName -ne 'caller-target' -or `$credential -ne 'caller-login'){throw 'Loading performed work or changed caller inputs'}
+`$login=[pscredential]::new('fixture',(ConvertTo-SecureString 'fixture-only' -AsPlainText -Force))
+`$rows=@(Get-ComputerAdministratorName -ComputerName fixture-one,fixture-two -Credential `$login)
+if((`$rows -join ',') -ne 'Display One,Display Two' -or -not `$global:NameAdapter.IncludeName -or (`$global:NameAdapter.Computers -join ',') -ne 'fixture-one,fixture-two' -or -not [object]::ReferenceEquals(`$login,`$global:NameAdapter.Credential)){throw 'Name-only adapter forwarding failed'}
+`$global:NameAdapter.Fault=`$true;`$emitted=[Collections.Generic.List[object]]::new();`$caught=`$false
+try{Get-ComputerAdministratorName -ComputerName fixture-one | ForEach-Object {`$emitted.Add(`$_)}}catch{`$caught=`$true}
+if(-not `$caught -or `$emitted.Count){throw 'Late member failure emitted partial names'}
+`$global:NameAdapter.Fault=`$false;`$before=`$global:NameAdapter.Calls;`$caught=`$false
+try{& `$copy | Out-Null}catch{`$caught=`$true}
+if(-not `$caught -or `$before -ne `$global:NameAdapter.Calls){throw 'CLI without computer inputs reached the adapter'}
+`$rows=@(& `$copy -ComputerName fixture-one -Credential `$login)
+if((`$rows -join ',') -ne 'Display One,Display Two'){throw 'Explicit name CLI failed'}
+'PASS computer administrator name wrapper'
+"@
+    Invoke-AuxiliaryTest 'computer administrator name wrapper is explicit inert and buffers late failures' {
+        $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $nameFixture -Root $RepositoryRoot -WorkingDirectory (Join-Path $script:Temporary 'computer-admin-name'))
+        Assert-Equal 0 $LASTEXITCODE
+        Assert-True (($output -join ' ') -match 'PASS computer administrator name wrapper') 'Name wrapper child did not finish'
+    }
+    foreach($scriptName in @('Get-LocalGroup.ps1','Get-LocalGroup copy.ps1')){foreach($mode in @('Inert','Success','Name','Pipeline','Failures','Validation','Cli')){
         Invoke-AuxiliaryTest ('local group ownership contract: '+$scriptName+' '+$mode) {
             $output=@(& (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File (Join-Path $RepositoryRoot 'tests/LocalGroupFixture.ps1') -RepositoryRoot $RepositoryRoot -ScriptName $scriptName -Mode $mode)
             Assert-Equal 0 $LASTEXITCODE

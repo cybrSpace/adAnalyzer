@@ -121,6 +121,8 @@ Exceptions use `@{RuleId='RULE.ID';Target='exact identity or wildcard';Owner='te
 
 Profiles reject duplicate audit subcategory GUIDs and equivalent certificate endpoints before observations start. Audit GUID formatting and case do not create separate rules; combine success/failure flags in one rule. Certificate identity uses host, effective port (443 by default), and effective TLS server name (host by default).
 
+`etc/Get-ComputerADSI.ps1` now defines `Get-ComputerAdministratorName -ComputerName <hosts>` with optional `Credential`. It returns direct member names through the same SID 544 reader as `Get-LocalGroupMember`, with owned resources disposed before names are emitted. Dot sourcing is inert; CLI requires explicit computers. `Get-LocalGroupMember -IncludeName` adds a detached `Name` column; its default columns stay unchanged. Name lookup failures are terminating.
+
 ## Baseline imports
 
 Extract a matching Microsoft Security Compliance Toolkit GPO backup and pass its `DomainSysvol/GPO` root (containing Machine/User) to `Import-ADAnalyzerBaseline -GpoPath <root> -Name <name> -Version <version>`. The importer replays Registry.pol directives, retains types, aggregates multi-value security settings and rejects conflicting inputs. Its returned profile can be saved as JSON. Policy Analyzer/LGPO remain optional reference tools; neither is required by the runtime. Download baselines from the [Microsoft Security Compliance Toolkit](https://www.microsoft.com/en-us/download/details.aspx?id=55319).

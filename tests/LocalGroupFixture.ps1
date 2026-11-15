@@ -28,6 +28,7 @@ namespace ADAnalyzer.LocalGroupFixture {
   public Principal(int index){number=index;context=PrincipalContext.Borrowed();}
   void Check(){if(disposed)throw new ObjectDisposedException("member");if(Probe.Bad("Projection"))throw new Exception("fixture member projection failure");}
   public string SamAccountName {get{Check();return number==0?"UserOne":"DirectGroup";}}
+  public string Name {get{Check();if(Probe.Bad("NameProjection"))throw new Exception("fixture name projection failure");if(Probe.Bad("NameMissing"))return null;return number==0?"Display One":"Display Group";}}
   public PrincipalContext Context {get{Check();return context;}}
   public void Dispose(){if(disposed)throw new Exception("Member disposed twice");disposed=true;Probe.MemberDisposals++;Probe.Events.Add("member.dispose");if(Probe.Bad("MemberDispose"))throw new Exception("fixture member cleanup failure");}
  }
@@ -100,6 +101,20 @@ if($Mode -eq 'Inert'){
         [ADAnalyzer.LocalGroupFixture.Probe]::Reset('');[ADAnalyzer.LocalGroupFixture.Probe]::Empty=$true
         Assert-LocalGroup (@(Get-LocalGroupMember -ComputerName fixture-one).Count -eq 0) 'Empty group produced a fabricated row'
         Assert-LocalGroup ([ADAnalyzer.LocalGroupFixture.Probe]::ResultDisposals -eq 1 -and [ADAnalyzer.LocalGroupFixture.Probe]::EnumeratorDisposals -eq 1) 'Empty enumeration leaked resources'
+    }elseif($Mode -eq 'Name'){
+        [ADAnalyzer.LocalGroupFixture.Probe]::Reset('')
+        $rows=@(Get-LocalGroupMember -ComputerName fixture-one -IncludeName)
+        Assert-LocalGroup (($rows.Name -join ',') -eq 'Display One,Display Group' -and ($rows.samaccountname -join ',') -eq 'UserOne,DirectGroup') 'Name projection assumed SAM identity'
+        Assert-LocalGroup ([ADAnalyzer.LocalGroupFixture.Probe]::MemberDisposals -eq 2 -and [ADAnalyzer.LocalGroupFixture.Probe]::ContextDisposals -eq 1) 'Name projection leaked resources'
+        foreach($fault in @('NameProjection','NameMissing')){
+            [ADAnalyzer.LocalGroupFixture.Probe]::Reset($fault);$emitted=[Collections.Generic.List[object]]::new();$caught=$null
+            try{Get-LocalGroupMember -ComputerName fixture-one -IncludeName | ForEach-Object {$emitted.Add($_)}}catch{$caught=$_}
+            Assert-LocalGroup ($null -ne $caught -and $emitted.Count -eq 0) 'Failed name projection emitted partial data'
+            Assert-LocalGroup ([ADAnalyzer.LocalGroupFixture.Probe]::MemberDisposals -eq 1 -and [ADAnalyzer.LocalGroupFixture.Probe]::ContextDisposals -eq 1 -and [ADAnalyzer.LocalGroupFixture.Probe]::GroupDisposals -eq 1 -and [ADAnalyzer.LocalGroupFixture.Probe]::ResultDisposals -eq 1 -and [ADAnalyzer.LocalGroupFixture.Probe]::EnumeratorDisposals -eq 1 -and [ADAnalyzer.LocalGroupFixture.Probe]::BorrowedDisposals -eq 0) 'Failed name projection cleanup failed'
+        }
+        [ADAnalyzer.LocalGroupFixture.Probe]::Reset('NameProjection')
+        $rows=@(Get-LocalGroupMember -ComputerName fixture-one)
+        Assert-LocalGroup ($rows.Count -eq 2 -and ($rows[0].PSObject.Properties.Name -join ',') -eq 'Computer,Domain,samaccountname') 'Default shape or optional getter behavior changed'
     }elseif($Mode -eq 'Pipeline'){
         [ADAnalyzer.LocalGroupFixture.Probe]::Reset('');$rows=@(@('fixture-one','fixture-two') | Get-LocalGroupMember)
         Assert-LocalGroup ($rows.Count -eq 4 -and ($rows.Computer -join ',') -eq 'fixture-one,fixture-one,fixture-two,fixture-two') 'Pipeline host order changed'

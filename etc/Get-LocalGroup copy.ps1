@@ -11,7 +11,8 @@ function Get-LocalGroupMember {
     param(
         [Parameter(ValueFromPipeline=$true,ValueFromPipelineByPropertyName=$true)]
         [Alias('Computer')][string[]]$ComputerName=$env:COMPUTERNAME,
-        [pscredential]$Credential=[pscredential]::Empty
+        [pscredential]$Credential=[pscredential]::Empty,
+        [switch]$IncludeName
     )
     begin {
         $frameworkLoaded=$false
@@ -53,7 +54,15 @@ function Get-LocalGroupMember {
                             $domain=$nameProperty.GetValue($memberContext,$null)
                         }
                         $sam=$samProperty.GetValue($member,$null)
-                        $rows.Add([pscustomobject][ordered]@{Computer=$computer;Domain=$domain;samaccountname=$sam})
+                        $row=[ordered]@{Computer=$computer;Domain=$domain;samaccountname=$sam}
+                        if($IncludeName){
+                            $memberNameProperty=$memberType.GetProperty('Name')
+                            if($null -eq $memberNameProperty){throw 'The member name getter is unavailable.'}
+                            $memberName=$memberNameProperty.GetValue($member,$null)
+                            if([string]::IsNullOrEmpty([string]$memberName)){throw 'The member name is unavailable.'}
+                            $row.Name=$memberName
+                        }
+                        $rows.Add([pscustomobject]$row)
                     }finally{
                         if($null -ne $member){try{$null=$dispose.Invoke($member,$null)}catch{$cleanupErrors.Add($_)}}
                     }
