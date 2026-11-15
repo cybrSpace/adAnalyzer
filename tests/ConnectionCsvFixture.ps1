@@ -44,7 +44,12 @@ function Assert-Fails([scriptblock]$Body) {
 
 function Test-NetConnection {
     [CmdletBinding()]
-    param($ComputerName, $Port, $InformationLevel)
+    param(
+        $ComputerName,
+        $Port,
+        $InformationLevel
+
+    )
     $call = @{}
     foreach ($key in $PSBoundParameters.Keys) {
         $call[$key] = $PSBoundParameters[$key]
@@ -237,9 +242,14 @@ try {
         }
         'ExportFailures' {
             [IO.File]::WriteAllText($outputPath, 'previous-report')
+
             function ConvertTo-Csv {
                 [CmdletBinding()]
-                param([Parameter(ValueFromPipeline = $true)]$InputObject, [switch]$NoTypeInformation)
+                param(
+                    [Parameter(ValueFromPipeline = $true)]$InputObject,
+                    [switch]$NoTypeInformation
+
+                )
                 process {
                     if ($global:ConnectionCsvFixture.ConversionFault -eq 'Throw') {
                         throw 'Fixture conversion failure'

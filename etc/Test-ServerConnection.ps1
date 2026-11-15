@@ -102,6 +102,7 @@ function Test-ServerConnection {
         [string[]]$ComputerName = @(),
         [int[]]$Port = @(445),
         [string]$OutputPath
+
     )
 
     $ErrorActionPreference = 'Stop'

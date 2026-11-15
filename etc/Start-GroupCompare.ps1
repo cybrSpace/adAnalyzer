@@ -93,6 +93,7 @@ function Get-ADAnalyzerGroupMemberDifference {
         [string]$ReferenceGroup,
         [string]$Server,
         [pscredential]$Credential = [pscredential]::Empty
+
     )
 
     $ErrorActionPreference = 'Stop'

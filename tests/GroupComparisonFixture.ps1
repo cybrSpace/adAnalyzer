@@ -53,7 +53,11 @@ function Reset-Fixture {
 
 function Import-Module {
     [CmdletBinding()]
-    param($Name, $Scope)
+    param(
+        $Name,
+        $Scope
+
+    )
     Assert-Equal (Join-Path $RepositoryRoot 'lib/Microsoft.ActiveDirectory.Management.dll') $Name
     Assert-Equal 'Local' $Scope
     Assert-Equal 'Stop' ([string]$PSBoundParameters.ErrorAction)
@@ -88,7 +92,13 @@ function Invoke-FixtureFault([string]$Identity) {
 
 function Get-ADGroup {
     [CmdletBinding()]
-    param($Identity, [Alias('pr')]$Properties, $Server, [pscredential]$Credential)
+    param(
+        $Identity,
+        [Alias('pr')]$Properties,
+        $Server,
+        [pscredential]$Credential
+
+    )
     if ($global:GroupComparisonFixture.Calls.Count -gt 250) {
         throw 'Fixture query bound exceeded'
     }
@@ -120,7 +130,13 @@ function Get-ADGroup {
 
 function Get-ADObject {
     [CmdletBinding()]
-    param($Identity, $Properties, $Server, [pscredential]$Credential)
+    param(
+        $Identity,
+        $Properties,
+        $Server,
+        [pscredential]$Credential
+
+    )
     $call = @{
         Kind = 'Object'
     }
