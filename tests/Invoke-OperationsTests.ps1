@@ -33,6 +33,35 @@ function Reset-Fixture {
     $script:Journal=Join-Path $script:Temporary ([guid]::NewGuid().ToString('N')+'.json')
 }
 function Invoke-Test([string]$Name,[scriptblock]$Body){Reset-Fixture;try{& $Body;$script:Passed++;Write-Host "PASS $Name"}catch{$script:Failed++;Write-Host "FAIL $Name : $_"}}
+Invoke-Test 'composite structs and typed pairs project nested secrets through every export' {
+    Add-Type -TypeDefinition 'namespace ADAnalyzer.SafeStructFixture { public struct Evidence { public object Payload; } }'
+    $marker='STRUCT_FIXTURE_SECRET'
+    $nested=@{Password=$marker}
+    $pair=[Collections.Generic.KeyValuePair[string,object]]::new('wrapper',$nested)
+    $entry=[Collections.DictionaryEntry]::new('wrapper',$nested)
+    $structure=[ADAnalyzer.SafeStructFixture.Evidence]::new();$structure.Payload=$nested
+    $direct=[Collections.Generic.KeyValuePair[string,object]]::new('Password',$marker)
+    $empty=[Collections.DictionaryEntry]::new('Password','')
+    $payload=[pscustomobject]@{Pair=$pair;Entry=$entry;Structure=$structure;Direct=$direct;Empty=$empty;Array=@($pair,$entry,$structure)}
+    $before=ConvertTo-Json -InputObject $payload -Depth 100 -Compress
+    $safe=ConvertTo-ADAnalyzerSafeData -InputObject $payload
+    $json=ConvertTo-Json -InputObject $safe -Depth 100 -Compress
+    Assert-True (-not $json.Contains($marker)) 'Composite value type retained a nested secret'
+    Assert-Equal $true $safe.Pair.Value.PasswordPresent;Assert-Equal $true $safe.Entry.Value.PasswordPresent
+    Assert-Equal $true $safe.Structure.Payload.PasswordPresent;Assert-Equal $true $safe.Direct.SecretPresent;Assert-Equal $false $safe.Empty.SecretPresent
+    Assert-Equal $null $safe.Direct.PSObject.Properties['Value'];Assert-Equal $null $safe.Empty.PSObject.Properties['Value']
+    Assert-Equal $json (ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerSafeData -InputObject $safe) -Depth 100 -Compress)
+    Assert-Equal $before (ConvertTo-Json -InputObject $payload -Depth 100 -Compress);Assert-Equal $marker $nested.Password
+    $document=[pscustomobject]@{SchemaVersion=1;Target='fixture';Evidence=$payload;Findings=@([pscustomobject]@{RuleId='FIXTURE';Evidence=$payload})}
+    $path=Join-Path $script:Temporary 'struct-export'
+    $null=Export-ADAnalyzerAssessment $document $path -Format All -Confirm:$false
+    foreach($extension in @('.json','.html','.csv')){Assert-True (-not [IO.File]::ReadAllText($path+$extension).Contains($marker)) ('Struct secret leaked through '+$extension)}
+    $date=[datetime]'2026-01-01T00:00:00Z';$guid=[guid]'11111111-1111-1111-1111-111111111111'
+    $scalars=[pscustomobject]@{False=$false;Zero=0;Decimal=[decimal]1.25;Enum=[DayOfWeek]::Friday;Span=[timespan]::FromMinutes(7);Date=$date;Guid=$guid;Big=[bigint]123}
+    $copy=ConvertTo-ADAnalyzerSafeData -InputObject $scalars
+    Assert-Equal $false $copy.False;Assert-Equal 0 $copy.Zero;Assert-True ($copy.Decimal -is [decimal] -and $copy.Enum -is [DayOfWeek] -and $copy.Span -is [timespan] -and $copy.Big -is [bigint]) 'Scalar type contracts changed'
+    Assert-Equal $date.ToUniversalTime().ToString('o') $copy.Date;Assert-Equal $guid.ToString('D') $copy.Guid
+}
 function Get-ADObject {
     [CmdletBinding()]param($Identity,$Properties,$Server,$Credential)
     $script:Reads++;$script:SeenIdentity=$Identity;$script:SeenServer=$Server;$script:SeenCredential=$Credential

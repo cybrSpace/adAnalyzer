@@ -35,7 +35,14 @@ function ConvertTo-ADAnalyzerSafeData {
         if($InputObject -is [datetime]){return $InputObject.ToUniversalTime().ToString('o')}
         if($InputObject -is [datetimeoffset]){return $InputObject.ToUniversalTime().ToString('o')}
         if($InputObject -is [guid]){return $InputObject.ToString('D')}
-        if($InputObject -is [ValueType]){return $InputObject}
+        $inputType=$InputObject.GetType()
+        if($inputType.IsPrimitive -or $inputType.IsEnum -or $inputType.FullName -in @('System.Decimal','System.TimeSpan','System.Numerics.BigInteger','System.Half','System.Int128','System.UInt128')){return $InputObject}
+        if($InputObject -is [Collections.DictionaryEntry] -or ($inputType.IsGenericType -and $inputType.GetGenericTypeDefinition().FullName -eq 'System.Collections.Generic.KeyValuePair`2')){
+            $pair=[ordered]@{Key=(ConvertTo-ADAnalyzerSafeData -InputObject $InputObject.Key -Depth ($Depth+1))}
+            if(Test-ADAnalyzerSecretName ([string]$InputObject.Key)){$pair.SecretPresent=Test-ADAnalyzerSecretPresence $InputObject.Value}
+            else{$pair.Value=ConvertTo-ADAnalyzerSafeData -InputObject $InputObject.Value -Depth ($Depth+1)}
+            return [pscustomobject]$pair
+        }
         if($InputObject -is [Xml.XmlNode]){return Protect-ADAnalyzerSecretText $InputObject.OuterXml}
         if($InputObject -is [Collections.IEnumerable] -and $InputObject -isnot [Collections.IDictionary] -and $InputObject -isnot [pscustomobject]) {
             $items=[Collections.ArrayList]::new()
