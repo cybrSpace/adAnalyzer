@@ -51,14 +51,19 @@ class ADAnalyzerAssessmentEngine {
         [Management.Automation.ActionPreference]$ErrorPreference
     ) {
         $ErrorActionPreference = if ($null -ne $CommandContext -and
-            $ErrorPreference -notin 'Stop', 'Ignore') {
+            $ErrorPreference -ne 'Stop') {
             'Continue'
         }
         else {
             $ErrorPreference
         }
+        $commandArguments = $Arguments.Clone()
+        if ($ErrorPreference -eq 'Ignore') {
+            # Windows PowerShell 5.1 supports Ignore as a parameter, not a preference variable.
+            $commandArguments.ErrorAction = 'Ignore'
+        }
         $values = [Collections.Generic.List[object]]::new()
-        foreach ($item in @(& $Command @Arguments 2>&1)) {
+        foreach ($item in @(& $Command @commandArguments 2>&1)) {
             if ($item -is [Management.Automation.ErrorRecord]) {
                 if ($null -eq $CommandContext) {
                     throw $item
@@ -79,7 +84,12 @@ class ADAnalyzerAssessmentEngine {
         [Management.Automation.PSCmdlet]$CommandContext,
         [Management.Automation.ActionPreference]$ErrorPreference
     ) {
-        $ErrorActionPreference = $ErrorPreference
+        $ErrorActionPreference = if ($ErrorPreference -eq 'Stop') {
+            'Stop'
+        }
+        else {
+            'Continue'
+        }
         if ($null -eq $DirectoryData) {
             throw 'DirectoryData is required.'
         }
