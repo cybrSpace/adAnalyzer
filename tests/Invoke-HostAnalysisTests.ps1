@@ -1,170 +1,508 @@
 [CmdletBinding()]
 param([string]$RepositoryRoot)
-$ErrorActionPreference='Stop'
-if(-not $RepositoryRoot){$RepositoryRoot=Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)}
-foreach($name in @('ADProfile','ADGpo','ADPolicyAnalysis','ADHostAnalysis')){. (Join-Path $RepositoryRoot ('bin/'+$name+'.ps1'))}
-$script:Passed=0;$script:Failed=0
-function Assert-Equal($Expected,$Actual){if($Expected -ne $Actual){throw "Expected [$Expected], got [$Actual]"}}
-function Assert-True($Actual,[string]$Message){if(-not $Actual){throw $Message}}
-function Test-HostPolicy([string]$Name,[scriptblock]$Body){try{& $Body;$script:Passed++;Write-Host "PASS $Name"}catch{$script:Failed++;Write-Host "FAIL $Name : $_";Write-Host $_.ScriptStackTrace}}
-$script:AuditFlags=3;$script:AuditFails=$false;$script:AuditCalls=0;$script:TlsCalls=0
-$script:Credential=[pscredential]::new('fixture',(ConvertTo-SecureString 'fixture-only' -AsPlainText -Force))
-function Get-ADAnalyzerAuditPolicy {param($ComputerName,$Credential,$TimeoutSeconds)
+$ErrorActionPreference = 'Stop'
+if (-not $RepositoryRoot) {
+    $RepositoryRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+}
+foreach ($name in @('ADProfile', 'ADGpo', 'ADPolicyAnalysis', 'ADHostAnalysis')) {
+    . (Join-Path $RepositoryRoot ('bin/' + $name + '.ps1'))
+}
+$script:Passed = 0
+$script:Failed = 0
+
+function Assert-Equal($Expected, $Actual) {
+    if ($Expected -ne $Actual) {
+        throw "Expected [$Expected], got [$Actual]"
+    }
+}
+
+function Assert-True($Actual, [string]$Message) {
+    if (-not $Actual) {
+        throw $Message
+    }
+}
+
+function Test-HostPolicy([string]$Name, [scriptblock]$Body) {
+    try {
+        & $Body
+        $script:Passed++
+        Write-Host "PASS $Name"
+    }
+    catch {
+        $script:Failed++
+        Write-Host "FAIL $Name : $_"
+        Write-Host $_.ScriptStackTrace
+    }
+}
+$script:AuditFlags = 3
+$script:AuditFails = $false
+$script:AuditCalls = 0
+$script:TlsCalls = 0
+$script:Credential = [pscredential]::new('fixture', (ConvertTo-SecureString 'fixture-only' -AsPlainText -Force))
+
+function Get-ADAnalyzerAuditPolicy {
+    param(
+        $ComputerName,
+        $Credential,
+        $TimeoutSeconds
+
+    )
     $script:AuditCalls++
-    $script:AuditCredential=$Credential
-    if($script:AuditFails){throw 'fixture WinRM denied'}
-    [pscustomobject]@{SubcategoryGuid='0cce9215-69ae-11d9-bed3-505054503030';Flags=$script:AuditFlags}
+    $script:AuditCredential = $Credential
+    if ($script:AuditFails) {
+        throw 'fixture WinRM denied'
+    }
+    [pscustomobject]@{
+        SubcategoryGuid = '0cce9215-69ae-11d9-bed3-505054503030'
+        Flags = $script:AuditFlags
+    }
 }
-$script:CertificateValid=$true;$script:CertificateFails=$false
-function Get-ADAnalyzerTlsCertificate {param($HostName,$Port,$ServerName,$TimeoutSeconds)
+$script:CertificateValid = $true
+$script:CertificateFails = $false
+
+function Get-ADAnalyzerTlsCertificate {
+    param(
+        $HostName,
+        $Port,
+        $ServerName,
+        $TimeoutSeconds
+
+    )
     $script:TlsCalls++
-    if($script:CertificateFails){throw 'fixture TLS failed'}
-    [pscustomobject]@{Subject='CN=fixture';Thumbprint='fixture';NameValid=$script:CertificateValid;ChainValid=$script:CertificateValid;NotBefore=[datetime]::UtcNow.AddDays(-1);NotAfter=[datetime]::UtcNow.AddDays(90);Protocol='Tls12';RevocationChecked=$false}
+    if ($script:CertificateFails) {
+        throw 'fixture TLS failed'
+    }
+    [pscustomobject]@{
+        Subject = 'CN=fixture'
+        Thumbprint = 'fixture'
+        NameValid = $script:CertificateValid
+        ChainValid = $script:CertificateValid
+        NotBefore = [datetime]::UtcNow.AddDays(-1)
+        NotAfter = [datetime]::UtcNow.AddDays(90)
+        Protocol = 'Tls12'
+        RevocationChecked = $false
+    }
 }
-$hostRecord=[pscustomobject]@{ComputerName='dc.example.invalid';Services=@([pscustomobject]@{Name='Spooler';State='Stopped';StartMode='Disabled'});Registry=@([pscustomobject]@{Path='SYSTEM\Fixture';Name='Enabled';Status='Observed';Value=0})}
-$profile=Get-ADAnalyzerDefaultProfile
-$profile.Host.Services=@(@{Name='Spooler';State='Stopped';StartMode='Disabled'})
-$profile.Host.RegistryRules=@(@{Key='SYSTEM\Fixture';ValueName='Enabled';Expected=0})
-$profile.Host.AuditRules=@(@{SubcategoryGuid='0cce9215-69ae-11d9-bed3-505054503030';Flags=3})
-$profile.Host.CertificateEndpoints=@(@{HostName='dc.example.invalid';Port=636;ServerName='dc.example.invalid';MinimumRemainingDays=30})
+$hostRecord = [pscustomobject]@{
+    ComputerName = 'dc.example.invalid'
+    Services = @([pscustomobject]@{
+            Name = 'Spooler'
+            State = 'Stopped'
+            StartMode = 'Disabled'
+        })
+    Registry = @([pscustomobject]@{
+            Path = 'SYSTEM\Fixture'
+            Name = 'Enabled'
+            Status = 'Observed'
+            Value = 0
+        })
+}
+$profile = Get-ADAnalyzerDefaultProfile
+$profile.Host.Services = @(@{
+        Name = 'Spooler'
+        State = 'Stopped'
+        StartMode = 'Disabled'
+    })
+$profile.Host.RegistryRules = @(@{
+        Key = 'SYSTEM\Fixture'
+        ValueName = 'Enabled'
+        Expected = 0
+    })
+$profile.Host.AuditRules = @(@{
+        SubcategoryGuid = '0cce9215-69ae-11d9-bed3-505054503030'
+        Flags = 3
+    })
+$profile.Host.CertificateEndpoints = @(@{
+        HostName = 'dc.example.invalid'
+        Port = 636
+        ServerName = 'dc.example.invalid'
+        MinimumRemainingDays = 30
+    })
 Test-HostPolicy 'secret registry baselines fail before any host check audit or TLS observation' {
-    foreach($rule in @(
-        @{Kind='Account';Name='Friendly label';Key='Software\Fixture';ValueName='DefaultPassword';Expected='unit7-host-secret'}
-        @{Name='Friendly label';Key='Software\Fixture\DefaultPassword';Expected='unit7-host-secret'}
-    )){
-    $copy=Get-ADAnalyzerDefaultProfile;$copy.Host.RegistryRules=@($rule)
-    $copy.Host.AuditRules=$profile.Host.AuditRules;$copy.Host.CertificateEndpoints=$profile.Host.CertificateEndpoints
-    $audit=$script:AuditCalls;$tls=$script:TlsCalls;$emitted=[Collections.ArrayList]::new();$caught=$null
-    try{Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy | ForEach-Object {$null=$emitted.Add($_)}}catch{$caught=$_}
-    Assert-True ($null -ne $caught) 'Secret host rule accepted'
-    Assert-Equal 'Value baselines for secret-bearing settings are not supported. Use secret-presence checks.' $caught.Exception.Message
-    Assert-True (([string]$caught.TargetObject) -notmatch 'unit7-host-secret') 'Secret error target'
-    Assert-Equal 0 $emitted.Count;Assert-Equal $audit $script:AuditCalls;Assert-Equal $tls $script:TlsCalls
+    foreach ($rule in @(
+            @{
+                Kind = 'Account'
+                Name = 'Friendly label'
+                Key = 'Software\Fixture'
+                ValueName = 'DefaultPassword'
+                Expected = 'unit7-host-secret'
+            }
+            @{
+                Name = 'Friendly label'
+                Key = 'Software\Fixture\DefaultPassword'
+                Expected = 'unit7-host-secret'
+            }
+        )) {
+        $copy = Get-ADAnalyzerDefaultProfile
+        $copy.Host.RegistryRules = @($rule)
+        $copy.Host.AuditRules = $profile.Host.AuditRules
+        $copy.Host.CertificateEndpoints = $profile.Host.CertificateEndpoints
+        $audit = $script:AuditCalls
+        $tls = $script:TlsCalls
+        $emitted = [Collections.ArrayList]::new()
+        $caught = $null
+        try {
+            Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy | ForEach-Object { $null = $emitted.Add($_) }
+        }
+        catch {
+            $caught = $_
+        }
+        Assert-True ($null -ne $caught) 'Secret host rule accepted'
+        Assert-Equal 'Value baselines for secret-bearing settings are not supported. Use secret-presence checks.' $caught.Exception.Message
+        Assert-True (([string]$caught.TargetObject) -notmatch 'unit7-host-secret') 'Secret error target'
+        Assert-Equal 0 $emitted.Count
+        Assert-Equal $audit $script:AuditCalls
+        Assert-Equal $tls $script:TlsCalls
     }
 }
 Test-HostPolicy 'host services and explicit registry overrides are evaluated from observations' {
-    $checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile -Credential $script:Credential)
+    $checks = @(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile -Credential $script:Credential)
     Assert-Equal Pass ($checks | Where-Object RuleId -eq HOST.SERVICE).Status
     Assert-Equal Pass ($checks | Where-Object RuleId -eq HOST.REGISTRY).Status
 }
 Test-HostPolicy 'duplicate canonical audit and certificate identities fail before observations' {
-    foreach($kind in @('Audit','Tls')){
-        $copy=Get-ADAnalyzerDefaultProfile
-        if($kind -eq 'Audit'){$copy.Host.AuditRules=@(@{SubcategoryGuid='0cce9215-69ae-11d9-bed3-505054503030';Flags=1},@{SubcategoryGuid='{0CCE9215-69AE-11D9-BED3-505054503030}';Flags=2})}
-        else{$copy.Host.CertificateEndpoints=@(@{HostName='dc.example.invalid'},@{HostName='DC.EXAMPLE.INVALID';Port=443;ServerName='dc.example.invalid'})}
-        $before=ConvertTo-Json -InputObject $copy -Depth 50 -Compress
-        $audit=$script:AuditCalls;$tls=$script:TlsCalls;$emitted=[Collections.Generic.List[object]]::new();$caught=$null
-        try{Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy | ForEach-Object {$emitted.Add($_)}}catch{$caught=$_}
-        Assert-True ($null -ne $caught -and $caught.Exception.Message -match 'Duplicate host (audit|certificate)') 'Ambiguous profile was not rejected'
-        Assert-Equal 0 $emitted.Count;Assert-Equal $audit $script:AuditCalls;Assert-Equal $tls $script:TlsCalls
+    foreach ($kind in @('Audit', 'Tls')) {
+        $copy = Get-ADAnalyzerDefaultProfile
+        if ($kind -eq 'Audit') {
+            $copy.Host.AuditRules = @(@{
+                    SubcategoryGuid = '0cce9215-69ae-11d9-bed3-505054503030'
+                    Flags = 1
+                }, @{
+                    SubcategoryGuid = '{0CCE9215-69AE-11D9-BED3-505054503030}'
+                    Flags = 2
+                })
+        }
+        else {
+            $copy.Host.CertificateEndpoints = @(@{
+                    HostName = 'dc.example.invalid'
+                }, @{
+                    HostName = 'DC.EXAMPLE.INVALID'
+                    Port = 443
+                    ServerName = 'dc.example.invalid'
+                })
+        }
+        $before = ConvertTo-Json -InputObject $copy -Depth 50 -Compress
+        $audit = $script:AuditCalls
+        $tls = $script:TlsCalls
+        $emitted = [Collections.Generic.List[object]]::new()
+        $caught = $null
+        try {
+            Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy | ForEach-Object { $emitted.Add($_) }
+        }
+        catch {
+            $caught = $_
+        }
+        Assert-True ($null -ne $caught -and
+            $caught.Exception.Message -match 'Duplicate host (audit|certificate)') 'Ambiguous profile was not rejected'
+        Assert-Equal 0 $emitted.Count
+        Assert-Equal $audit $script:AuditCalls
+        Assert-Equal $tls $script:TlsCalls
         Assert-Equal $before (ConvertTo-Json -InputObject $copy -Depth 50 -Compress)
     }
-    $copy=Get-ADAnalyzerDefaultProfile
-    $copy.Host.AuditRules=@(@{SubcategoryGuid='0cce9215-69ae-11d9-bed3-505054503030';Flags=1},@{SubcategoryGuid='0cce9216-69ae-11d9-bed3-505054503030';Flags=2})
-    $copy.Host.CertificateEndpoints=@(@{HostName='dc.example.invalid'},@{HostName='dc.example.invalid';Port=636},@{HostName='dc.example.invalid';ServerName='other.example.invalid'})
-    $checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy)
+    $copy = Get-ADAnalyzerDefaultProfile
+    $copy.Host.AuditRules = @(@{
+            SubcategoryGuid = '0cce9215-69ae-11d9-bed3-505054503030'
+            Flags = 1
+        }, @{
+            SubcategoryGuid = '0cce9216-69ae-11d9-bed3-505054503030'
+            Flags = 2
+        })
+    $copy.Host.CertificateEndpoints = @(@{
+            HostName = 'dc.example.invalid'
+        }, @{
+            HostName = 'dc.example.invalid'
+            Port = 636
+        }, @{
+            HostName = 'dc.example.invalid'
+            ServerName = 'other.example.invalid'
+        })
+    $checks = @(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy)
     Assert-Equal 0 @($checks | Group-Object CheckId | Where-Object Count -gt 1).Count
-    $audit=@($checks | Where-Object RuleId -eq HOST.AUDIT_POLICY)
-    Assert-Equal 2 $audit.Count;Assert-Equal (New-ADAnalyzerCheck -RuleId HOST.AUDIT_POLICY -Target ($hostRecord.ComputerName+'/Audit/0cce9215-69ae-11d9-bed3-505054503030') -Status Pass).CheckId $audit[0].CheckId
+    $audit = @($checks | Where-Object RuleId -eq HOST.AUDIT_POLICY)
+    Assert-Equal 2 $audit.Count
+    Assert-Equal (New-ADAnalyzerCheck `
+            -RuleId HOST.AUDIT_POLICY `
+            -Target ($hostRecord.ComputerName + '/Audit/0cce9215-69ae-11d9-bed3-505054503030') `
+            -Status Pass).CheckId $audit[0].CheckId
     Assert-Equal 3 @($checks | Where-Object RuleId -eq HOST.TLS_CERTIFICATE).Count
 }
 Test-HostPolicy 'declared host registry types require observed matching type evidence' {
-    $copy=Get-ADAnalyzerDefaultProfile;$copy.Host.RegistryRules=@(@{Key='SYSTEM\Fixture';ValueName='Enabled';Expected=0;Type=4})
-    $record=[pscustomobject]@{ComputerName='fixture';Services=@();Registry=@([pscustomobject]@{Path='SYSTEM\Fixture';Name='Enabled';Status='Observed';Value=0})}
+    $copy = Get-ADAnalyzerDefaultProfile
+    $copy.Host.RegistryRules = @(@{
+            Key = 'SYSTEM\Fixture'
+            ValueName = 'Enabled'
+            Expected = 0
+            Type = 4
+        })
+    $record = [pscustomobject]@{
+        ComputerName = 'fixture'
+        Services = @()
+        Registry = @([pscustomobject]@{
+                Path = 'SYSTEM\Fixture'
+                Name = 'Enabled'
+                Status = 'Observed'
+                Value = 0
+            })
+    }
     Assert-Equal Unknown (@(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy) | Where-Object RuleId -eq HOST.REGISTRY).Status
     $record.Registry[0] | Add-Member -NotePropertyName Type -NotePropertyValue 1
     Assert-Equal Invalid (@(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy) | Where-Object RuleId -eq HOST.REGISTRY).Status
-    $record.Registry[0].Type=4
+    $record.Registry[0].Type = 4
     Assert-Equal Pass (@(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy) | Where-Object RuleId -eq HOST.REGISTRY).Status
 }
 Test-HostPolicy 'optional profile rule IDs keep shared host targets independent and stable' {
-    $copy=Get-ADAnalyzerDefaultProfile
-    $copy.Host.Services=@(@{Id='running';Name='Spooler';State='Running'},@{Id='stopped';Name='spooler';State='Stopped'})
-    $copy.Host.RegistryRules=@(@{Id='zero';Key='SYSTEM\Fixture';ValueName='Enabled';Expected=0},@{Id='one';Key='system\fixture';ValueName='enabled';Expected=1})
-    $before=ConvertTo-Json -InputObject $copy -Depth 30 -Compress
-    $checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy | Where-Object {$_.RuleId -in 'HOST.SERVICE','HOST.REGISTRY'})
-    Assert-Equal 4 $checks.Count;Assert-Equal 0 @($checks | Group-Object CheckId | Where-Object Count -gt 1).Count
-    Assert-Equal 2 @($checks | Where-Object Status -eq Pass).Count;Assert-Equal 2 @($checks | Where-Object Status -eq Fail).Count
+    $copy = Get-ADAnalyzerDefaultProfile
+    $copy.Host.Services = @(@{
+            Id = 'running'
+            Name = 'Spooler'
+            State = 'Running'
+        }, @{
+            Id = 'stopped'
+            Name = 'spooler'
+            State = 'Stopped'
+        })
+    $copy.Host.RegistryRules = @(@{
+            Id = 'zero'
+            Key = 'SYSTEM\Fixture'
+            ValueName = 'Enabled'
+            Expected = 0
+        }, @{
+            Id = 'one'
+            Key = 'system\fixture'
+            ValueName = 'enabled'
+            Expected = 1
+        })
+    $before = ConvertTo-Json -InputObject $copy -Depth 30 -Compress
+    $checks = @(Test-ADAnalyzerHostPolicy `
+            -Hosts @($hostRecord) `
+            -Profile $copy | Where-Object { $_.RuleId -in 'HOST.SERVICE',
+            'HOST.REGISTRY' })
+    Assert-Equal 4 $checks.Count
+    Assert-Equal 0 @($checks | Group-Object CheckId | Where-Object Count -gt 1).Count
+    Assert-Equal 2 @($checks | Where-Object Status -eq Pass).Count
+    Assert-Equal 2 @($checks | Where-Object Status -eq Fail).Count
     Assert-Equal $before (ConvertTo-Json -InputObject $copy -Depth 30 -Compress)
-    $byId=@{};foreach($check in $checks){$byId[$check.RuleId+'/'+$check.Evidence.ProfileRuleId]=$check.CheckId}
-    [array]::Reverse($copy.Host.Services);[array]::Reverse($copy.Host.RegistryRules)
-    $copy.Host.Services[0].State='Running';$copy.Host.RegistryRules[0].Expected=0
-    foreach($check in @(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy | Where-Object {$_.RuleId -in 'HOST.SERVICE','HOST.REGISTRY'})){
-        Assert-Equal $byId[$check.RuleId+'/'+$check.Evidence.ProfileRuleId] $check.CheckId
-        Assert-True ($check.Target -notmatch 'HostRuleId' -and $check.Target.IndexOf([char]0) -lt 0) 'Internal identity escaped into readable target'
+    $byId = @{}
+    foreach ($check in $checks) {
+        $byId[$check.RuleId + '/' + $check.Evidence.ProfileRuleId] = $check.CheckId
     }
-    $copy=Get-ADAnalyzerDefaultProfile;$copy.Host.Services=@(@{Name='Spooler';State='Stopped'});$copy.Host.RegistryRules=@(@{Key='SYSTEM\Fixture';ValueName='Enabled';Expected=0})
-    $checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy)
-    Assert-Equal (New-ADAnalyzerCheck -RuleId HOST.SERVICE -Target ($hostRecord.ComputerName+'/Service/Spooler') -Status Pass).CheckId ($checks | Where-Object RuleId -eq HOST.SERVICE).CheckId
-    Assert-Equal (New-ADAnalyzerCheck -RuleId HOST.REGISTRY -Target ($hostRecord.ComputerName+'/Registry/SYSTEM\Fixture/Enabled') -Status Pass).CheckId ($checks | Where-Object RuleId -eq HOST.REGISTRY).CheckId
-    $copy.Host.Services+=@(@{Id='zero';Name='Other';State='Running'});$copy.Host.RegistryRules[0].Id='zero'
-    $null=Import-ADAnalyzerProfile -Profile $copy
+    [array]::Reverse($copy.Host.Services)
+    [array]::Reverse($copy.Host.RegistryRules)
+    $copy.Host.Services[0].State = 'Running'
+    $copy.Host.RegistryRules[0].Expected = 0
+    foreach ($check in @(Test-ADAnalyzerHostPolicy `
+                -Hosts @($hostRecord) `
+                -Profile $copy | Where-Object { $_.RuleId -in 'HOST.SERVICE',
+                'HOST.REGISTRY' })) {
+        Assert-Equal $byId[$check.RuleId + '/' + $check.Evidence.ProfileRuleId] $check.CheckId
+        Assert-True ($check.Target -notmatch 'HostRuleId' -and
+            $check.Target.IndexOf([char]0) -lt 0) 'Internal identity escaped into readable target'
+    }
+    $copy = Get-ADAnalyzerDefaultProfile
+    $copy.Host.Services = @(@{
+            Name = 'Spooler'
+            State = 'Stopped'
+        })
+    $copy.Host.RegistryRules = @(@{
+            Key = 'SYSTEM\Fixture'
+            ValueName = 'Enabled'
+            Expected = 0
+        })
+    $checks = @(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy)
+    Assert-Equal (New-ADAnalyzerCheck `
+            -RuleId HOST.SERVICE `
+            -Target ($hostRecord.ComputerName + '/Service/Spooler') `
+            -Status Pass).CheckId ($checks | Where-Object RuleId `
+            -eq HOST.SERVICE).CheckId
+    Assert-Equal (New-ADAnalyzerCheck `
+            -RuleId HOST.REGISTRY `
+            -Target ($hostRecord.ComputerName + '/Registry/SYSTEM\Fixture/Enabled') `
+            -Status Pass).CheckId ($checks | Where-Object RuleId `
+            -eq HOST.REGISTRY).CheckId
+    $copy.Host.Services += @(@{
+            Id = 'zero'
+            Name = 'Other'
+            State = 'Running'
+        })
+    $copy.Host.RegistryRules[0].Id = 'zero'
+    $null = Import-ADAnalyzerProfile -Profile $copy
 }
 Test-HostPolicy 'named registry identities distinguish literal key and value separators' {
-    $copy=Get-ADAnalyzerDefaultProfile;$copy.Host.RegistryRules=@(@{Id='shared';Key='SYSTEM\Fixture';ValueName='part/Enabled';Expected=0},@{Id='shared';Key='SYSTEM\Fixture/part';ValueName='Enabled';Expected=0})
-    $record=[pscustomobject]@{ComputerName='fixture';Services=@();Registry=@([pscustomobject]@{Path='SYSTEM\Fixture';Name='part/Enabled';Status='Observed';Value=0},[pscustomobject]@{Path='SYSTEM\Fixture/part';Name='Enabled';Status='Observed';Value=0})}
-    $checks=@(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy | Where-Object RuleId -eq HOST.REGISTRY)
-    Assert-Equal 2 $checks.Count;Assert-Equal 2 @($checks | Where-Object Status -eq Pass).Count
+    $copy = Get-ADAnalyzerDefaultProfile
+    $copy.Host.RegistryRules = @(@{
+            Id = 'shared'
+            Key = 'SYSTEM\Fixture'
+            ValueName = 'part/Enabled'
+            Expected = 0
+        }, @{
+            Id = 'shared'
+            Key = 'SYSTEM\Fixture/part'
+            ValueName = 'Enabled'
+            Expected = 0
+        })
+    $record = [pscustomobject]@{
+        ComputerName = 'fixture'
+        Services = @()
+        Registry = @([pscustomobject]@{
+                Path = 'SYSTEM\Fixture'
+                Name = 'part/Enabled'
+                Status = 'Observed'
+                Value = 0
+            }, [pscustomobject]@{
+                Path = 'SYSTEM\Fixture/part'
+                Name = 'Enabled'
+                Status = 'Observed'
+                Value = 0
+            })
+    }
+    $checks = @(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy | Where-Object RuleId -eq HOST.REGISTRY)
+    Assert-Equal 2 $checks.Count
+    Assert-Equal 2 @($checks | Where-Object Status -eq Pass).Count
     Assert-Equal 0 @($checks | Group-Object CheckId | Where-Object Count -gt 1).Count
-    Assert-Equal 2 @($checks | ForEach-Object {$_.Evidence.RegistryPath} | Select-Object -Unique).Count
+    Assert-Equal 2 @($checks | ForEach-Object { $_.Evidence.RegistryPath } | Select-Object -Unique).Count
 }
 Test-HostPolicy 'ambiguous or malformed host profile IDs fail before observations' {
-    foreach($kind in @('Services','RegistryRules')){
-        $base=if($kind -eq 'Services'){@{Name='Spooler';State='Running'}}else{@{Key='SYSTEM\Fixture';ValueName='Enabled';Expected=0}}
-        $cases=@(,@($base.Clone(),$base.Clone()))
-        $first=$base.Clone();$second=$base.Clone();$first.Id='same';$second.Id='SAME';$cases+=,@($first,$second)
-        foreach($invalid in @($null,'',' ',1,@('one','two'),('bad'+[char]0+'id'))){$rule=$base.Clone();$rule.Id=$invalid;$cases+=,@($rule)}
-        foreach($rules in $cases){
-            $copy=Get-ADAnalyzerDefaultProfile;$copy.Host[$kind]=@($rules);$copy.Host.AuditRules=$profile.Host.AuditRules;$copy.Host.CertificateEndpoints=$profile.Host.CertificateEndpoints
-            $audit=$script:AuditCalls;$tls=$script:TlsCalls;$caught=$false
-            try{$null=Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy}catch{$caught=$true}
-            Assert-True $caught 'Ambiguous or malformed host identity accepted';Assert-Equal $audit $script:AuditCalls;Assert-Equal $tls $script:TlsCalls
+    foreach ($kind in @('Services', 'RegistryRules')) {
+        $base = if ($kind -eq 'Services') {
+            @{
+                Name = 'Spooler'
+                State = 'Running'
+            }
+        }
+        else {
+            @{
+                Key = 'SYSTEM\Fixture'
+                ValueName = 'Enabled'
+                Expected = 0
+            }
+        }
+        $cases = @(, @($base.Clone(), $base.Clone()))
+        $first = $base.Clone()
+        $second = $base.Clone()
+        $first.Id = 'same'
+        $second.Id = 'SAME'
+        $cases += , @($first, $second)
+        foreach ($invalid in @($null, '', ' ', 1, @('one', 'two'), ('bad' + [char]0 + 'id'))) {
+            $rule = $base.Clone()
+            $rule.Id = $invalid
+            $cases += , @($rule)
+        }
+        foreach ($rules in $cases) {
+            $copy = Get-ADAnalyzerDefaultProfile
+            $copy.Host[$kind] = @($rules)
+            $copy.Host.AuditRules = $profile.Host.AuditRules
+            $copy.Host.CertificateEndpoints = $profile.Host.CertificateEndpoints
+            $audit = $script:AuditCalls
+            $tls = $script:TlsCalls
+            $caught = $false
+            try {
+                $null = Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy
+            }
+            catch {
+                $caught = $true
+            }
+            Assert-True $caught 'Ambiguous or malformed host identity accepted'
+            Assert-Equal $audit $script:AuditCalls
+            Assert-Equal $tls $script:TlsCalls
         }
     }
 }
 Test-HostPolicy 'numeric audit masks verify success and failure without localized text' {
-    $checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile -Credential $script:Credential)
+    $checks = @(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile -Credential $script:Credential)
     Assert-Equal Pass ($checks | Where-Object RuleId -eq HOST.AUDIT_POLICY).Status
-    Assert-True ([object]::ReferenceEquals($script:Credential,$script:AuditCredential)) 'Audit credential lost'
-    $script:AuditFlags=1
-    try{Assert-Equal Fail (@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile) | Where-Object RuleId -eq HOST.AUDIT_POLICY).Status}finally{$script:AuditFlags=3}
+    Assert-True ([object]::ReferenceEquals($script:Credential, $script:AuditCredential)) 'Audit credential lost'
+    $script:AuditFlags = 1
+    try {
+        Assert-Equal Fail (@(Test-ADAnalyzerHostPolicy `
+                    -Hosts @($hostRecord) `
+                    -Profile $profile) | Where-Object RuleId `
+                -eq HOST.AUDIT_POLICY).Status
+    }
+    finally {
+        $script:AuditFlags = 3
+    }
 }
 Test-HostPolicy 'unavailable audit permissions become unreadable instead of compliant' {
-    $script:AuditFails=$true
-    try{Assert-Equal Unreadable (@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile) | Where-Object RuleId -eq HOST.AUDIT_POLICY).Status}finally{$script:AuditFails=$false}
+    $script:AuditFails = $true
+    try {
+        Assert-Equal Unreadable (@(Test-ADAnalyzerHostPolicy `
+                    -Hosts @($hostRecord) `
+                    -Profile $profile) | Where-Object RuleId `
+                -eq HOST.AUDIT_POLICY).Status
+    }
+    finally {
+        $script:AuditFails = $false
+    }
 }
 Test-HostPolicy 'TLS name chain validity and expiry are checked with revocation explicit' {
-    $checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile)
+    $checks = @(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile)
     Assert-Equal Pass ($checks | Where-Object RuleId -eq HOST.TLS_CERTIFICATE).Status
     Assert-Equal Unknown ($checks | Where-Object RuleId -eq HOST.CERTIFICATE_REVOCATION).Status
-    $script:CertificateValid=$false
-    try{Assert-Equal Fail (@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile) | Where-Object RuleId -eq HOST.TLS_CERTIFICATE).Status}finally{$script:CertificateValid=$true}
+    $script:CertificateValid = $false
+    try {
+        Assert-Equal Fail (@(Test-ADAnalyzerHostPolicy `
+                    -Hosts @($hostRecord) `
+                    -Profile $profile) | Where-Object RuleId `
+                -eq HOST.TLS_CERTIFICATE).Status
+    }
+    finally {
+        $script:CertificateValid = $true
+    }
 }
 Test-HostPolicy 'TLS handshake errors are visible and never produce a passing certificate' {
-    $script:CertificateFails=$true
-    try{Assert-Equal Unreadable (@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile) | Where-Object RuleId -eq HOST.TLS_CERTIFICATE).Status}finally{$script:CertificateFails=$false}
+    $script:CertificateFails = $true
+    try {
+        Assert-Equal Unreadable (@(Test-ADAnalyzerHostPolicy `
+                    -Hosts @($hostRecord) `
+                    -Profile $profile) | Where-Object RuleId `
+                -eq HOST.TLS_CERTIFICATE).Status
+    }
+    finally {
+        $script:CertificateFails = $false
+    }
 }
 Test-HostPolicy 'missing registry overrides remain unknown and unconfigured audit causes no read' {
-    $copy=Get-ADAnalyzerDefaultProfile;$copy.Host.RegistryRules=@(@{Key='Missing';ValueName='Enabled';Expected=0})
-    $checks=@(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy)
+    $copy = Get-ADAnalyzerDefaultProfile
+    $copy.Host.RegistryRules = @(@{
+            Key = 'Missing'
+            ValueName = 'Enabled'
+            Expected = 0
+        })
+    $checks = @(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy)
     Assert-Equal Unknown ($checks | Where-Object RuleId -eq HOST.REGISTRY).Status
     Assert-Equal NotConfigured ($checks | Where-Object RuleId -eq HOST.AUDIT_POLICY).Status
 }
 Test-HostPolicy 'native audit and TLS adapter source compiles without third party assemblies' {
-    $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $RepositoryRoot 'bin/ADHostAnalysis.ps1'),[ref]$tokens,[ref]$errors)
-    $sources=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst] -and $node.Value -like '*namespace ADAnalyzer*'},$true))
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $RepositoryRoot 'bin/ADHostAnalysis.ps1'),
+        [ref]$tokens,
+        [ref]$errors)
+    $sources = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                $node.Value -like '*namespace ADAnalyzer*' },
+            $true))
     Assert-Equal 2 $sources.Count
-    foreach($source in $sources){if($source.Value -like '*class TlsInspector*' -and -not ('ADAnalyzer.TlsInspector' -as [type])){Add-Type -TypeDefinition $source.Value};if($source.Value -like '*class NativeAuditPolicy*' -and -not ('ADAnalyzer.NativeAuditPolicy' -as [type])){Add-Type -TypeDefinition $source.Value}}
+    foreach ($source in $sources) {
+        if ($source.Value -like '*class TlsInspector*' -and -not ('ADAnalyzer.TlsInspector' -as [type])) {
+            Add-Type -TypeDefinition $source.Value
+        }
+        if ($source.Value -like '*class NativeAuditPolicy*' -and -not ('ADAnalyzer.NativeAuditPolicy' -as [type])) {
+            Add-Type -TypeDefinition $source.Value
+        }
+    }
     Assert-True ([bool]('ADAnalyzer.TlsInspector' -as [type])) 'TLS inspector not compiled'
-    if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-        $records=@([ADAnalyzer.NativeAuditPolicy]::Read())
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $records = @([ADAnalyzer.NativeAuditPolicy]::Read())
         Assert-True ($records.Count -gt 0) 'No native audit subcategories returned'
-        foreach($record in $records){Assert-True ($record.Flags -le 7) 'Invalid native audit flags'}
+        foreach ($record in $records) {
+            Assert-True ($record.Flags -le 7) 'Invalid native audit flags'
+        }
     }
 }
-if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
     Test-HostPolicy 'native TLS inspector observes a loopback server without trusting its self-signed certificate' {
-        Add-Type -TypeDefinition @'
+        Add-Type `
+            -TypeDefinition @'
 using System;
 using System.Net;
 using System.Net.Sockets;
@@ -205,17 +543,26 @@ namespace ADAnalyzer {
  }
 }
 '@
-        $server=[ADAnalyzer.TestTlsServer]::new()
+        $server = [ADAnalyzer.TestTlsServer]::new()
         try {
-            $record=[ADAnalyzer.TlsInspector]::Read('127.0.0.1',$server.Port,'wrong.example.invalid',5000)
-            Assert-Equal $false $record.NameValid;Assert-Equal $false $record.ChainValid
+            $record = [ADAnalyzer.TlsInspector]::Read('127.0.0.1', $server.Port, 'wrong.example.invalid', 5000)
+            Assert-Equal $false $record.NameValid
+            Assert-Equal $false $record.ChainValid
             Assert-Equal Tls12 $record.Protocol
             Assert-True (-not [string]::IsNullOrWhiteSpace($record.Thumbprint)) 'Missing inspected certificate'
-        } catch {
-            if($server.Error){throw ('TLS fixture server failed: '+$server.Error.ToString())}
+        }
+        catch {
+            if ($server.Error) {
+                throw ('TLS fixture server failed: ' + $server.Error.ToString())
+            }
             throw
-        } finally {$server.Dispose()}
+        }
+        finally {
+            $server.Dispose()
+        }
     }
 }
-Write-Host ("{0} host-analysis tests passed; {1} failed" -f $script:Passed,$script:Failed)
-if($script:Failed){exit 1}
+Write-Host ("{0} host-analysis tests passed; {1} failed" -f $script:Passed, $script:Failed)
+if ($script:Failed) {
+    exit 1
+}

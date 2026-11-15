@@ -1,11 +1,17 @@
 function Get-ADAnalyzerAuditPolicy {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$ComputerName,[pscredential]$Credential=[pscredential]::Empty,[int]$TimeoutSeconds=30)
+    param(
+        [Parameter(Mandatory)][string]$ComputerName,
+        [pscredential]$Credential = [pscredential]::Empty,
+        [int]$TimeoutSeconds = 30
+
+    )
     # Numeric native policy flags avoid localized auditpol output. This is a
     # read-only WinRM operation; remote configuration is never enabled here.
-    $block={
-        if(-not ('ADAnalyzer.NativeAuditPolicy' -as [type])) {
-            Add-Type -TypeDefinition @'
+    $block = {
+        if (-not ('ADAnalyzer.NativeAuditPolicy' -as [type])) {
+            Add-Type `
+                -TypeDefinition @'
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -31,19 +37,39 @@ namespace ADAnalyzer {
 }
 '@
         }
-        [ADAnalyzer.NativeAuditPolicy]::Read() | ForEach-Object {[pscustomobject]@{SubcategoryGuid=$_.Subcategory.ToString();CategoryGuid=$_.Category.ToString();Flags=[uint32]$_.Flags}}
+        [ADAnalyzer.NativeAuditPolicy]::Read() | ForEach-Object { [pscustomobject]@{
+                SubcategoryGuid = $_.Subcategory.ToString()
+                CategoryGuid = $_.Category.ToString()
+                Flags = [uint32]$_.Flags
+            } }
     }
-    $arguments=@{ComputerName=$ComputerName;ScriptBlock=$block;ErrorAction='Stop'}
-    if($Credential -and $Credential -ne [pscredential]::Empty){$arguments.Credential=$Credential}
-    $arguments.SessionOption=New-PSSessionOption -OpenTimeout ($TimeoutSeconds*1000) -OperationTimeout ($TimeoutSeconds*1000) -ErrorAction Stop
+    $arguments = @{
+        ComputerName = $ComputerName
+        ScriptBlock = $block
+        ErrorAction = 'Stop'
+    }
+    if ($Credential -and $Credential -ne [pscredential]::Empty) {
+        $arguments.Credential = $Credential
+    }
+    $arguments.SessionOption = New-PSSessionOption `
+        -OpenTimeout ($TimeoutSeconds * 1000) `
+        -OperationTimeout ($TimeoutSeconds * 1000) `
+        -ErrorAction Stop
     @(Invoke-Command @arguments)
 }
 
 function Get-ADAnalyzerTlsCertificate {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$HostName,[ValidateRange(1,65535)][int]$Port=443,[string]$ServerName=$HostName,[ValidateRange(1,300)][int]$TimeoutSeconds=10)
-    if(-not ('ADAnalyzer.TlsInspector' -as [type])) {
-        Add-Type -TypeDefinition @'
+    param(
+        [Parameter(Mandatory)][string]$HostName,
+        [ValidateRange(1, 65535)][int]$Port = 443,
+        [string]$ServerName = $HostName,
+        [ValidateRange(1, 300)][int]$TimeoutSeconds = 10
+
+    )
+    if (-not ('ADAnalyzer.TlsInspector' -as [type])) {
+        Add-Type `
+            -TypeDefinition @'
 using System;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -79,58 +105,236 @@ namespace ADAnalyzer {
 }
 '@
     }
-    [ADAnalyzer.TlsInspector]::Read($HostName,$Port,$ServerName,$TimeoutSeconds*1000)
+    [ADAnalyzer.TlsInspector]::Read($HostName, $Port, $ServerName, $TimeoutSeconds * 1000)
 }
 
 function Test-ADAnalyzerHostPolicy {
     [CmdletBinding()]
-    param([array]$Hosts=@(),[pscredential]$Credential=[pscredential]::Empty,[hashtable]$Profile)
-    $configuration=Import-ADAnalyzerProfile -Profile $Profile
-    $rules=$configuration.Host
-    foreach($hostRecord in $Hosts) {
-        $name=[string]$hostRecord.ComputerName
-        if(-not $name){continue}
-        foreach($serviceRule in @($rules.Services)) {
-            $service=@($hostRecord.Services | Where-Object Name -eq $serviceRule.Name)
-            $status=if($service.Count -ne 1){'Unknown'}elseif($service[0].State -eq $serviceRule.State -and (!$serviceRule.StartMode -or $service[0].StartMode -eq $serviceRule.StartMode)){'Pass'}else{'Fail'}
-            $target=$name+'/Service/'+$serviceRule.Name
-            $check=New-ADAnalyzerCheck -RuleId 'HOST.SERVICE' -Status $status -Severity Medium -Category Host -Target (Get-ADAnalyzerHostRuleIdentity -Rule $serviceRule -Target $target -Parts @($serviceRule.Name)) -Observed $service -Expected $serviceRule -Evidence @{ProfileRuleId=$serviceRule.Id} -Applicability Applicable
-            $check.Target=$target;$check
+    param(
+        [array]$Hosts = @(),
+        [pscredential]$Credential = [pscredential]::Empty,
+        [hashtable]$Profile
+
+    )
+    $configuration = Import-ADAnalyzerProfile -Profile $Profile
+    $rules = $configuration.Host
+    foreach ($hostRecord in $Hosts) {
+        $name = [string]$hostRecord.ComputerName
+        if (-not $name) {
+            continue
         }
-        foreach($rule in @($rules.RegistryRules)) {
-            $record=@($hostRecord.Registry | Where-Object { $_.Path -ieq $rule.Key -and $_.Name -ieq $rule.ValueName })
-            $status='Unknown';$observed=$null
-            if($record.Count -eq 1 -and $record[0].Status -eq 'Observed'){
-                $observed=$record[0].Value;$operator=if($rule.Operator){$rule.Operator}else{'Equals'}
-                if($rule.Contains('Type') -and $null -eq $record[0].Type){$status='Unknown'}
-                elseif($rule.Contains('Type') -and $record[0].Type -ne $rule.Type){$status='Invalid'}
-                else{try{$status=if(Test-ADAnalyzerPolicyComparison $observed $rule.Expected $operator){'Pass'}else{'Fail'}}catch{$status='Invalid'}}
+        foreach ($serviceRule in @($rules.Services)) {
+            $service = @($hostRecord.Services | Where-Object Name -eq $serviceRule.Name)
+            $status = if ($service.Count -ne 1) {
+                'Unknown'
             }
-            $target=$name+'/Registry/'+$rule.Key+'/'+$rule.ValueName
-            $check=New-ADAnalyzerCheck -RuleId 'HOST.REGISTRY' -Status $status -Severity Medium -Category Host -Target (Get-ADAnalyzerHostRuleIdentity -Rule $rule -Target $target -Parts @($rule.Key,$rule.ValueName)) -Observed $observed -Expected $rule.Expected -Evidence @{ProfileRuleId=$rule.Id;RegistryPath=$rule.Key;ValueName=$rule.ValueName;RegistryType=$(if($record.Count -eq 1){$record[0].Type}else{$null});ExpectedRegistryType=$rule.Type} -Message 'An absent registry override does not establish the operating-system default or effective protocol behavior' -Applicability Configured
-            $check.Target=$target;$check
+            elseif ($service[0].State -eq $serviceRule.State -and
+                (!$serviceRule.StartMode -or
+                $service[0].StartMode -eq $serviceRule.StartMode)) {
+                'Pass'
+            }
+            else {
+                'Fail'
+            }
+            $target = $name + '/Service/' + $serviceRule.Name
+            $check = New-ADAnalyzerCheck `
+                -RuleId 'HOST.SERVICE' `
+                -Status $status `
+                -Severity Medium `
+                -Category Host `
+                -Target (Get-ADAnalyzerHostRuleIdentity `
+                    -Rule $serviceRule `
+                    -Target $target `
+                    -Parts @($serviceRule.Name)) `
+                -Observed $service `
+                -Expected $serviceRule `
+                -Evidence @{
+                ProfileRuleId = $serviceRule.Id
+            } `
+                -Applicability Applicable
+            $check.Target = $target
+            $check
         }
-        if(@($rules.AuditRules).Count) {
-            try {
-                $audit=@(Get-ADAnalyzerAuditPolicy -ComputerName $name -Credential $Credential -TimeoutSeconds $configuration.Analysis.HostTimeoutSeconds)
-                foreach($rule in $rules.AuditRules) {
-                    $id=([guid]$rule.SubcategoryGuid).ToString();$record=@($audit | Where-Object SubcategoryGuid -eq $id)
-                    $status=if($record.Count -ne 1){'Unknown'}elseif(([uint32]$record[0].Flags -band [uint32]$rule.Flags) -eq [uint32]$rule.Flags){'Pass'}else{'Fail'}
-                    New-ADAnalyzerCheck -RuleId 'HOST.AUDIT_POLICY' -Status $status -Severity Medium -Category Audit -Target ($name+'/Audit/'+$id) -Observed $record -Expected $rule.Flags -Message 'Native system audit policy flags: success=1, failure=2. Per-user policy and event delivery are separate controls.' -Applicability Applicable
+        foreach ($rule in @($rules.RegistryRules)) {
+            $record = @($hostRecord.Registry | Where-Object { $_.Path -ieq $rule.Key -and $_.Name -ieq $rule.ValueName })
+            $status = 'Unknown'
+            $observed = $null
+            if ($record.Count -eq 1 -and $record[0].Status -eq 'Observed') {
+                $observed = $record[0].Value
+                $operator = if ($rule.Operator) {
+                    $rule.Operator
                 }
-            } catch {New-ADAnalyzerCheck -RuleId 'HOST.AUDIT_POLICY' -Status Unreadable -Severity Medium -Category Audit -Target ($name+'/Audit') -Message $_.Exception.Message}
-        } else {New-ADAnalyzerCheck -RuleId 'HOST.AUDIT_POLICY' -Status NotConfigured -Category Audit -Target ($name+'/Audit') -Message 'Configure subcategory GUID and required flag masks to collect native system audit policy'}
+                else {
+                    'Equals'
+                }
+                if ($rule.Contains('Type') -and $null -eq $record[0].Type) {
+                    $status = 'Unknown'
+                }
+                elseif ($rule.Contains('Type') -and $record[0].Type -ne $rule.Type) {
+                    $status = 'Invalid'
+                }
+                else {
+                    try {
+                        $status = if (Test-ADAnalyzerPolicyComparison $observed $rule.Expected $operator) {
+                            'Pass'
+                        }
+                        else {
+                            'Fail'
+                        }
+                    }
+                    catch {
+                        $status = 'Invalid'
+                    }
+                }
+            }
+            $target = $name + '/Registry/' + $rule.Key + '/' + $rule.ValueName
+            $check = New-ADAnalyzerCheck `
+                -RuleId 'HOST.REGISTRY' `
+                -Status $status `
+                -Severity Medium `
+                -Category Host `
+                -Target (Get-ADAnalyzerHostRuleIdentity `
+                    -Rule $rule `
+                    -Target $target `
+                    -Parts @($rule.Key,
+                    $rule.ValueName)) `
+                -Observed $observed `
+                -Expected $rule.Expected `
+                -Evidence @{
+                ProfileRuleId = $rule.Id
+                RegistryPath = $rule.Key
+                ValueName = $rule.ValueName
+                RegistryType = $(if ($record.Count -eq 1) {
+                        $record[0].Type
+                    }
+                    else {
+                        $null
+                    })
+                ExpectedRegistryType = $rule.Type
+            } `
+                -Message 'An absent registry override does not establish the operating-system default or effective protocol behavior' `
+                -Applicability Configured
+            $check.Target = $target
+            $check
+        }
+        if (@($rules.AuditRules).Count) {
+            try {
+                $audit = @(Get-ADAnalyzerAuditPolicy `
+                        -ComputerName $name `
+                        -Credential $Credential `
+                        -TimeoutSeconds $configuration.Analysis.HostTimeoutSeconds)
+                foreach ($rule in $rules.AuditRules) {
+                    $id = ([guid]$rule.SubcategoryGuid).ToString()
+                    $record = @($audit | Where-Object SubcategoryGuid -eq $id)
+                    $status = if ($record.Count -ne 1) {
+                        'Unknown'
+                    }
+                    elseif (([uint32]$record[0].Flags -band [uint32]$rule.Flags) -eq [uint32]$rule.Flags) {
+                        'Pass'
+                    }
+                    else {
+                        'Fail'
+                    }
+                    New-ADAnalyzerCheck `
+                        -RuleId 'HOST.AUDIT_POLICY' `
+                        -Status $status `
+                        -Severity Medium `
+                        -Category Audit `
+                        -Target ($name + '/Audit/' + $id) `
+                        -Observed $record `
+                        -Expected $rule.Flags `
+                        -Message 'Native system audit policy flags: success=1, failure=2. Per-user policy and event delivery are separate controls.' `
+                        -Applicability Applicable
+                }
+            }
+            catch {
+                New-ADAnalyzerCheck `
+                    -RuleId 'HOST.AUDIT_POLICY' `
+                    -Status Unreadable `
+                    -Severity Medium `
+                    -Category Audit `
+                    -Target ($name + '/Audit') `
+                    -Message $_.Exception.Message
+            }
+        }
+        else {
+            New-ADAnalyzerCheck `
+                -RuleId 'HOST.AUDIT_POLICY' `
+                -Status NotConfigured `
+                -Category Audit `
+                -Target ($name + '/Audit') `
+                -Message 'Configure subcategory GUID and required flag masks to collect native system audit policy'
+        }
     }
-    foreach($endpoint in @($rules.CertificateEndpoints)) {
-        $hostName=[string]$endpoint.HostName;$port=if($endpoint.Port){[int]$endpoint.Port}else{443};$serverName=if($endpoint.ServerName){[string]$endpoint.ServerName}else{$hostName}
-        $target=('{0}:{1}/{2}' -f $hostName,$port,$serverName)
+    foreach ($endpoint in @($rules.CertificateEndpoints)) {
+        $hostName = [string]$endpoint.HostName
+        $port = if ($endpoint.Port) {
+            [int]$endpoint.Port
+        }
+        else {
+            443
+        }
+        $serverName = if ($endpoint.ServerName) {
+            [string]$endpoint.ServerName
+        }
+        else {
+            $hostName
+        }
+        $target = ('{0}:{1}/{2}' -f $hostName, $port, $serverName)
         try {
-            $certificate=Get-ADAnalyzerTlsCertificate -HostName $hostName -Port $port -ServerName $serverName -TimeoutSeconds $configuration.Analysis.HostTimeoutSeconds
-            $remaining=([datetime]$certificate.NotAfter-[datetime]::UtcNow).TotalDays
-            $minimum=if($null -ne $endpoint.MinimumRemainingDays){[int]$endpoint.MinimumRemainingDays}else{30}
-            $valid=$certificate.NameValid -and $certificate.ChainValid -and [datetime]$certificate.NotBefore -le [datetime]::UtcNow -and $remaining -ge $minimum
-            New-ADAnalyzerCheck -RuleId 'HOST.TLS_CERTIFICATE' -Status $(if($valid){'Pass'}else{'Fail'}) -Severity High -Category Certificate -Target $target -Observed $certificate -Expected @{MinimumRemainingDays=$minimum;NameValid=$true;ChainValid=$true;Protocol='TLS1.2 or TLS1.3'} -Message 'Direct TLS endpoint inspection. Certificate revocation was not checked; STARTTLS and LDAP channel binding are not assessed.' -Applicability Applicable
-            New-ADAnalyzerCheck -RuleId 'HOST.CERTIFICATE_REVOCATION' -Status Unknown -Category Certificate -Target $target -Observed $false -Expected 'Revocation validation' -Message 'This bounded offline-chain inspection does not query revocation services'
-        } catch {New-ADAnalyzerCheck -RuleId 'HOST.TLS_CERTIFICATE' -Status Unreadable -Severity High -Category Certificate -Target $target -Message $_.Exception.Message}
+            $certificate = Get-ADAnalyzerTlsCertificate `
+                -HostName $hostName `
+                -Port $port `
+                -ServerName $serverName `
+                -TimeoutSeconds $configuration.Analysis.HostTimeoutSeconds
+            $remaining = ([datetime]$certificate.NotAfter - [datetime]::UtcNow).TotalDays
+            $minimum = if ($null -ne $endpoint.MinimumRemainingDays) {
+                [int]$endpoint.MinimumRemainingDays
+            }
+            else {
+                30
+            }
+            $valid = $certificate.NameValid -and
+            $certificate.ChainValid -and
+            [datetime]$certificate.NotBefore -le [datetime]::UtcNow -and
+            $remaining -ge $minimum
+            New-ADAnalyzerCheck `
+                -RuleId 'HOST.TLS_CERTIFICATE' `
+                -Status $(if ($valid) {
+                    'Pass'
+                }
+                else {
+                    'Fail'
+                }) `
+                -Severity High `
+                -Category Certificate `
+                -Target $target `
+                -Observed $certificate `
+                -Expected @{
+                MinimumRemainingDays = $minimum
+                NameValid = $true
+                ChainValid = $true
+                Protocol = 'TLS1.2 or TLS1.3'
+            } `
+                -Message 'Direct TLS endpoint inspection. Certificate revocation was not checked; STARTTLS and LDAP channel binding are not assessed.' `
+                -Applicability Applicable
+            New-ADAnalyzerCheck `
+                -RuleId 'HOST.CERTIFICATE_REVOCATION' `
+                -Status Unknown `
+                -Category Certificate `
+                -Target $target `
+                -Observed $false `
+                -Expected 'Revocation validation' `
+                -Message 'This bounded offline-chain inspection does not query revocation services'
+        }
+        catch {
+            New-ADAnalyzerCheck `
+                -RuleId 'HOST.TLS_CERTIFICATE' `
+                -Status Unreadable `
+                -Severity High `
+                -Category Certificate `
+                -Target $target `
+                -Message $_.Exception.Message
+        }
     }
 }

@@ -1,5 +1,5 @@
 Invoke-ClassTest 'legacy user inactivity follows configured thresholds and known creation grace' {
-    $results=Invoke-ClassScope @'
+    $results = Invoke-ClassScope @'
 $saved=$script:ADAnalyzerLegacyProfile
 try{
     foreach($case in @(
@@ -17,11 +17,14 @@ try{
     }
 }finally{$script:ADAnalyzerLegacyProfile=$saved}
 '@
-    foreach($r in $results){Assert-ClassEqual $r.Expected $r.Actual;Assert-ClassEqual $true $r.Unchanged}
+    foreach ($r in $results) {
+        Assert-ClassEqual $r.Expected $r.Actual
+        Assert-ClassEqual $true $r.Unchanged
+    }
 }
 
 Invoke-ClassTest 'legacy computer inactivity uses the profile for both independent signals' {
-    $results=Invoke-ClassScope @'
+    $results = Invoke-ClassScope @'
 $saved=$script:ADAnalyzerLegacyProfile
 try{
     foreach($signal in @('lastlogon','pwdLastSet')){foreach($case in @(
@@ -40,11 +43,13 @@ try{
     [pscustomobject]@{Expected=2;Actual=@([ComputerObject]::Analyze($row) | Where-Object finding -eq 'Defect - Computer Inactivity').Count}
 }finally{$script:ADAnalyzerLegacyProfile=$saved}
 '@
-    foreach($r in $results){Assert-ClassEqual $r.Expected $r.Actual}
+    foreach ($r in $results) {
+        Assert-ClassEqual $r.Expected $r.Actual
+    }
 }
 
 Invoke-ClassTest 'legacy personal password milestones are relative to configured age and never invent dates' {
-    $results=Invoke-ClassScope @'
+    $results = Invoke-ClassScope @'
 $saved=$script:ADAnalyzerLegacyProfile
 try{
     $cases=@()
@@ -63,11 +68,14 @@ try{
     }
 }finally{$script:ADAnalyzerLegacyProfile=$saved}
 '@
-    foreach($r in $results){Assert-ClassEqual $r.ExpectedWarning $r.Warning;Assert-ClassEqual $r.ExpectedDefect $r.Defect}
+    foreach ($r in $results) {
+        Assert-ClassEqual $r.ExpectedWarning $r.Warning
+        Assert-ClassEqual $r.ExpectedDefect $r.Defect
+    }
 }
 
 Invoke-ClassTest 'legacy service warnings use configured windows and preserve default bucket labels' {
-    $results=Invoke-ClassScope @'
+    $results = Invoke-ClassScope @'
 $saved=$script:ADAnalyzerLegacyProfile
 try{
     $cases=@(
@@ -87,11 +95,14 @@ try{
     }
 }finally{$script:ADAnalyzerLegacyProfile=$saved}
 '@
-    foreach($r in $results){Assert-ClassEqual $r.ExpectedWarning $r.Warning;Assert-ClassEqual $r.ExpectedDefect $r.Defect}
+    foreach ($r in $results) {
+        Assert-ClassEqual $r.ExpectedWarning $r.Warning
+        Assert-ClassEqual $r.ExpectedDefect $r.Defect
+    }
 }
 
 Invoke-ClassTest 'legacy password-policy class honors stricter and looser length and history profiles' {
-    $results=Invoke-ClassScope @'
+    $results = Invoke-ClassScope @'
 $saved=$script:ADAnalyzerLegacyProfile
 try{
     foreach($setting in @('MinimumPasswordLength','PasswordHistorySize')){foreach($limit in @(4,20)){foreach($value in @(($limit-1),$limit)){
@@ -103,11 +114,13 @@ try{
     }}}
 }finally{$script:ADAnalyzerLegacyProfile=$saved}
 '@
-    foreach($r in $results){Assert-ClassEqual $r.Expected $r.Actual}
+    foreach ($r in $results) {
+        Assert-ClassEqual $r.Expected $r.Actual
+    }
 }
 
 Invoke-ClassTest 'public legacy profile controls actual user inactivity findings without mutating fixtures' {
-    $r=Invoke-ClassScope @'
+    $r = Invoke-ClassScope @'
 $saved=$script:UserRecord
 try{
     $script:UserRecord=[ordered]@{};foreach($key in $saved.Keys){$script:UserRecord[$key]=$saved[$key]}
@@ -120,5 +133,7 @@ try{
     [pscustomobject]@{Loose=@($a.User.Finding | Where-Object finding -eq 'Defect - User Inactivity').Count;Strict=@($b.User.Finding | Where-Object finding -eq 'Defect - User Inactivity').Count;Unchanged=($before -ceq (ConvertTo-Json -InputObject $script:UserRecord -Depth 30 -Compress))}
 }finally{$script:UserRecord=$saved}
 '@
-    Assert-ClassEqual 0 $r.Loose;Assert-ClassEqual 1 $r.Strict;Assert-ClassEqual $true $r.Unchanged
+    Assert-ClassEqual 0 $r.Loose
+    Assert-ClassEqual 1 $r.Strict
+    Assert-ClassEqual $true $r.Unchanged
 }

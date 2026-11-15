@@ -25,5 +25,5 @@ $manifest = @{
 New-ModuleManifest @manifest
 # New-ModuleManifest comments out an explicitly empty VariablesToExport on
 # some PowerShell versions. Keep the generated public surface deterministic.
-$text=Get-Content -LiteralPath $manifest.Path -Raw
-Set-Content -LiteralPath $manifest.Path -Value ($text.Replace('# VariablesToExport = @()','VariablesToExport = @()')) -Encoding UTF8
+$text = Get-Content -LiteralPath $manifest.Path -Raw
+Set-Content -LiteralPath $manifest.Path -Value ($text.Replace('# VariablesToExport = @()', 'VariablesToExport = @()')) -Encoding UTF8

@@ -21,7 +21,6 @@ Enum DateAttributes {
     lastlogondate
     whenChanged
     whenCreated
-
 }
 
 Enum ObjectClasses {
@@ -30,7 +29,6 @@ Enum ObjectClasses {
     group
     computer
     GroupPolicy
-
 }
 
 Enum EnvironmentObjects {
@@ -40,14 +38,12 @@ Enum EnvironmentObjects {
     GroupObject
     GroupPolicyObject
     PasswordPolicyObject
-
 }
 
 Enum GPOConfiguration {
-    
+
     Computer
     User
-
 }
 
 Enum GPOExtensionType {
@@ -57,7 +53,6 @@ Enum GPOExtensionType {
     Preferences
     Xml
     Ini
-
 }
 
 Enum GPOExtensionProperty {
@@ -65,9 +60,7 @@ Enum GPOExtensionProperty {
     Account
     SecurityOptions
     UserRightsAssignment
-
 }
-
 
 #endregion Enumeration
 ######################################################################################################################################################################################################################################################
@@ -87,24 +80,44 @@ Class Convert {
 
         switch ($value) {
 
-            'y' { $object = $true }
-            'yes' { $object = $true }
-            'true' { $object = $true }
-            't' { $object = $true }
-            1 { $object = $true }
+            'y' {
+                $object = $true
+            }
+            'yes' {
+                $object = $true
+            }
+            'true' {
+                $object = $true
+            }
+            't' {
+                $object = $true
+            }
+            1 {
+                $object = $true
+            }
 
-            'n' { $object = $false }
-            'no' { $object = $false }
-            'false' { $object = $false }
-            'f' { $object = $false }
-            0 { $object = $false }
+            'n' {
+                $object = $false
+            }
+            'no' {
+                $object = $false
+            }
+            'false' {
+                $object = $false
+            }
+            'f' {
+                $object = $false
+            }
+            0 {
+                $object = $false
+            }
 
-            default { $object = $false }
-
+            default {
+                $object = $false
+            }
         }
 
         return $object
-
     }
 
     static [PSCustomObject]ToExport([PSCustomObject]$object) {
@@ -114,21 +127,22 @@ Class Convert {
 
             switch ($item.Value) {
 
-                { $item.Value -is [Array] -or $item.Value -is [ArrayList] } { $projection.($item.Name) = $item.Value -join ';' }
-
+                { $item.Value -is [Array] -or $item.Value -is [ArrayList] } {
+                    $projection.($item.Name) = $item.Value -join ';'
+                }
             }
-
         }
 
         return $projection
-
     }
 
     static [OrderedDictionary]ToOrderedDictionary($value) {
 
         $object = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
 
-        if ($null -eq $value) { return $object }
+        if ($null -eq $value) {
+            return $object
+        }
 
         if ($value -is [OrderedDictionary] -or $value -is [Hashtable] -or $value.GetType().Name -in ([EnvironmentObjects].GetEnumNames())) {
             $value.Keys | ForEach-Object { $object[$_] = $value[$_] }
@@ -138,10 +152,9 @@ Class Convert {
         }
 
         return $object
-
     }
-
 }
+
 class Format {
 
     static [OrderedDictionary]DateAttributes([String]$name, $value) {
@@ -150,13 +163,19 @@ class Format {
 
         switch ($name) {
 
-            'lastlogondate' { $name = 'lastlogon' }
-            'passwordlastset' { $name = 'pwdlastset' }
+            'lastlogondate' {
+                $name = 'lastlogon'
+            }
+            'passwordlastset' {
+                $name = 'pwdlastset'
+            }
 
-            default { }
-
+            default {
+            }
         }
-        if ([String]::IsNullOrEmpty($name)) { return $null }
+        if ([String]::IsNullOrEmpty($name)) {
+            return $null
+        }
         if ($null -eq $value -or [String]::IsNullOrEmpty([String]$value)) {
             $object[('days.{0}' -f $name)] = $null
         }
@@ -166,31 +185,50 @@ class Format {
 
         switch ($object[('days.{0}' -f $name)]) {
 
-            { $null -eq $_ } { $object['range.{0}' -f $name] = 'never' }
+            { $null -eq $_ } {
+                $object['range.{0}' -f $name] = 'never'
+            }
 
-            { $_ -gt 180 } { $object['range.{0}' -f $name] = '> 180 days' }
+            { $_ -gt 180 } {
+                $object['range.{0}' -f $name] = '> 180 days'
+            }
 
-            { $_ -le 180 -and $_ -gt 150 } { $object['range.{0}' -f $name] = '151 - 180 days' }
-            { $_ -le 150 -and $_ -gt 120 } { $object['range.{0}' -f $name] = '121 - 150 days' }
-            { $_ -le 120 -and $_ -gt 90 } { $object['range.{0}' -f $name] = '91 - 120 days' }
-            { $_ -le 90 -and $_ -gt 60 } { $object['range.{0}' -f $name] = '61 - 90 days' }
-            { $_ -le 60 -and $_ -gt 30 } { $object['range.{0}' -f $name] = '31 - 60 days' }
-            { $_ -le 30 -and $_ -gt 14 } { $object['range.{0}' -f $name] = '15 - 30 days' }
-            { $_ -le 14 -and $_ -gt 7 } { $object['range.{0}' -f $name] = '8 - 14 days' }
+            { $_ -le 180 -and $_ -gt 150 } {
+                $object['range.{0}' -f $name] = '151 - 180 days'
+            }
+            { $_ -le 150 -and $_ -gt 120 } {
+                $object['range.{0}' -f $name] = '121 - 150 days'
+            }
+            { $_ -le 120 -and $_ -gt 90 } {
+                $object['range.{0}' -f $name] = '91 - 120 days'
+            }
+            { $_ -le 90 -and $_ -gt 60 } {
+                $object['range.{0}' -f $name] = '61 - 90 days'
+            }
+            { $_ -le 60 -and $_ -gt 30 } {
+                $object['range.{0}' -f $name] = '31 - 60 days'
+            }
+            { $_ -le 30 -and $_ -gt 14 } {
+                $object['range.{0}' -f $name] = '15 - 30 days'
+            }
+            { $_ -le 14 -and $_ -gt 7 } {
+                $object['range.{0}' -f $name] = '8 - 14 days'
+            }
 
-            { $null -ne $_ -and $_ -le 7 } { $object['range.{0}' -f $name] = '<= 7 days' }
-            
+            { $null -ne $_ -and $_ -le 7 } {
+                $object['range.{0}' -f $name] = '<= 7 days'
+            }
         }
 
         return $object
-
     }
 
     static [OrderedDictionary]DistinguishedName([String]$value) {
 
         $object = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
 
-        $parts = @([regex]::Matches($value, '(?:\\.|[^,])+') | ForEach-Object { $_.Value.Trim() } | Where-Object { $_ -match '^(?:CN|OU|DC)=' })
+        $parts = @([regex]::Matches($value,
+                '(?:\\.|[^,])+') | ForEach-Object { $_.Value.Trim() } | Where-Object { $_ -match '^(?:CN|OU|DC)=' })
         for ($index = 0; $index -lt 3; $index++) {
             $name = 'orgUnit.L{0}' -f $index
             $object[$name] = $null
@@ -200,60 +238,92 @@ class Format {
         }
 
         return $object
-
     }
 
     static [OrderedDictionary]ValueCollection($value, [Array]$exclude) {
 
         $object = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
-        if ($null -eq $value) { return $object }
-        $entries = if ($value.PSObject.Methods['GetEnumerator']) { $value.GetEnumerator() } else { $value.PSObject.Properties }
+        if ($null -eq $value) {
+            return $object
+        }
+        $entries = if ($value.PSObject.Methods['GetEnumerator']) {
+            $value.GetEnumerator()
+        }
+        else {
+            $value.PSObject.Properties
+        }
         foreach ($entry in $entries) {
-            $key = if ($entry.PSObject.Properties['Key']) { $entry.Key } else { $entry.Name }
-            if ($key -in $exclude) { continue }
+            $key = if ($entry.PSObject.Properties['Key']) {
+                $entry.Key
+            }
+            else {
+                $entry.Name
+            }
+            if ($key -in $exclude) {
+                continue
+            }
             $item = $entry.Value
             if ($item -is [System.Collections.IEnumerable] -and $item -isnot [String] -and $item -isnot [System.Collections.IDictionary]) {
                 $items = @($item)
-                if ($items.Count -eq 0) { $item = $null }
-                elseif ($items.Count -eq 1) { $item = $items[0] }
-                else { $item = [ArrayList]$items }
+                if ($items.Count -eq 0) {
+                    $item = $null
+                }
+                elseif ($items.Count -eq 1) {
+                    $item = $items[0]
+                }
+                else {
+                    $item = [ArrayList]$items
+                }
             }
             $keyName = [string]$key
             if ((Test-ADAnalyzerSecretName $keyName) -or $item -is [pscredential] -or $item -is [Security.SecureString]) {
                 $flag = $keyName + 'Present'
                 $present = Test-ADAnalyzerSecretPresence $item
-                if ($object.Contains($flag) -and $object[$flag] -is [bool]) { $present = $present -or $object[$flag] }
+                if ($object.Contains($flag) -and $object[$flag] -is [bool]) {
+                    $present = $present -or $object[$flag]
+                }
                 $object[$flag] = [bool]$present
                 continue
             }
-            if ($keyName.EndsWith('Present', [StringComparison]::OrdinalIgnoreCase) -and (Test-ADAnalyzerSecretName ($keyName.Substring(0, $keyName.Length - 7)))) {
+            if ($keyName.EndsWith('Present',
+                    [StringComparison]::OrdinalIgnoreCase) -and
+                (Test-ADAnalyzerSecretName ($keyName.Substring(0,
+                        $keyName.Length - 7)))) {
                 $recorded = $false
-                if (-not [bool]::TryParse([string]$item, [ref]$recorded)) { $recorded = Test-ADAnalyzerSecretPresence $item }
-                if ($object.Contains($keyName) -and $object[$keyName] -is [bool]) { $recorded = $recorded -or $object[$keyName] }
+                if (-not [bool]::TryParse([string]$item, [ref]$recorded)) {
+                    $recorded = Test-ADAnalyzerSecretPresence $item
+                }
+                if ($object.Contains($keyName) -and $object[$keyName] -is [bool]) {
+                    $recorded = $recorded -or $object[$keyName]
+                }
                 $object[$keyName] = [bool]$recorded
                 continue
             }
-            if ($item -is [string]) { $item = ConvertTo-ADAnalyzerSecretIndicatorText $item }
+            if ($item -is [string]) {
+                $item = ConvertTo-ADAnalyzerSecretIndicatorText $item
+            }
             elseif ($item -is [ArrayList]) {
                 for ($index = 0; $index -lt $item.Count; $index++) {
-                    if ($item[$index] -is [string]) { $item[$index] = ConvertTo-ADAnalyzerSecretIndicatorText $item[$index] }
+                    if ($item[$index] -is [string]) {
+                        $item[$index] = ConvertTo-ADAnalyzerSecretIndicatorText $item[$index]
+                    }
                 }
             }
             $object[$key] = $item
         }
         return $object
-
     }
 
     static [OrderedDictionary]OrderedProperties($value, $list) {
 
         $object = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
-        foreach ($name in $list) { $object[$name] = $value[$name] }
+        foreach ($name in $list) {
+            $object[$name] = $value[$name]
+        }
         return $object
-
     }
-
 }
+
 class Export {
 
     static [void]CSV($array, $value) {
@@ -262,28 +332,31 @@ class Export {
 
             $list = [ArrayList]::New()
 
-            $array | ForEach-Object { 
-                
+            $array | ForEach-Object {
+
                 if ($_ -is [List] -or $_ -is [ArrayList]) {
 
                     $item = $_
 
-                    $item | ForEach-Object { if ($null -ne $_) { $list.Add([Convert]::ToExport($_)) > $null } }
-
+                    $item | ForEach-Object { if ($null -ne $_) {
+                            $list.Add([Convert]::ToExport($_)) > $null
+                        } }
                 }
                 else {
 
-                    if ($null -ne $_) { $list.Add([Convert]::ToExport([PSCustomObject]$_)) > $null }
-
+                    if ($null -ne $_) {
+                        $list.Add([Convert]::ToExport([PSCustomObject]$_)) > $null
+                    }
                 }
-            
             }
 
             $columns = [ArrayList]::New()
             $seen = [System.Collections.Generic.HashSet[string]]::New([StringComparer]::OrdinalIgnoreCase)
             foreach ($record in $list) {
                 foreach ($property in $record.PSObject.Properties) {
-                    if ($seen.Add($property.Name)) { $null = $columns.Add($property.Name) }
+                    if ($seen.Add($property.Name)) {
+                        $null = $columns.Add($property.Name)
+                    }
                 }
             }
             $rows = [ArrayList]::New()
@@ -291,22 +364,28 @@ class Export {
                 $row = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
                 foreach ($column in $columns) {
                     $property = $record.PSObject.Properties[$column]
-                    $row[$column] = if ($null -ne $property) { $property.Value } else { $null }
+                    $row[$column] = if ($null -ne $property) {
+                        $property.Value
+                    }
+                    else {
+                        $null
+                    }
                 }
                 $null = $rows.Add([PSCustomObject]$row)
             }
-            $content = if ($rows.Count) { ($rows | ConvertTo-Csv -NoTypeInformation -ErrorAction Stop) -join [Environment]::NewLine } else { '' }
+            $content = if ($rows.Count) {
+                ($rows | ConvertTo-Csv -NoTypeInformation -ErrorAction Stop) -join [Environment]::NewLine
+            }
+            else {
+                ''
+            }
             $null = Write-ADAnalyzerFile -Path $value -Content $content
-
         }
         catch {
 
             throw '{0}({1})' -f 'exporting_data', $_.Exception.Message
-
         }
-
     }
-
 }
 
 #endregion Helper
@@ -322,30 +401,31 @@ class Data {
     [Table]$Report
     [Finding]$Finding
 
-    [void]GetData() {}
-    [void]GetReport() {}
-    [void]GetFinding() {}
+    [void]GetData() {
+    }
+    [void]GetReport() {
+    }
+    [void]GetFinding() {
+    }
 
     [void]Analyze() {
 
         $this.GetData()
         $this.GetReport()
         $this.GetFinding()
-
     }
-    [void]SetFinding() {}
+    [void]SetFinding() {
+    }
 
     [void]SyncFindings() {
 
         if ($null -ne $this.Finding -and $this.Finding.Count -gt 0) {
 
             [FindingData]::Add($this.Name, $this.Finding)
-
         }
-
     }
-
 }
+
 class Property {
 
     [String]$Key
@@ -362,32 +442,36 @@ class Property {
 
     )
 
-    [void]SetKey([String]$value) { $this.Key = $value }
-    [void]SetList([Array]$value) { $this.List = $value }
+    [void]SetKey([String]$value) {
+        $this.Key = $value
+    }
+    [void]SetList([Array]$value) {
+        $this.List = $value
+    }
 
     [void]AddPropertyName($value) {
 
         $this.Names[$value] = $null
-
     }
 
     [void]SetPropertyNames($value) {
 
-        try {         
+        try {
             $this.Names.Clear()
             $value | Where-Object { $_ -notin $this.Exclude } | ForEach-Object { $this.Names[$_] = $null }
         }
         catch {
             throw '{0}({1})' -f 'exception_setting_propertyNames', $_.Exception.Message
         }
-
     }
 
-    [ArrayList]GetNames() { return $this.Names.Keys }
+    [ArrayList]GetNames() {
+        return $this.Names.Keys
+    }
 
     hidden [OrderedDictionary]$Names = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
-
 }
+
 class Process {
 
     static [Boolean]$WhatIf
@@ -397,21 +481,20 @@ class Process {
 
         [Process]::WhatIf = $null
         [Process]::Confirm = $null
-
-    }   
+    }
     static [void]Initialize([Boolean]$WhatIf, [Boolean]$Confirm) {
 
         [Process]::WhatIf = $WhatIf
         [Process]::Confirm = $Confirm
-
     }
-
 }
+
 class Table : Hashtable {
 
     [Property]$Properties = [Property]::New()
 
-    Table() : base([StringComparer]::OrdinalIgnoreCase) {}
+    Table() : base([StringComparer]::OrdinalIgnoreCase) {
+    }
 
     [void]FormatData() {
 
@@ -419,28 +502,25 @@ class Table : Hashtable {
 
         $key = $this.Properties.Key
 
-        $list = $this.Values.Keys | Sort-Object -Unique | Where-Object { $_ -notin $this.Properties.Exclude } 
+        $list = $this.Values.Keys | Sort-Object -Unique | Where-Object { $_ -notin $this.Properties.Exclude }
 
         $this.Values | ForEach-Object {
 
             $object = [Format]::OrderedProperties($_, $list)
 
             $table[$object.($key)] = $object
-
         }
 
         $this.Properties.SetPropertyNames($list)
 
         $table.GetEnumerator() | ForEach-Object { $this[$_.Name] = $_.Value }
-
     }
     [void]ExportCSV([String]$value) {
 
         [Export]::CSV($this.Values, $value)
-
     }
-
 }
+
 class List : ArrayList {
 
     [void]AddItem([ArrayList]$value) {
@@ -451,13 +531,12 @@ class List : ArrayList {
         elseif ($value.Count -gt 1) {
             $this.AddRange($value)
         }
-
     }
     [void]ExportCSV([String]$value) {
         [Export]::CSV($this, $value)
     }
-
 }
+
 class Finding : List {
 
     [void]AddFinding($value, $item) {
@@ -467,7 +546,6 @@ class Finding : List {
         $object['finding'] = $item
 
         $this.Add([PSCustomObject]$object) > $null
-
     }
     [void]UpdateFinding($value, $item) {
 
@@ -478,11 +556,9 @@ class Finding : List {
             @('action', 'result', 'message') | ForEach-Object { $object[$_] = $item[$_] }
 
             $this.Add([PSCustomObject]$object) > $null
-
         }
-
     }
-    
+
     static [Object]Delete($value) {
         throw [NotSupportedException]::new('Unplanned deletion is disabled. Use a reviewed remediation plan; deletion is not an automatic action.')
     }
@@ -502,24 +578,23 @@ class Finding : List {
 
             switch ($object['action']) {
 
-                'delete' { $object['result'] = [Finding]::Delete($value) }
-                'disable' { $object['result'] = [Finding]::Disable($value) }
-
-            }   
-
+                'delete' {
+                    $object['result'] = [Finding]::Delete($value)
+                }
+                'disable' {
+                    $object['result'] = [Finding]::Disable($value)
+                }
+            }
         }
-        catch { 
+        catch {
 
             $object['result'] = $false
 
-            $object['message'] = '{0}({1})' -f 'findingRemediation', $_.Exception.Message  
-
+            $object['message'] = '{0}({1})' -f 'findingRemediation', $_.Exception.Message
         }
 
         return $object
-
     }
-
 }
 
 #endregion Base
@@ -530,7 +605,9 @@ class Finding : List {
 
 class DomainData : Data {
 
-    DomainData() { $this.Name = 'Domain' }
+    DomainData() {
+        $this.Name = 'Domain'
+    }
 
     [String]$FQDN
     [String]$DomainSID
@@ -551,110 +628,97 @@ class DomainData : Data {
         [DomainData]::Instance = [DomainData]::New()
 
         return [DomainData]::Instance
-
     }
     static [DomainData]GetInstance() {
 
         if ($null -eq [DomainData]::Instance) {
 
             throw '{0}({1})' -f 'instanceException', 'class instance has not been initialized'
-
         }
         else {
 
             return [DomainData]::Instance
-
         }
-
     }
     static [void]Close() {
 
         [PasswordPolicy]::Close()
         [DomainData]::Instance = $null
-
     }
     [Hashtable]GetWellKnownSID() {
 
         if ([String]::IsNullOrEmpty($this.DomainSID) -or [String]::IsNullOrEmpty($this.RootDomainSID)) {
 
             throw '{0}({1})' -f 'wellKnownSid', 'domain data is not properly initialized'
-
         }
 
         return [Hashtable]@{
 
-            ('S-1-5-32-544')                          = 'Administrators'
-            ('s-1-5-32-545')                          = 'Users'
-            ('s-1-5-32-546')                          = 'Guests'
-            ('s-1-5-32-547')                          = 'Power Users'
-            ('s-1-5-32-548')                          = 'Account Operators'
-            ('s-1-5-32-549')                          = 'Server Operators'
-            ('s-1-5-32-550')                          = 'Print Operators'
-            ('s-1-5-32-551')                          = 'Backup Operators'
-            ('s-1-5-32-552')                          = 'Replicators'
+            ('S-1-5-32-544') = 'Administrators'
+            ('s-1-5-32-545') = 'Users'
+            ('s-1-5-32-546') = 'Guests'
+            ('s-1-5-32-547') = 'Power Users'
+            ('s-1-5-32-548') = 'Account Operators'
+            ('s-1-5-32-549') = 'Server Operators'
+            ('s-1-5-32-550') = 'Print Operators'
+            ('s-1-5-32-551') = 'Backup Operators'
+            ('s-1-5-32-552') = 'Replicators'
 
-            ('s-1-5-32-581')                          = 'System Managed Accounts Group'
+            ('s-1-5-32-581') = 'System Managed Accounts Group'
 
-            ('{0}-{1}' -f $this.DomainSID, '500')     = 'Administrator'
-            ('{0}-{1}' -f $this.DomainSID, '501')     = 'Guest'
-            ('{0}-{1}' -f $this.DomainSID, '502')     = 'KRBTGT'
-            ('{0}-{1}' -f $this.DomainSID, '503')     = 'DefaultAccount'
+            ('{0}-{1}' -f $this.DomainSID, '500') = 'Administrator'
+            ('{0}-{1}' -f $this.DomainSID, '501') = 'Guest'
+            ('{0}-{1}' -f $this.DomainSID, '502') = 'KRBTGT'
+            ('{0}-{1}' -f $this.DomainSID, '503') = 'DefaultAccount'
 
-            ('{0}-{1}' -f $this.DomainSID, '512')     = 'Domain Admins'
-            ('{0}-{1}' -f $this.DomainSID, '513')     = 'Domain Users'
-            ('{0}-{1}' -f $this.DomainSID, '514')     = 'Domain Guests'
-            ('{0}-{1}' -f $this.DomainSID, '515')     = 'Domain Computers'
-            ('{0}-{1}' -f $this.DomainSID, '516')     = 'Domain Controllers'
-            ('{0}-{1}' -f $this.DomainSID, '517')     = 'Cert Publishers'
-            ('{0}-{1}' -f $this.DomainSID, '520')     = 'Group Policy Creator Owners'
-            ('{0}-{1}' -f $this.DomainSID, '526')     = 'Key Admins'
-            ('{0}-{1}' -f $this.DomainSID, '527')     = 'Enterprise Key Admins'
-            ('{0}-{1}' -f $this.DomainSID, '553')     = 'RAS and IAS Servers'
+            ('{0}-{1}' -f $this.DomainSID, '512') = 'Domain Admins'
+            ('{0}-{1}' -f $this.DomainSID, '513') = 'Domain Users'
+            ('{0}-{1}' -f $this.DomainSID, '514') = 'Domain Guests'
+            ('{0}-{1}' -f $this.DomainSID, '515') = 'Domain Computers'
+            ('{0}-{1}' -f $this.DomainSID, '516') = 'Domain Controllers'
+            ('{0}-{1}' -f $this.DomainSID, '517') = 'Cert Publishers'
+            ('{0}-{1}' -f $this.DomainSID, '520') = 'Group Policy Creator Owners'
+            ('{0}-{1}' -f $this.DomainSID, '526') = 'Key Admins'
+            ('{0}-{1}' -f $this.DomainSID, '527') = 'Enterprise Key Admins'
+            ('{0}-{1}' -f $this.DomainSID, '553') = 'RAS and IAS Servers'
 
             ('{0}-{1}' -f $this.RootDomainSID, '518') = 'Schema Admins'
             ('{0}-{1}' -f $this.RootDomainSID, '519') = 'Enterprise Admins'
             ('{0}-{1}' -f $this.RootDomainSID, '521') = 'Read-only Domain Controllers'
-            ('{0}-{1}' -f $this.RootDomainSID, '571') = 'Allowed RODC Password Replication Group'   
-
+            ('{0}-{1}' -f $this.RootDomainSID, '571') = 'Allowed RODC Password Replication Group'
         }
-
     }
     [PSCustomObject]GetDomainControllers([Microsoft.ActiveDirectory.Management.ADPartition]$domain) {
 
         return [PSCustomObject]@{
 
-            Computer         = $domain.ComputersContainer
+            Computer = $domain.ComputersContainer
             DomainController = $domain.DomainControllersContainer
-            DeletedObject    = $domain.DeletedObjectsContainer
-            ForeignSecurity  = $domain.ForeignSecurityPrincipalsContainer
-            User             = $domain.UsersContainer
-
+            DeletedObject = $domain.DeletedObjectsContainer
+            ForeignSecurity = $domain.ForeignSecurityPrincipalsContainer
+            User = $domain.UsersContainer
         }
-
     }
     [PSCustomObject]GetDomainIdentifiers([Microsoft.ActiveDirectory.Management.ADPartition]$domain) {
 
         return [PSCustomObject]@{
 
-            dnsRoot     = $domain.dnsRoot
-            Name        = $domain.Name
+            dnsRoot = $domain.dnsRoot
+            Name = $domain.Name
             NetBIOSName = $domain.NetBIOSName
-
         }
-
     }
-    [PSCustomObject]GetDomainFSMORoles([Microsoft.ActiveDirectory.Management.ADPartition]$domain, [Microsoft.ActiveDirectory.Management.ADEntity]$forest) {
+    [PSCustomObject]GetDomainFSMORoles([Microsoft.ActiveDirectory.Management.ADPartition]$domain,
+        [Microsoft.ActiveDirectory.Management.ADEntity]$forest) {
 
         return [PSCustomObject]@{
 
-            DomainNamingMaster   = $forest.DomainNamingMaster
+            DomainNamingMaster = $forest.DomainNamingMaster
             InfrastructureMaster = $domain.InfrastructureMaster
-            PDCEmulator          = $domain.PDCEmulator
-            RIDMaster            = $domain.RIDMaster
-            SchemaMaster         = $forest.SchemaMaster
-
+            PDCEmulator = $domain.PDCEmulator
+            RIDMaster = $domain.RIDMaster
+            SchemaMaster = $forest.SchemaMaster
         }
-
     }
 
     [PSCustomObject]GetOptionalFeatures([String]$value) {
@@ -665,27 +729,31 @@ class DomainData : Data {
 
         try {
 
-            Get-ADOptionalFeature -Filter * -Properties ('Name', 'DistinguishedName', 'EnabledScopes') -Server $value -ErrorAction Stop | ForEach-Object {
+            Get-ADOptionalFeature `
+                -Filter * `
+                -Properties ('Name',
+                'DistinguishedName',
+                'EnabledScopes') `
+                -Server $value `
+                -ErrorAction Stop | ForEach-Object {
 
                 $object = [ordered]@{
 
-                    Name               = $_.Name.Replace('Feature', '').Trim()
-                    Enabled            = $_.EnabledScopes.Count -gt 0
+                    Name = $_.Name.Replace('Feature', '').Trim()
+                    Enabled = $_.EnabledScopes.Count -gt 0
                     RequiredDomainMode = $_.RequiredDomainMode
                     RequiredForestMode = $_.RequiredForestMode
-                    distinguishedName  = $_.distinguishedName
-
+                    distinguishedName = $_.distinguishedName
                 }
 
                 $table[$object.($table.Properties.Key)] = [PSCustomObject]$object
-
             }
-
         }
-        catch { throw '{0}({1})' -f 'optionalFeatureCollection', $_.Exception.Message }
+        catch {
+            throw '{0}({1})' -f 'optionalFeatureCollection', $_.Exception.Message
+        }
 
         return $table
-
     }
 
     [void]GetData() {
@@ -697,9 +765,10 @@ class DomainData : Data {
             $this.FQDN = ([ADTarget]::FQDN)
 
             $this.DomainSID = $domain.DomainSID
-
         }
-        catch { throw '{0}({1})' -f 'domainCollection', $_.Exception.Message }
+        catch {
+            throw '{0}({1})' -f 'domainCollection', $_.Exception.Message
+        }
 
         try {
 
@@ -711,9 +780,10 @@ class DomainData : Data {
             else {
                 $this.RootDomainSID = (Get-ADDomain -Server $forest.RootDomain).DomainSID
             }
-
         }
-        catch { throw '{0}({1})' -f 'forestCollection', $_.Exception.Message }
+        catch {
+            throw '{0}({1})' -f 'forestCollection', $_.Exception.Message
+        }
 
         $this.WellKnownSID = $this.GetWellKnownSID()
 
@@ -724,13 +794,14 @@ class DomainData : Data {
         $this.PasswordPolicy = [PasswordPolicy]::Initialize()
 
         $this.OptionalFeatures = $this.GetOptionalFeatures([ADTarget]::FQDN)
-
     }
-
 }
+
 class ObjectData : Data {
 
-    ObjectData () { $this.Name = 'Object' }
+    ObjectData () {
+        $this.Name = 'Object'
+    }
     hidden [object]$MembershipIndex
 
     static [ObjectData]$Instance
@@ -740,51 +811,55 @@ class ObjectData : Data {
         [ObjectData]::Instance = [ObjectData]::New()
 
         return [ObjectData]::Instance
-
     }
     static [ObjectData]GetInstance() {
 
         if ($null -eq [ObjectData]::Instance) {
 
             throw '{0}({1})' -f 'instanceException', 'class instance has not been initialized'
-
         }
         else {
 
             return [ObjectData]::Instance
-
         }
-
     }
     static [void]Close() {
 
         [ObjectData]::Instance = $null
-
     }
 
     [void]GetData() {
-        
+
         try {
 
             $table = [Table]::New()
 
             $table.Properties.SetKey('DistinguishedName')
 
-            Get-ADObject -Filter { objectClass -eq 'user' -or objectClass -eq 'group' -or objectClass -eq 'computer' } -Properties samaccountname,objectSid,memberOf,primaryGroupID,objectClass,objectGUID -Server ([ADTarget]::FQDN) -ErrorAction Stop | ForEach-Object {
+            Get-ADObject `
+                -Filter { objectClass -eq 'user' -or objectClass -eq 'group' -or objectClass -eq 'computer' } `
+                -Properties samaccountname,
+            objectSid,
+            memberOf,
+            primaryGroupID,
+            objectClass,
+            objectGUID `
+                -Server ([ADTarget]::FQDN) `
+                -ErrorAction Stop | ForEach-Object {
                 $table[$_.($table.Properties.Key)] = [Format]::ValueCollection($_, $table.Properties.Exclude)
             }
 
             $table.FormatData()
-
         }
-        catch { throw '{0}({1})' -f 'objectCollection', $_.Exception.Message }
+        catch {
+            throw '{0}({1})' -f 'objectCollection', $_.Exception.Message
+        }
 
         $this.Data = $table
         $this.MembershipIndex = New-ADAnalyzerMembershipIndex -Groups @($table.Values)
-
     }
-
 }
+
 class FindingData : Finding {
 
     static [FindingData]$Instance
@@ -794,27 +869,22 @@ class FindingData : Finding {
         [FindingData]::Instance = [FindingData]::New()
 
         return [FindingData]::Instance
-
     }
     static [FindingData]GetInstance() {
 
         if ($null -eq [FindingData]::Instance) {
 
             throw '{0}({1})' -f 'instanceException', 'class instance has not been initialized'
-
         }
         else {
 
             return [FindingData]::Instance
-
         }
-
     }
 
     static [void]Close() {
 
         [FindingData]::Instance = $null
-
     }
     static [void]Add([String]$value, [Finding]$list) {
 
@@ -826,24 +896,27 @@ class FindingData : Finding {
             foreach ($property in $item.PSObject.Properties) {
                 $field = $property.Value
                 if ($field -is [bigint]) {
-                    if ($field -ge [long]::MinValue -and $field -le [long]::MaxValue) { $field = [long]$field }
-                    elseif ($field -ge 0 -and $field -le [uint64]::MaxValue) { $field = [uint64]$field }
-                    else { $field = $field.ToString([Globalization.CultureInfo]::InvariantCulture) }
+                    if ($field -ge [long]::MinValue -and $field -le [long]::MaxValue) {
+                        $field = [long]$field
+                    }
+                    elseif ($field -ge 0 -and $field -le [uint64]::MaxValue) {
+                        $field = [uint64]$field
+                    }
+                    else {
+                        $field = $field.ToString([Globalization.CultureInfo]::InvariantCulture)
+                    }
                 }
                 $jsonRecord[$property.Name] = $field
             }
             $object = [ordered]@{
-                'class'   = $value
+                'class' = $value
                 'finding' = $item.'finding'
-                'object'  = ([PSCustomObject]$jsonRecord | ConvertTo-Json)
+                'object' = ([PSCustomObject]$jsonRecord | ConvertTo-Json)
             }
 
             [FindingData]::GetInstance().Add([PSCustomObject]$object) > $null
-
         }
-
     }
-
 }
 
 #endregion Domain
@@ -860,29 +933,24 @@ class PasswordPolicy : Table {
         [PasswordPolicy]::Instance = [PasswordPolicy]::New()
 
         return [PasswordPolicy]::Instance
-
     }
     static [PasswordPolicy]GetInstance() {
 
         if ($null -eq [PasswordPolicy]::Instance) {
 
             throw '{0}({1})' -f 'instanceException', 'class instance has not been initialized'
-
         }
         else {
 
             return [PasswordPolicy]::Instance
-
         }
-
     }
     static [void]Close() {
 
         [PasswordPolicy]::Instance = $null
-
     }
-
 }
+
 class PasswordPolicyObject : OrderedDictionary {
 
     [Property]$Properties = [Property]::New()
@@ -894,7 +962,6 @@ class PasswordPolicyObject : OrderedDictionary {
         $object.SetDefaultProperties()
 
         return $object
-
     }
     static [PasswordPolicyObject]Initialize([Array]$value, [OrderedDictionary]$obj) {
 
@@ -915,16 +982,33 @@ class PasswordPolicyObject : OrderedDictionary {
             $presenceKey = [string]$item.Name + '.SecretPresent'
             $presenceNode = $item.SelectSingleNode('./*[local-name()="SecretPresent"]')
             if ($null -ne $presenceNode) {
-                if ($object.Contains([string]$item.Name)) { $object.Remove([string]$item.Name) }
+                if ($object.Contains([string]$item.Name)) {
+                    $object.Remove([string]$item.Name)
+                }
                 $present = $false
                 $valid = [bool]::TryParse($presenceNode.InnerText, [ref]$present)
-                $object[$presenceKey] = if ($valid) { $present } else { $null }
+                $object[$presenceKey] = if ($valid) {
+                    $present
+                }
+                else {
+                    $null
+                }
                 $validityKey = [string]$item.Name + '.ValueValid'
                 $validityNode = $item.SelectSingleNode('./*[local-name()="ValueValid"]')
-                $object[$validityKey] = if (-not $valid) { $false } elseif ($null -ne $validityNode) { [System.Convert]::ToBoolean($validityNode.InnerText) } else { $null }
+                $object[$validityKey] = if (-not $valid) {
+                    $false
+                }
+                elseif ($null -ne $validityNode) {
+                    [System.Convert]::ToBoolean($validityNode.InnerText)
+                }
+                else {
+                    $null
+                }
                 continue
             }
-            if ($object.Contains($presenceKey)) { $object[$presenceKey] = $null }
+            if ($object.Contains($presenceKey)) {
+                $object[$presenceKey] = $null
+            }
             if ($null -ne $item.SettingNumber) {
                 $object[$item.Name] = [bigint]$item.SettingNumber
             }
@@ -936,12 +1020,15 @@ class PasswordPolicyObject : OrderedDictionary {
             }
             $validityKey = [string]$item.Name + '.ValueValid'
             $validityNode = $item.SelectSingleNode('./*[local-name()="ValueValid"]')
-            if ($null -ne $validityNode) { $object[$validityKey] = [System.Convert]::ToBoolean($validityNode.InnerText) }
-            elseif ($object.Contains($validityKey)) { $object[$validityKey] = $null }
+            if ($null -ne $validityNode) {
+                $object[$validityKey] = [System.Convert]::ToBoolean($validityNode.InnerText)
+            }
+            elseif ($object.Contains($validityKey)) {
+                $object[$validityKey] = $null
+            }
         }
 
         return $object
-
     }
     static [Finding]Analyze([OrderedDictionary]$value) {
 
@@ -953,7 +1040,9 @@ class PasswordPolicyObject : OrderedDictionary {
         }
 
         if ($value.'property.setting.secretPresent' -is [bool]) {
-            if ($value.'property.setting.secretPresent') { $list.AddFinding($value, 'Defect - Stored Secret') }
+            if ($value.'property.setting.secretPresent') {
+                $list.AddFinding($value, 'Defect - Stored Secret')
+            }
             return $list
         }
 
@@ -964,30 +1053,57 @@ class PasswordPolicyObject : OrderedDictionary {
                 # Reference : https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-gpsb/0b40db09-d95d-40a6-8467-32aedec8140c
 
                 # Lockout
-                { $_ -eq 'LockoutBadCount' -and ($policy.LockoutThreshold -gt 0 -and ($value.'property.setting.value' -eq 0 -or $value.'property.setting.value' -gt $policy.LockoutThreshold)) } { $list.AddFinding($value, 'Defect - Invalid Password Attempt Limit') }
-                { $_ -eq 'LockoutDuration' -and $value.'property.setting.value' -ne -1 -and $value.'property.setting.value' -lt $policy.LockoutDurationMinutes } { $list.AddFinding($value, 'Defect - Invalid Password Lockout Duration') }
-                { $_ -eq 'ResetLockoutCount' -and $value.'property.setting.value' -lt $policy.ResetLockoutMinutes } { $list.AddFinding($value, 'Defect - Invalid Password Lockout Duration') }
-                
+                { $_ -eq 'LockoutBadCount' -and
+                    ($policy.LockoutThreshold -gt 0 -and
+                    ($value.'property.setting.value' -eq 0 -or
+                    $value.'property.setting.value' -gt $policy.LockoutThreshold)) } {
+                    $list.AddFinding($value, 'Defect - Invalid Password Attempt Limit')
+                }
+                { $_ -eq 'LockoutDuration' -and
+                    $value.'property.setting.value' -ne -1 -and
+                    $value.'property.setting.value' -lt $policy.LockoutDurationMinutes } {
+                    $list.AddFinding($value, 'Defect - Invalid Password Lockout Duration')
+                }
+                { $_ -eq 'ResetLockoutCount' -and $value.'property.setting.value' -lt $policy.ResetLockoutMinutes } {
+                    $list.AddFinding($value, 'Defect - Invalid Password Lockout Duration')
+                }
+
                 # Password
-                { $_ -eq 'ClearTextPassword' -and $value.'property.setting.value' -eq $true } { $list.AddFinding($value, 'Defect - Reversible Encryption Enabled') }
-                { $_ -eq 'MaximumPasswordAge' -and (($value.'property.setting.value' -eq -1 -and -not $policy.AllowPasswordNeverExpires) -or $value.'property.setting.value' -gt $policy.MaximumPasswordAgeDays) } { $list.AddFinding($value, 'Defect - Max Password Age') }
-                { $_ -eq 'MinimumPasswordAge' -and $value.'property.setting.value' -lt $policy.MinimumPasswordAgeDays } { $list.AddFinding($value, 'Defect - Minimum Password Age') }
-                { $_ -eq 'MinimumPasswordLength' -and $value.'property.setting.value' -lt $policy.MinimumPasswordLength } { $list.AddFinding($value, 'Defect - Minimum Password Length') }
-                { $_ -eq 'PasswordHistorySize' -and $value.'property.setting.value' -lt $policy.PasswordHistorySize } { $list.AddFinding($value, 'Defect - Password History') }
-                { $_ -eq 'PasswordComplexity' -and $value.'property.setting.value' -eq $false } { $list.AddFinding($value, 'Defect - Password Complexity') }
-
+                { $_ -eq 'ClearTextPassword' -and $value.'property.setting.value' -eq $true } {
+                    $list.AddFinding($value, 'Defect - Reversible Encryption Enabled')
+                }
+                { $_ -eq 'MaximumPasswordAge' -and
+                    (($value.'property.setting.value' -eq -1 -and
+                        -not $policy.AllowPasswordNeverExpires) -or
+                    $value.'property.setting.value' -gt $policy.MaximumPasswordAgeDays) } {
+                    $list.AddFinding($value, 'Defect - Max Password Age')
+                }
+                { $_ -eq 'MinimumPasswordAge' -and $value.'property.setting.value' -lt $policy.MinimumPasswordAgeDays } {
+                    $list.AddFinding($value, 'Defect - Minimum Password Age')
+                }
+                { $_ -eq 'MinimumPasswordLength' -and $value.'property.setting.value' -lt $policy.MinimumPasswordLength } {
+                    $list.AddFinding($value, 'Defect - Minimum Password Length')
+                }
+                { $_ -eq 'PasswordHistorySize' -and $value.'property.setting.value' -lt $policy.PasswordHistorySize } {
+                    $list.AddFinding($value, 'Defect - Password History')
+                }
+                { $_ -eq 'PasswordComplexity' -and $value.'property.setting.value' -eq $false } {
+                    $list.AddFinding($value, 'Defect - Password Complexity')
+                }
             }
-
         }
 
         return $list
-
     }
     [void]UpdateInstance() {
 
-        $key = if ($this['policyId']) { $this['policyId'] } else { $this['policyName'] }
+        $key = if ($this['policyId']) {
+            $this['policyId']
+        }
+        else {
+            $this['policyName']
+        }
         [PasswordPolicy]::GetInstance()[$key] = [PSCustomObject]$this
-
     }
 
     [void]SetDefaultProperties() {
@@ -999,14 +1115,22 @@ class PasswordPolicyObject : OrderedDictionary {
 
                 'policyId', 'policyName', 'linked', 'linkedOU', 'configuration', 'configurationEnabled'
                 'LockoutBadCount', 'LockoutDuration', 'ResetLockoutCount'
-                'ClearTextPassword', 'MaximumPasswordAge', 'MinimumPasswordAge', 'MinimumPasswordLength', 'PasswordComplexity', 'PasswordHistorySize', 'ResetLockoutCount'
+                'ClearTextPassword',
+                'MaximumPasswordAge',
+                'MinimumPasswordAge',
+                'MinimumPasswordLength',
+                'PasswordComplexity',
+                'PasswordHistorySize',
+                'ResetLockoutCount'
                 'MaxClockSkew', 'MaxRenewAge', 'MaxServiceAge', 'MaxTicketAge', 'MaxTicketAgeForRenew', 'TicketValidateClient'
                 'ForceLogoffWhenHourExpire', 'RequireLogonToChangePassword'
-                'PasswordComplexity.ValueValid', 'ClearTextPassword.ValueValid', 'TicketValidateClient.ValueValid', 'ForceLogoffWhenHourExpire.ValueValid'
+                'PasswordComplexity.ValueValid',
+                'ClearTextPassword.ValueValid',
+                'TicketValidateClient.ValueValid',
+                'ForceLogoffWhenHourExpire.ValueValid'
 
             )
         )
-
     }
 }
 
@@ -1018,7 +1142,9 @@ class PasswordPolicyObject : OrderedDictionary {
 
 class UserData : Data {
 
-    UserData () { $this.Name = 'User' }
+    UserData () {
+        $this.Name = 'User'
+    }
 
     static [UserData]$Instance
 
@@ -1027,39 +1153,36 @@ class UserData : Data {
         [UserData]::Instance = [UserData]::New()
 
         return [UserData]::Instance
-
     }
     static [UserData]GetInstance() {
 
         if ($null -eq [UserData]::Instance) {
 
             throw '{0}({1})' -f 'instanceException', 'class instance has not been initialized'
-
         }
         else {
 
             return [UserData]::Instance
-
         }
-
     }
     static [void]Close() {
 
         [UserData]::Instance = $null
-
     }
-    
+
     [void]GetData() {
 
         try {
 
             $table = [UserTable]::SetDefault()
 
-            $properties = @($table.Properties.List) + @('primaryGroupID','objectGUID','objectClass')
+            $properties = @($table.Properties.List) + @('primaryGroupID', 'objectGUID', 'objectClass')
             $profile = Get-ADAnalyzerLegacyProfile
             foreach ($rule in @($profile.AccountClassification.AttributeRules)) {
                 $attribute = [string]$rule.Attribute
-                if (-not (Test-ADAnalyzerClassificationAttribute $attribute)) { throw 'Invalid or secret-valued classification attribute' }
+                if (-not (Test-ADAnalyzerClassificationAttribute $attribute)) {
+                    throw 'Invalid or secret-valued classification attribute'
+                }
                 $properties += $attribute
             }
             $properties = @($properties | Select-Object -Unique)
@@ -1068,20 +1191,15 @@ class UserData : Data {
             }
 
             $table.FormatData()
-
         }
-        catch { 
-            
-            throw '{0}({1})' -f 'userCollection', $_.Exception.Message 
-        
+        catch {
+
+            throw '{0}({1})' -f 'userCollection', $_.Exception.Message
         }
         finally {
 
             $this.Data = $table
-
-
         }
-
     }
     [void]GetReport() {
 
@@ -1090,7 +1208,6 @@ class UserData : Data {
         $this.Data.Values | ForEach-Object { $table[$_.($table.Properties.Key)] = [UserObject]::Initialize($_) }
 
         $this.Report = $table
-
     }
     [void]GetFinding() {
 
@@ -1101,7 +1218,6 @@ class UserData : Data {
         $this.Finding = $array
 
         $this.SyncFindings()
-
     }
 
     [void]SetFinding() {
@@ -1111,25 +1227,22 @@ class UserData : Data {
         try {
 
             $this.Finding | ForEach-Object { $array.UpdateFinding($_, [UserObject]::Remediate($_)) }
-
         }
-        catch { 
+        catch {
 
-            throw '{0}({1})' -f 'setFinding', $_.Exception.Message 
-
+            throw '{0}({1})' -f 'setFinding', $_.Exception.Message
         }
-        finally { 
+        finally {
 
-            $this.Finding = $array 
-
+            $this.Finding = $array
         }
-
     }
-
 }
+
 class UserTable : Table {
 
-    UserTable() : base() {} 
+    UserTable() : base() {
+    }
 
     static [UserTable]SetDefault() {
 
@@ -1138,7 +1251,6 @@ class UserTable : Table {
         $object.SetDefaultProperties()
 
         return $object
-
     }
 
     [void]SetDefaultProperties() {
@@ -1147,33 +1259,36 @@ class UserTable : Table {
 
         $this.Properties.SetKey($object.Properties.Key)
         $this.Properties.SetList($object.Properties.List)
-
     }
-
 }
+
 class UserObject : OrderedDictionary {
 
     [Property]$Properties = [Property]::New()
 
-    UserObject() : base([StringComparer]::OrdinalIgnoreCase) { }
+    UserObject() : base([StringComparer]::OrdinalIgnoreCase) {
+    }
 
     static [Hashtable]$Action = [Hashtable]@{
 
-        'Defect - User Inactivity'    = 'Disable'
+        'Defect - User Inactivity' = 'Disable'
         'Defect - Disabled > 30 days' = 'Delete'
-
     }
 
     static [String]GetAccountType([OrderedDictionary]$value) {
 
         $classification = Get-ADAnalyzerAccountType -Object $value -Profile (Get-ADAnalyzerLegacyProfile)
         switch ($classification.Type) {
-            'User' { return 'personal' }
-            'Service' { return 'non-personal' }
+            'User' {
+                return 'personal'
+            }
+            'Service' {
+                return 'non-personal'
+            }
         }
         return 'unknown'
     }
-    static [ArrayList]GetUserAccountControl([int]$value) { 
+    static [ArrayList]GetUserAccountControl([int]$value) {
 
         $object = [ArrayList]::New()
 
@@ -1181,47 +1296,86 @@ class UserObject : OrderedDictionary {
 
             # Reference : https://learn.microsoft.com/en-us/troubleshoot/windows-server/identity/useraccountcontrol-manipulate-account-properties
 
-            { ($value -bor 0x0001) -eq $value } { $object.Add('SCRIPT') > $null }
-            { ($value -bor 0x0002) -eq $value } { $object.Add('Disabled') > $null }
-            { ($value -bor 0x0008) -eq $value } { $object.Add('HOMEDIR_REQUIRED') > $null }
-            { ($value -bor 0x0010) -eq $value } { $object.Add('LOCKOUT') > $null }
-            { ($value -bor 0x0020) -eq $value } { $object.Add('PASSWD_NOTREQD') > $null }
-            { ($value -bor 0x0040) -eq $value } { $object.Add('PASSWD_CANT_CHANGE') > $null }
-            { ($value -bor 0x0080) -eq $value } { $object.Add('ENCRYPTED_TEXT_PWD_ALLOWED') > $null }
-            { ($value -bor 0x0100) -eq $value } { $object.Add('TEMP_DUPLICATE_ACCOUNT') > $null }
-            { ($value -bor 0x0200) -eq $value } { $object.Add('NORMAL_ACCOUNT') > $null }
-            { ($value -bor 0x0800) -eq $value } { $object.Add('INTERDOMAIN_TRUST_ACCOUNT') > $null }
-            { ($value -bor 0x1000) -eq $value } { $object.Add('WORKSTATION_TRUST_ACCOUNT') > $null }
-            { ($value -bor 0x2000) -eq $value } { $object.Add('SERVER_TRUST_ACCOUNT') > $null }
-            { ($value -bor 0x10000) -eq $value } { $object.Add('DONT_EXPIRE_PASSWORD') > $null }
-            { ($value -bor 0x20000) -eq $value } { $object.Add('MNS_LOGON_ACCOUNT') > $null }
-            { ($value -bor 0x40000) -eq $value } { $object.Add('SMARTCARD_REQUIRED') > $null }
-            { ($value -bor 0x80000) -eq $value } { $object.Add('TRUSTED_FOR_DELEGATION') > $null }
-            { ($value -bor 0x100000) -eq $value } { $object.Add('NOT_DELEGATED') > $null }
-            { ($value -bor 0x200000) -eq $value } { $object.Add('USE_DES_KEY_ONLY') > $null }
-            { ($value -bor 0x400000) -eq $value } { $object.Add('DONT_REQ_PREAUTH') > $null }
-            { ($value -bor 0x800000) -eq $value } { $object.Add('PASSWORD_EXPIRED') > $null }
-            { ($value -bor 0x1000000) -eq $value } { $object.Add('TRUSTED_TO_AUTH_FOR_DELEGATION') > $null }
-            { ($value -bor 0x04000000) -eq $value } { $object.Add('PARTIAL_SECRETS_ACCOUNT') > $null }
-
+            { ($value -bor 0x0001) -eq $value } {
+                $object.Add('SCRIPT') > $null
+            }
+            { ($value -bor 0x0002) -eq $value } {
+                $object.Add('Disabled') > $null
+            }
+            { ($value -bor 0x0008) -eq $value } {
+                $object.Add('HOMEDIR_REQUIRED') > $null
+            }
+            { ($value -bor 0x0010) -eq $value } {
+                $object.Add('LOCKOUT') > $null
+            }
+            { ($value -bor 0x0020) -eq $value } {
+                $object.Add('PASSWD_NOTREQD') > $null
+            }
+            { ($value -bor 0x0040) -eq $value } {
+                $object.Add('PASSWD_CANT_CHANGE') > $null
+            }
+            { ($value -bor 0x0080) -eq $value } {
+                $object.Add('ENCRYPTED_TEXT_PWD_ALLOWED') > $null
+            }
+            { ($value -bor 0x0100) -eq $value } {
+                $object.Add('TEMP_DUPLICATE_ACCOUNT') > $null
+            }
+            { ($value -bor 0x0200) -eq $value } {
+                $object.Add('NORMAL_ACCOUNT') > $null
+            }
+            { ($value -bor 0x0800) -eq $value } {
+                $object.Add('INTERDOMAIN_TRUST_ACCOUNT') > $null
+            }
+            { ($value -bor 0x1000) -eq $value } {
+                $object.Add('WORKSTATION_TRUST_ACCOUNT') > $null
+            }
+            { ($value -bor 0x2000) -eq $value } {
+                $object.Add('SERVER_TRUST_ACCOUNT') > $null
+            }
+            { ($value -bor 0x10000) -eq $value } {
+                $object.Add('DONT_EXPIRE_PASSWORD') > $null
+            }
+            { ($value -bor 0x20000) -eq $value } {
+                $object.Add('MNS_LOGON_ACCOUNT') > $null
+            }
+            { ($value -bor 0x40000) -eq $value } {
+                $object.Add('SMARTCARD_REQUIRED') > $null
+            }
+            { ($value -bor 0x80000) -eq $value } {
+                $object.Add('TRUSTED_FOR_DELEGATION') > $null
+            }
+            { ($value -bor 0x100000) -eq $value } {
+                $object.Add('NOT_DELEGATED') > $null
+            }
+            { ($value -bor 0x200000) -eq $value } {
+                $object.Add('USE_DES_KEY_ONLY') > $null
+            }
+            { ($value -bor 0x400000) -eq $value } {
+                $object.Add('DONT_REQ_PREAUTH') > $null
+            }
+            { ($value -bor 0x800000) -eq $value } {
+                $object.Add('PASSWORD_EXPIRED') > $null
+            }
+            { ($value -bor 0x1000000) -eq $value } {
+                $object.Add('TRUSTED_TO_AUTH_FOR_DELEGATION') > $null
+            }
+            { ($value -bor 0x04000000) -eq $value } {
+                $object.Add('PARTIAL_SECRETS_ACCOUNT') > $null
+            }
         }
 
         return $object
-
     }
     static [Boolean]IsProtectedUser($value) {
 
         if ($value -match '^CN=Protected Users,CN=Users') {
 
             return $true
-
         }
         else {
 
             return $false
-
         }
-
     }
     static [UserObject]SetDefault() {
 
@@ -1230,7 +1384,6 @@ class UserObject : OrderedDictionary {
         $object.SetDefaultProperties()
 
         return $object
-
     }
     static [UserObject]Initialize([OrderedDictionary]$value) {
 
@@ -1245,7 +1398,6 @@ class UserObject : OrderedDictionary {
                 $item = [Format]::DistinguishedName($value.($_))
 
                 $item.GetEnumerator() | ForEach-Object { $object[$_.Name] = $_.Value }
-
             }
             { $_ -in ([DateAttributes].GetEnumNames()) } {
 
@@ -1254,42 +1406,53 @@ class UserObject : OrderedDictionary {
                 $item = [Format]::DateAttributes($_, $value.($_))
 
                 $item.GetEnumerator() | ForEach-Object { $object[$_.Name] = $_.Value }
-
             }
-            'userAccountControl' { 
-                
+            'userAccountControl' {
+
                 $item = [UserObject]::GetUserAccountControl($value.($_))
 
                 if ($item.Count -eq 1) {
 
                     $object[$_] = [ArrayList]@($item)
-
                 }
                 else {
 
                     $object[$_] = $item
-
                 }
-
             }
             'userPrincipalName' {
 
                 $object[$_] = $value.($_)
 
                 $object['acctType'] = [UserObject]::GetAccountType($value)
-
             }
             'memberOf' {
 
                 $object[$_] = $value[$_]
                 $profile = Get-ADAnalyzerLegacyProfile
                 $domainSid = [DomainData]::GetInstance().DomainSID
-                $privilegedSids = @(Get-ADAnalyzerPrivilegedSids -DomainSid $domainSid -RootDomainSid ([DomainData]::GetInstance().RootDomainSID) -Profile $profile)
-                $membership = Resolve-ADAnalyzerMembership -Object $value -GroupIndex ([ObjectData]::GetInstance().MembershipIndex) -DomainSid $domainSid -PrivilegedSids $privilegedSids
-                $object['privilegedGroup'] = if ($membership.IsPrivileged) { $membership.PrivilegedSids } else { $null }
+                $privilegedSids = @(Get-ADAnalyzerPrivilegedSids `
+                        -DomainSid $domainSid `
+                        -RootDomainSid ([DomainData]::GetInstance().RootDomainSID) `
+                        -Profile $profile)
+                $membership = Resolve-ADAnalyzerMembership `
+                    -Object $value `
+                    -GroupIndex ([ObjectData]::GetInstance().MembershipIndex) `
+                    -DomainSid $domainSid `
+                    -PrivilegedSids $privilegedSids
+                $object['privilegedGroup'] = if ($membership.IsPrivileged) {
+                    $membership.PrivilegedSids
+                }
+                else {
+                    $null
+                }
                 $object['protectedUser'] = $membership.EffectiveSids -contains ($domainSid + '-525')
-                $object['privilegeResolution'] = if (@($membership.Unresolved).Count) { 'Unknown' } else { 'Complete' }
-
+                $object['privilegeResolution'] = if (@($membership.Unresolved).Count) {
+                    'Unknown'
+                }
+                else {
+                    'Complete'
+                }
             }
             'SID' {
 
@@ -1301,14 +1464,13 @@ class UserObject : OrderedDictionary {
                 }
 
                 $object[$_] = $value.($_).Value
-
             }
-            default { $object[$_] = $value[$_] }
-
+            default {
+                $object[$_] = $value[$_]
+            }
         }
 
         return $object
-
     }
 
     static [Finding]Analyze([OrderedDictionary]$value) {
@@ -1321,90 +1483,174 @@ class UserObject : OrderedDictionary {
         $personalRemaining = $null
         $serviceRemaining = $null
         if ($null -ne $value.'days.pwdLastSet' -and $value.'days.pwdLastSet' -ge 0) {
-            if ($policy.UserPasswordAgeDays -gt 0) { $personalRemaining = $policy.UserPasswordAgeDays - $value.'days.pwdLastSet' }
-            if ($policy.ServicePasswordAgeDays -gt 0) { $serviceRemaining = $policy.ServicePasswordAgeDays - $value.'days.pwdLastSet' }
+            if ($policy.UserPasswordAgeDays -gt 0) {
+                $personalRemaining = $policy.UserPasswordAgeDays - $value.'days.pwdLastSet'
+            }
+            if ($policy.ServicePasswordAgeDays -gt 0) {
+                $serviceRemaining = $policy.ServicePasswordAgeDays - $value.'days.pwdLastSet'
+            }
         }
 
         if (-not $value.enabled -and -not $value.WellKnownSID -and $value.'days.whenChanged' -ge 30) {
 
             $list.AddFinding($value, 'Defect - Disabled > 30 days')
-
         }
         else {
 
             switch ($value) {
 
                 # Personal milestones are days remaining under the profile.
-                { $value.enabled -and $value.acctType -eq 'personal' -and $null -ne $personalRemaining -and $personalRemaining -eq 1 } { $list.AddFinding($value, 'Warning - Personal Password Expiration - 1 Days') }
-                { $value.enabled -and $value.acctType -eq 'personal' -and $null -ne $personalRemaining -and $personalRemaining -eq 2 } { $list.AddFinding($value, 'Warning - Personal Password Expiration - 2 Days') }
-                { $value.enabled -and $value.acctType -eq 'personal' -and $null -ne $personalRemaining -and $personalRemaining -eq 7 } { $list.AddFinding($value, 'Warning - Personal Password Expiration - 7 Days') }
-                { $value.enabled -and $value.acctType -eq 'personal' -and $null -ne $personalRemaining -and $personalRemaining -eq 21 } { $list.AddFinding($value, 'Warning - Personal Password Expiration - 21 Days') }
+                { $value.enabled -and $value.acctType -eq 'personal' -and $null -ne $personalRemaining -and $personalRemaining -eq 1 } {
+                    $list.AddFinding($value, 'Warning - Personal Password Expiration - 1 Days')
+                }
+                { $value.enabled -and $value.acctType -eq 'personal' -and $null -ne $personalRemaining -and $personalRemaining -eq 2 } {
+                    $list.AddFinding($value, 'Warning - Personal Password Expiration - 2 Days')
+                }
+                { $value.enabled -and $value.acctType -eq 'personal' -and $null -ne $personalRemaining -and $personalRemaining -eq 7 } {
+                    $list.AddFinding($value, 'Warning - Personal Password Expiration - 7 Days')
+                }
+                { $value.enabled -and $value.acctType -eq 'personal' -and $null -ne $personalRemaining -and $personalRemaining -eq 21 } {
+                    $list.AddFinding($value, 'Warning - Personal Password Expiration - 21 Days')
+                }
 
                 # Service labels retain the lower elapsed-age boundary.
-                { $value.enabled -and $value.acctType -eq 'non-personal' -and $null -ne $serviceRemaining -and $serviceRemaining -gt 0 -and $serviceRemaining -le 30 } { $list.AddFinding($value, ('Warning - Non-Personal Password Expiration - {0} Days' -f [math]::Max(0, ($policy.ServicePasswordAgeDays - 30)))) }
-                { $value.enabled -and $value.acctType -eq 'non-personal' -and $null -ne $serviceRemaining -and $serviceRemaining -gt 30 -and $serviceRemaining -le 60 } { $list.AddFinding($value, ('Warning - Non-Personal Password Expiration - {0} Days' -f [math]::Max(0, ($policy.ServicePasswordAgeDays - 60)))) }
-                { $value.enabled -and $value.acctType -eq 'non-personal' -and $null -ne $serviceRemaining -and $serviceRemaining -gt 60 -and $serviceRemaining -le 90 } { $list.AddFinding($value, ('Warning - Non-Personal Password Expiration - {0} Days' -f [math]::Max(0, ($policy.ServicePasswordAgeDays - 90)))) }
-                
+                { $value.enabled -and
+                    $value.acctType -eq 'non-personal' -and
+                    $null -ne $serviceRemaining -and
+                    $serviceRemaining -gt 0 -and
+                    $serviceRemaining -le 30 } {
+                    $list.AddFinding($value,
+                        ('Warning - Non-Personal Password Expiration - {0} Days' -f [math]::Max(0,
+                            ($policy.ServicePasswordAgeDays - 30))))
+                }
+                { $value.enabled -and
+                    $value.acctType -eq 'non-personal' -and
+                    $null -ne $serviceRemaining -and
+                    $serviceRemaining -gt 30 -and
+                    $serviceRemaining -le 60 } {
+                    $list.AddFinding($value,
+                        ('Warning - Non-Personal Password Expiration - {0} Days' -f [math]::Max(0,
+                            ($policy.ServicePasswordAgeDays - 60))))
+                }
+                { $value.enabled -and
+                    $value.acctType -eq 'non-personal' -and
+                    $null -ne $serviceRemaining -and
+                    $serviceRemaining -gt 60 -and
+                    $serviceRemaining -le 90 } {
+                    $list.AddFinding($value,
+                        ('Warning - Non-Personal Password Expiration - {0} Days' -f [math]::Max(0,
+                            ($policy.ServicePasswordAgeDays - 90))))
+                }
+
                 # Password Age Defects
-                { $value.enabled -and $value.acctType -eq 'personal' -and $policy.UserPasswordAgeDays -gt 0 -and ($value.'days.pwdLastSet' -ge $policy.UserPasswordAgeDays -or $value.'range.pwdLastSet' -eq 'never') -and $value.'days.whenCreated' -gt 30 } { $list.AddFinding($value, 'Defect - Personal Password Age') }
-                { $value.enabled -and $value.acctType -eq 'non-personal' -and $policy.ServicePasswordAgeDays -gt 0 -and ($value.'days.pwdLastSet' -ge $policy.ServicePasswordAgeDays -or $value.'range.pwdLastSet' -eq 'never') -and $value.'days.whenCreated' -gt 30 } { $list.AddFinding($value, 'Defect - Non-Personal Password Age') }
+                { $value.enabled -and
+                    $value.acctType -eq 'personal' -and
+                    $policy.UserPasswordAgeDays -gt 0 -and
+                    ($value.'days.pwdLastSet' -ge $policy.UserPasswordAgeDays -or
+                    $value.'range.pwdLastSet' -eq 'never') -and
+                    $value.'days.whenCreated' -gt 30 } {
+                    $list.AddFinding($value, 'Defect - Personal Password Age')
+                }
+                { $value.enabled -and
+                    $value.acctType -eq 'non-personal' -and
+                    $policy.ServicePasswordAgeDays -gt 0 -and
+                    ($value.'days.pwdLastSet' -ge $policy.ServicePasswordAgeDays -or
+                    $value.'range.pwdLastSet' -eq 'never') -and
+                    $value.'days.whenCreated' -gt 30 } {
+                    $list.AddFinding($value, 'Defect - Non-Personal Password Age')
+                }
 
                 # Require known creation age before applying the profile grace.
-                { $value.enabled -and -not $value.WellKnownSID -and ($value.'days.lastlogon' -ge $policy.UserInactivityDays -or $value.'range.lastlogon' -eq 'never') -and $null -ne $value.'days.whenCreated' -and [int]$value.'days.whenCreated' -ge $policy.UserInactivityDays } { $list.AddFinding($value, 'Defect - User Inactivity') }
-
+                { $value.enabled -and
+                    -not $value.WellKnownSID -and
+                    ($value.'days.lastlogon' -ge $policy.UserInactivityDays -or
+                    $value.'range.lastlogon' -eq 'never') -and
+                    $null -ne $value.'days.whenCreated' -and
+                    [int]$value.'days.whenCreated' -ge $policy.UserInactivityDays } {
+                    $list.AddFinding($value, 'Defect - User Inactivity')
+                }
             }
 
             switch ($value) {
 
                 # Personal Password Never Expires - Personal User Passwords must expire automatically
-                { $value.enabled -and $value.acctType -eq 'personal' -and $value.'passwordNeverExpires' -eq $true } { $list.AddFinding($value, 'Defect - Personal Password Never Expires') }
-                
+                { $value.enabled -and $value.acctType -eq 'personal' -and $value.'passwordNeverExpires' -eq $true } {
+                    $list.AddFinding($value, 'Defect - Personal Password Never Expires')
+                }
+
                 # Non-Personal Password Automatically Expires - Non-Personal User Passwords should not expire automatically. Will disrupt service accounts. 
-                { $value.enabled -and $value.acctType -eq 'non-personal' -and $value.'passwordNeverExpires' -eq $false } { $list.AddFinding($value, 'Defect - Non-Personal Password Set to Expire') }
+                { $value.enabled -and $value.acctType -eq 'non-personal' -and $value.'passwordNeverExpires' -eq $false } {
+                    $list.AddFinding($value, 'Defect - Non-Personal Password Set to Expire')
+                }
 
                 # Unsecure Account Attributes
-                { $value.AllowedReversiblePasswordEncryption -eq $true } { $list.AddFinding($value, 'Defect - Reversible Encryption Enabled') }
-                { $value.userAccountControl -contains 'USE_DES_KEY_ONLY' } { $list.AddFinding($value, 'Defect - DES Encryption Enabled') }
-                { $value.userAccountControl -contains 'PASSWD_NOTREQD' } { $list.AddFinding($value, 'Defect - Password Not Required') }
-                { $value.userAccountControl -contains 'DONT_REQ_PREAUTH' -or $value.userAccountControl -contains 'DONT_REQUIRE_PREAUTH' } { $list.AddFinding($value, 'Defect - Kerberos PreAuth Not Required') }
-                { $value.userAccountControl -contains 'TRUSTED_TO_AUTH_FOR_DELEGATION' } { $list.AddFinding($value, 'Defect - Trusted Account Delegation Enabled') }
-                { $value.userAccountControl -contains 'TRUSTED_FOR_DELEGATION' } { $list.AddFinding($value, 'Defect - Trusted For Delegation Enabled') }
+                { $value.AllowedReversiblePasswordEncryption -eq $true } {
+                    $list.AddFinding($value, 'Defect - Reversible Encryption Enabled')
+                }
+                { $value.userAccountControl -contains 'USE_DES_KEY_ONLY' } {
+                    $list.AddFinding($value, 'Defect - DES Encryption Enabled')
+                }
+                { $value.userAccountControl -contains 'PASSWD_NOTREQD' } {
+                    $list.AddFinding($value, 'Defect - Password Not Required')
+                }
+                { $value.userAccountControl -contains 'DONT_REQ_PREAUTH' -or $value.userAccountControl -contains 'DONT_REQUIRE_PREAUTH' } {
+                    $list.AddFinding($value, 'Defect - Kerberos PreAuth Not Required')
+                }
+                { $value.userAccountControl -contains 'TRUSTED_TO_AUTH_FOR_DELEGATION' } {
+                    $list.AddFinding($value, 'Defect - Trusted Account Delegation Enabled')
+                }
+                { $value.userAccountControl -contains 'TRUSTED_FOR_DELEGATION' } {
+                    $list.AddFinding($value, 'Defect - Trusted For Delegation Enabled')
+                }
 
                 # Protected User
-                { $value.enabled -and $value.acctType -eq 'personal' -and -not [String]::IsNullOrEmpty($value.'privilegedGroup') } { $list.AddFinding($value, 'Defect - Personal Privileged Group Membership') }
-                { $value.enabled -and $value.acctType -eq 'non-personal' -and -not [String]::IsNullOrEmpty($value.'privilegedGroup') } { $list.AddFinding($value, 'Validate - Non-Personal Privileged Group Membership') }
-                { $value.adminCount -eq 1 -and -not $value.WellKnownSID -and [String]::IsNullOrEmpty($value.'privilegedGroup') } { $list.AddFinding($value, 'Defect - Protected User Not in Privileged Group') }
+                { $value.enabled -and $value.acctType -eq 'personal' -and -not [String]::IsNullOrEmpty($value.'privilegedGroup') } {
+                    $list.AddFinding($value, 'Defect - Personal Privileged Group Membership')
+                }
+                { $value.enabled -and $value.acctType -eq 'non-personal' -and -not [String]::IsNullOrEmpty($value.'privilegedGroup') } {
+                    $list.AddFinding($value, 'Validate - Non-Personal Privileged Group Membership')
+                }
+                { $value.adminCount -eq 1 -and -not $value.WellKnownSID -and [String]::IsNullOrEmpty($value.'privilegedGroup') } {
+                    $list.AddFinding($value, 'Defect - Protected User Not in Privileged Group')
+                }
 
                 # Warnings
-                { $value.CannotChangePassword } { $list.AddFinding($value, 'Warning - User Cannot Change Password') }
-                { $value.acctType -eq 'personal' -and -not [String]::IsNullOrEmpty($value.ServicePrincipalNames) } { $list.AddFinding($value, 'Defect - Personal Service Principal Names') }
-                { $value.acctType -eq 'non-personal' -and -not [String]::IsNullOrEmpty($value.ServicePrincipalNames) } { $list.AddFinding($value, 'Validate - Non-Personal Service Principal Names') }
-                { $value.enabled -and $value.'range.pwdLastSet' -eq 'never' -and $value.'days.whenCreated' -gt 30 } { $list.AddFinding($value, 'Warning - User Must Change Password at Next Logon') }
-                { $value.enabled -and -not [String]::IsNullOrEmpty($value.'SIDHistory') } { $list.AddFinding($value, 'Warning - SID History Defined') }
+                { $value.CannotChangePassword } {
+                    $list.AddFinding($value, 'Warning - User Cannot Change Password')
+                }
+                { $value.acctType -eq 'personal' -and -not [String]::IsNullOrEmpty($value.ServicePrincipalNames) } {
+                    $list.AddFinding($value, 'Defect - Personal Service Principal Names')
+                }
+                { $value.acctType -eq 'non-personal' -and -not [String]::IsNullOrEmpty($value.ServicePrincipalNames) } {
+                    $list.AddFinding($value, 'Validate - Non-Personal Service Principal Names')
+                }
+                { $value.enabled -and $value.'range.pwdLastSet' -eq 'never' -and $value.'days.whenCreated' -gt 30 } {
+                    $list.AddFinding($value, 'Warning - User Must Change Password at Next Logon')
+                }
+                { $value.enabled -and -not [String]::IsNullOrEmpty($value.'SIDHistory') } {
+                    $list.AddFinding($value, 'Warning - SID History Defined')
+                }
 
                 # Informational
-                { $value.ProtectedFromAccidentalDeletion } { $list.AddFinding($value, 'Validate - User Protected from Accidental Deletion') }
-
+                { $value.ProtectedFromAccidentalDeletion } {
+                    $list.AddFinding($value, 'Validate - User Protected from Accidental Deletion')
+                }
             }
-
         }
 
         return $list
-
     }
 
     static [OrderedDictionary]Remediate([Object]$value) {
 
-        $object = $null 
+        $object = $null
 
         if (-not $value.'WellKnownSID' -and [UserObject]::Action.Contains($value.'finding')) {
 
             $object = [Finding]::Remediate($value, [UserObject]::Action[$value.'finding'])
-
         }
 
         return $object
-
     }
 
     [void]SetDefaultProperties() {
@@ -1412,19 +1658,17 @@ class UserObject : OrderedDictionary {
         $this.Properties.SetKey('samaccountname')
         $this.Properties.SetList(
 
-            @(  
+            @(
                 'samaccountname', 'name', 'surName', 'givenName', 'userPrincipalName', 'distinguishedName'
                 'enabled', 'passwordlastset', 'lastlogondate', 'whenChanged', 'whenCreated', 'description'
 
-                'userAccountControl', 'AllowedReversiblePasswordEncryption', 'DoesNotRequirePreAuth', 'PasswordNeverExpires' 
+                'userAccountControl', 'AllowedReversiblePasswordEncryption', 'DoesNotRequirePreAuth', 'PasswordNeverExpires'
                 'KerberosEncryptionType', 'adminCount', 'CannotChangePassword', 'ProtectedFromAccidentalDeletion'
                 'PrincipalsAllowedToDelegateToAccount', 'SmartcardLogonRequired', 'ServicePrincipalNames', 'sidHistory', 'memberOf', 'SID'
             )
 
         )
-
     }
-
 }
 
 #endregion User
@@ -1434,7 +1678,9 @@ class UserObject : OrderedDictionary {
 #region Group
 class GroupData : Data {
 
-    GroupData () { $this.Name = 'Group' }
+    GroupData () {
+        $this.Name = 'Group'
+    }
 
     static [GroupData]$Instance
 
@@ -1443,26 +1689,21 @@ class GroupData : Data {
         [GroupData]::Instance = [GroupData]::New()
 
         return [GroupData]::Instance
-
     }
     static [GroupData]GetInstance() {
 
         if ($null -eq [GroupData]::Instance) {
 
             throw '{0}({1})' -f 'instanceException', 'class instance has not been initialized'
-
         }
         else {
 
             return [GroupData]::Instance
-
         }
-
     }
     static [void]Close() {
 
         [GroupData]::Instance = $null
-
     }
     [void]GetData() {
 
@@ -1476,15 +1717,12 @@ class GroupData : Data {
 
             $table.FormatData()
 
-            $this.Data = $table 
-
+            $this.Data = $table
         }
-        catch { 
-            
-            throw '{0}({1})' -f 'groupCollection', $_.Exception.Message 
-        
-        }
+        catch {
 
+            throw '{0}({1})' -f 'groupCollection', $_.Exception.Message
+        }
     }
 
     [void]GetReport() {
@@ -1494,7 +1732,6 @@ class GroupData : Data {
         $this.Data.Values | ForEach-Object { $table[$_.($table.Properties.Key)] = [GroupObject]::Initialize($_) }
 
         $this.Report = $table
-
     }
 
     [void]GetFinding() {
@@ -1506,7 +1743,6 @@ class GroupData : Data {
         $this.Finding = $array
 
         $this.SyncFindings()
-
     }
 
     [ArrayList]LookupGroupMembers($value) {
@@ -1518,19 +1754,17 @@ class GroupData : Data {
             if ([ADCollection]::Get('object').Data.ContainsKey($item)) {
 
                 $array.add([ADCollection]::Get('object').Data[$item]['samaccountname']) > $null
-
             }
-
         }
 
         return $array
-
     }
-
 }
+
 class GroupTable : Table {
 
-    GroupTable() : base() {} 
+    GroupTable() : base() {
+    }
 
     static [GroupTable]SetDefault() {
 
@@ -1539,7 +1773,6 @@ class GroupTable : Table {
         $object.SetDefaultProperties()
 
         return $object
-
     }
 
     [void]SetDefaultProperties() {
@@ -1548,16 +1781,15 @@ class GroupTable : Table {
 
         $this.Properties.SetKey($object.Properties.Key)
         $this.Properties.SetList($object.Properties.List)
-
     }
-
-
 }
+
 class GroupObject : OrderedDictionary {
 
     [Property]$Properties = [Property]::New()
 
-    GroupObject() : base([StringComparer]::OrdinalIgnoreCase) { }
+    GroupObject() : base([StringComparer]::OrdinalIgnoreCase) {
+    }
 
     static [GroupObject]SetDefault() {
 
@@ -1566,7 +1798,6 @@ class GroupObject : OrderedDictionary {
         $object.SetDefaultProperties()
 
         return $object
-
     }
     static [GroupObject]Initialize([OrderedDictionary]$value) {
 
@@ -1581,14 +1812,15 @@ class GroupObject : OrderedDictionary {
                 $item = [Format]::DistinguishedName($value.($_))
 
                 $item.GetEnumerator() | ForEach-Object { $object[$_.Name] = $_.Value }
-
             }
             'samaccountname' {
 
                 $object[$_] = $value.($_)
-                $privilegedSids = @(Get-ADAnalyzerPrivilegedSids -DomainSid ([DomainData]::GetInstance().DomainSID) -RootDomainSid ([DomainData]::GetInstance().RootDomainSID) -Profile (Get-ADAnalyzerLegacyProfile))
+                $privilegedSids = @(Get-ADAnalyzerPrivilegedSids `
+                        -DomainSid ([DomainData]::GetInstance().DomainSID) `
+                        -RootDomainSid ([DomainData]::GetInstance().RootDomainSID) `
+                        -Profile (Get-ADAnalyzerLegacyProfile))
                 $object['privilegedGroup'] = $privilegedSids -contains (Get-ADAnalyzerSidValue $value.SID)
-
             }
             { $_ -in ([DateAttributes].GetEnumNames()) } {
 
@@ -1597,7 +1829,6 @@ class GroupObject : OrderedDictionary {
                 $item = [Format]::DateAttributes($_, $value.($_))
 
                 $item.GetEnumerator() | ForEach-Object { $object[$_.Name] = $_.Value }
-
             }
             'members' {
 
@@ -1608,7 +1839,6 @@ class GroupObject : OrderedDictionary {
                 $value.($_) | Where-Object { $_ -match 'CN=ForeignSecurityPrincipals' } | ForEach-Object {
 
                     $array.Add($_) > $null
-
                 }
 
                 if ($array.Count -gt 0) {
@@ -1617,7 +1847,6 @@ class GroupObject : OrderedDictionary {
                 else {
                     $object['foreignSecurityPrincipalMembers'] = $null
                 }
-
             }
             'SID' {
 
@@ -1629,36 +1858,47 @@ class GroupObject : OrderedDictionary {
                 }
 
                 $object[$_] = $value.($_).Value
-
             }
 
-            default { $object[$_] = $value[$_] }
-
+            default {
+                $object[$_] = $value[$_]
+            }
         }
 
         return $object
-
     }
     static [Finding]Analyze([OrderedDictionary]$value) {
 
         $list = [Finding]::New()
         $policy = (Get-ADAnalyzerLegacyProfile).Policy
-        
+
         switch ($value) {
 
             # defect
-            { [String]::IsNullOrEmpty($value.'managedBy') } { $list.AddFinding($value, 'Defect - Unidentified Owner') }
-            { $value.privilegedGroup -and -not [String]::IsNullOrEmpty($value.'foreignSecurityPrincipalMembers') } { $list.AddFinding($value, 'Defect - Privileged Group w/ ForeignSecurityPrincipal(s)') }
-            { -not [String]::IsNullOrEmpty($value.'members') -and $value.SID -in @('S-1-5-32-548','S-1-5-32-549','S-1-5-32-550','S-1-5-32-551') } { $list.AddFinding($value, 'Defect - Privileged Builtin Group w/ Members') }
-            { -not [string]::IsNullOrEmpty($value.'memberOf') -and $value.'orgUnit.L0' -notin @('Builtin') } { $list.AddFinding($value, 'Defect - Nested Group') }
+            { [String]::IsNullOrEmpty($value.'managedBy') } {
+                $list.AddFinding($value, 'Defect - Unidentified Owner')
+            }
+            { $value.privilegedGroup -and -not [String]::IsNullOrEmpty($value.'foreignSecurityPrincipalMembers') } {
+                $list.AddFinding($value, 'Defect - Privileged Group w/ ForeignSecurityPrincipal(s)')
+            }
+            { -not [String]::IsNullOrEmpty($value.'members') -and
+                $value.SID -in @('S-1-5-32-548',
+                    'S-1-5-32-549',
+                    'S-1-5-32-550',
+                    'S-1-5-32-551') } {
+                $list.AddFinding($value, 'Defect - Privileged Builtin Group w/ Members')
+            }
+            { -not [string]::IsNullOrEmpty($value.'memberOf') -and $value.'orgUnit.L0' -notin @('Builtin') } {
+                $list.AddFinding($value, 'Defect - Nested Group')
+            }
 
             # warning
-            { [String]::IsNullOrEmpty($value.'members') -and $value.'orgUnit.L0' -notin @('Builtin') } { $list.AddFinding($value, 'Warning - Empty Group') }
-
+            { [String]::IsNullOrEmpty($value.'members') -and $value.'orgUnit.L0' -notin @('Builtin') } {
+                $list.AddFinding($value, 'Warning - Empty Group')
+            }
         }
 
         return $list
-
     }
 
     [void]SetDefaultProperties() {
@@ -1666,14 +1906,13 @@ class GroupObject : OrderedDictionary {
         $this.Properties.SetKey('samaccountname')
         $this.Properties.SetList(
 
-            @(  
+            @(
                 'samaccountname', 'name', 'groupCategory', 'groupScope', 'distinguishedName'
                 'description', 'ProtectedFromAccidentalDeletion', 'isCriticalSystemObject'
                 'managedBy', 'whenChanged', 'whenCreated', 'members', 'memberOf', 'SID'
             )
 
         )
-
     }
 
     static [ArrayList]ADPrivilegedGroups() {
@@ -1684,9 +1923,7 @@ class GroupObject : OrderedDictionary {
             'Enterprise Key Admins', 'Organization Management', 'RTCDomainServerAdmins', 'Enterprise Domain Controllers'
             'Cert Publishers', 'Exchange Recipient Administrators', 'Replicator', 'Read-Only Domain Controllers'
         )
-
     }
-
 }
 #endregion Group
 ######################################################################################################################################################################################################################################################
@@ -1695,7 +1932,9 @@ class GroupObject : OrderedDictionary {
 #region Computer
 class ComputerData : Data {
 
-    ComputerData () { $this.Name = 'Computer' }
+    ComputerData () {
+        $this.Name = 'Computer'
+    }
 
     static [ComputerData]$Instance
 
@@ -1704,27 +1943,22 @@ class ComputerData : Data {
         [ComputerData]::Instance = [ComputerData]::New()
 
         return [ComputerData]::Instance
-
     }
     static [ComputerData]GetInstance() {
 
         if ($null -eq [ComputerData]::Instance) {
 
             throw '{0}({1})' -f 'instanceException', 'class instance has not been initialized'
-
         }
         else {
 
             return [ComputerData]::Instance
-
         }
-
     }
 
     static [void]Close() {
 
         [ComputerData]::Instance = $null
-
     }
 
     [void]GetData() {
@@ -1745,19 +1979,15 @@ class ComputerData : Data {
             Get-ADComputer -Filter * -Properties $list -Server ([ADTarget]::FQDN) -ErrorAction Stop | ForEach-Object {
                 $table[$_.($table.Properties.Key)] = [Format]::ValueCollection($_, $table.Properties.Exclude)
             }
+        }
+        catch {
 
+            throw '{0}({1})' -f 'computerCollection', $_.Exception.Message
         }
-        catch { 
-            
-            throw '{0}({1})' -f 'computerCollection', $_.Exception.Message 
-        
-        }
-        finally { 
-            
-            $this.Data = $table 
-        
-        }
+        finally {
 
+            $this.Data = $table
+        }
     }
     [void]GetReport() {
 
@@ -1766,7 +1996,6 @@ class ComputerData : Data {
         $this.Data.Values | ForEach-Object { $table[$_.($table.Properties.Key)] = [ComputerObject]::Initialize($_) }
 
         $this.Report = $table
-
     }
     [void]GetFinding() {
 
@@ -1777,7 +2006,6 @@ class ComputerData : Data {
         $this.Finding = $array
 
         $this.SyncFindings()
-
     }
 
     [void]SetFinding() {
@@ -1787,25 +2015,22 @@ class ComputerData : Data {
         try {
 
             $this.Finding | ForEach-Object { $array.UpdateFinding($_, [ComputerObject]::Remediate($_)) }
-
         }
-        catch { 
+        catch {
 
-            throw '{0}({1})' -f 'setFinding', $_.Exception.Message 
-
+            throw '{0}({1})' -f 'setFinding', $_.Exception.Message
         }
-        finally { 
+        finally {
 
-            $this.Finding = $array 
-
+            $this.Finding = $array
         }
-
     }
-
 }
+
 class ComputerTable : Table {
 
-    ComputerTable() {} 
+    ComputerTable() {
+    }
 
     static [ComputerTable]SetDefault() {
 
@@ -1814,7 +2039,6 @@ class ComputerTable : Table {
         $object.SetDefaultProperties()
 
         return $object
-
     }
 
     [void]SetDefaultProperties() {
@@ -1823,23 +2047,22 @@ class ComputerTable : Table {
 
         $this.Properties.SetKey($object.Properties.Key)
         $this.Properties.SetList($object.Properties.List)
-
     }
-
 }
+
 class ComputerObject : OrderedDictionary {
 
     [ComputerObject]$Computer
 
     [Property]$Properties = [Property]::New()
 
-    ComputerObject() : base([StringComparer]::OrdinalIgnoreCase) { }
+    ComputerObject() : base([StringComparer]::OrdinalIgnoreCase) {
+    }
 
     static [Hashtable]$Action = [Hashtable]@{
 
         'Defect - Computer Inactivity' = 'Disable'
-        'Defect - Disabled > 30 days'  = 'Delete'
-
+        'Defect - Disabled > 30 days' = 'Delete'
     }
 
     static [ComputerObject]SetDefault() {
@@ -1849,7 +2072,6 @@ class ComputerObject : OrderedDictionary {
         $object.SetDefaultProperties()
 
         return $object
-
     }
     static [ComputerObject]Initialize([OrderedDictionary]$value) {
 
@@ -1864,7 +2086,6 @@ class ComputerObject : OrderedDictionary {
                 $item = [Format]::DistinguishedName($value.($_))
 
                 $item.GetEnumerator() | ForEach-Object { $object[$_.Name] = $_.Value }
-
             }
             { $_ -in ([DateAttributes].GetEnumNames()) } {
 
@@ -1873,30 +2094,26 @@ class ComputerObject : OrderedDictionary {
                 $item = [Format]::DateAttributes($_, $value.($_))
 
                 $item.GetEnumerator() | ForEach-Object { $object[$_.Name] = $_.Value }
-
             }
             'SID' {
 
                 if ([DomainData]::GetInstance().WellKnownSID.ContainsKey($value.($_).Value)) {
 
                     $object['WellKnownSID'] = $true
-
                 }
                 else {
 
                     $object['WellKnownSID'] = $false
-
                 }
 
                 $object[$_] = $value.($_).Value
-
             }
-            default { $object[$_] = $value[$_] }
-
+            default {
+                $object[$_] = $value[$_]
+            }
         }
 
         return $object
-
     }
 
     static [Finding]Analyze([OrderedDictionary]$value) {
@@ -1907,41 +2124,49 @@ class ComputerObject : OrderedDictionary {
         if (-not $value.enabled -and $value.'days.whenChanged' -ge 30) {
 
             $list.AddFinding($value, 'Defect - Disabled > 30 days')
-
         }
         else {
 
             switch ($value) {
 
                 # last logon activity
-                { $value.enabled -and ($value.'days.lastlogon' -ge $policy.ComputerInactivityDays -or $value.'range.lastlogon' -eq 'never') -and $null -ne $value.'days.whenCreated' -and [int]$value.'days.whenCreated' -ge $policy.ComputerInactivityDays } { $list.AddFinding($value, 'Defect - Computer Inactivity') }
+                { $value.enabled -and
+                    ($value.'days.lastlogon' -ge $policy.ComputerInactivityDays -or
+                    $value.'range.lastlogon' -eq 'never') -and
+                    $null -ne $value.'days.whenCreated' -and
+                    [int]$value.'days.whenCreated' -ge $policy.ComputerInactivityDays } {
+                    $list.AddFinding($value, 'Defect - Computer Inactivity')
+                }
 
                 # password age inactivity
-                { $value.enabled -and ($value.'days.pwdLastSet' -ge $policy.ComputerInactivityDays -or $value.'range.pwdLastSet' -eq 'never') -and $null -ne $value.'days.whenCreated' -and [int]$value.'days.whenCreated' -ge $policy.ComputerInactivityDays } { $list.AddFinding($value, 'Defect - Computer Inactivity') }
+                { $value.enabled -and
+                    ($value.'days.pwdLastSet' -ge $policy.ComputerInactivityDays -or
+                    $value.'range.pwdLastSet' -eq 'never') -and
+                    $null -ne $value.'days.whenCreated' -and
+                    [int]$value.'days.whenCreated' -ge $policy.ComputerInactivityDays } {
+                    $list.AddFinding($value, 'Defect - Computer Inactivity')
+                }
 
                 # operating system
-                { $value.enabled -and -not [String]::IsNullOrEmpty($value.'OperatingSystem') } { $list.AddFinding($value, 'Unknown - Operating System Lifecycle Requires Versioned Profile') }
-
+                { $value.enabled -and -not [String]::IsNullOrEmpty($value.'OperatingSystem') } {
+                    $list.AddFinding($value, 'Unknown - Operating System Lifecycle Requires Versioned Profile')
+                }
             }
-
         }
 
         return $list
-
     }
 
     static [OrderedDictionary]Remediate([Object]$value) {
 
-        $object = $null 
+        $object = $null
 
         if (-not $value.'WellKnownSID' -and [ComputerObject]::Action.Contains($value.'finding')) {
 
             $object = [Finding]::Remediate($value, [ComputerObject]::Action[$value.'finding'])
-
         }
 
         return $object
-
     }
 
     [void]SetDefaultProperties() {
@@ -1959,9 +2184,7 @@ class ComputerObject : OrderedDictionary {
             )
 
         )
-
     }
-
 }
 #endregion Computer
 ######################################################################################################################################################################################################################################################
@@ -1970,7 +2193,9 @@ class ComputerObject : OrderedDictionary {
 #region Group Policy
 class GroupPolicyData : Data {
 
-    GroupPolicyData () { $this.Name = 'GroupPolicy' }
+    GroupPolicyData () {
+        $this.Name = 'GroupPolicy'
+    }
 
     static [GroupPolicyData]$Instance
 
@@ -1979,27 +2204,22 @@ class GroupPolicyData : Data {
         [GroupPolicyData]::Instance = [GroupPolicyData]::New()
 
         return [GroupPolicyData]::Instance
-
     }
     static [GroupPolicyData]GetInstance() {
 
         if ($null -eq [GroupPolicyData]::Instance) {
 
             throw '{0}({1})' -f 'instanceException', 'class instance has not been initialized'
-
         }
         else {
 
             return [GroupPolicyData]::Instance
-
         }
-
     }
-    
+
     static [void]Close() {
 
         [GroupPolicyData]::Instance = $null
-
     }
     [void]GetData() {
 
@@ -2013,14 +2233,15 @@ class GroupPolicyData : Data {
 
             $value = @{
 
-                'domain'      = ([ADTarget]::FQDN)
-                'server'      = ([ADTarget]::FQDN)
+                'domain' = ([ADTarget]::FQDN)
+                'server' = ([ADTarget]::FQDN)
                 'ErrorAction' = 'Stop'
-
             }
 
             $credential = [ADEnvironment]::GetEnvironment().Credential
-            if ($null -ne $credential -and $credential -ne [PSCredential]::Empty) { $value['Credential'] = $credential }
+            if ($null -ne $credential -and $credential -ne [PSCredential]::Empty) {
+                $value['Credential'] = $credential
+            }
 
             Get-ADAnalyzerGpo -All @value | ForEach-Object {
 
@@ -2034,26 +2255,24 @@ class GroupPolicyData : Data {
 
                     $item = @{
 
-                        'Gpo'        = $obj
-                        'SidNames'   = [DomainData]::GetInstance().WellKnownSID
-
+                        'Gpo' = $obj
+                        'SidNames' = [DomainData]::GetInstance().WellKnownSID
                     }
 
-                    if ($null -ne $credential -and $credential -ne [PSCredential]::Empty) { $item['Credential'] = $credential }
+                    if ($null -ne $credential -and $credential -ne [PSCredential]::Empty) {
+                        $item['Credential'] = $credential
+                    }
 
                     $object['xml'] = [xml]( Get-ADAnalyzerGpoReport @item )
-
                 }
                 catch {
 
                     $object['xml'] = $null
                     $object['ReadError'] = $_.Exception.Message
                     Write-Warning ('Unable to read GPO {0}: {1}' -f $obj.Id, $_.Exception.Message)
-
                 }
-                
-                $table[$_.($table.Properties.Key)] = $object
 
+                $table[$_.($table.Properties.Key)] = $object
             }
 
             $list.Add('xml') > $null
@@ -2061,31 +2280,30 @@ class GroupPolicyData : Data {
             $table.Properties.SetPropertyNames($list)
 
             $this.Data = $table
-
         }
-        catch { throw '{0}({1})' -f 'groupPolicyCollection', $_.Exception.Message }
-
+        catch {
+            throw '{0}({1})' -f 'groupPolicyCollection', $_.Exception.Message
+        }
     }
     [void]GetReport() {
 
         $table = [GroupPolicyTable]::SetDefault()
 
-        $this.Data.Values | ForEach-Object { 
+        $this.Data.Values | ForEach-Object {
 
-            if ($null -eq $_['xml']) { return }
-            
-            $object = [GroupPolicyObject]::Initialize($_) 
+            if ($null -eq $_['xml']) {
+                return
+            }
+
+            $object = [GroupPolicyObject]::Initialize($_)
 
             if ($null -ne $object.Configuration) {
 
                 $table[$object.($object.Properties.Key)] = $object.Configuration
-
             }
-        
         }
 
         $this.Report = $table
-
     }
     [void]GetFinding() {
 
@@ -2093,24 +2311,23 @@ class GroupPolicyData : Data {
 
         $this.Data.Values | Where-Object { $_['ReadError'] } | ForEach-Object { $array.AddFinding($_, 'Error - GPO report unreadable') }
 
-        $this.Report.Values | ForEach-Object { 
-            
-            $item = $_ 
+        $this.Report.Values | ForEach-Object {
 
-            $item | ForEach-Object { $array.AddItem([GroupPolicyObject]::Analyze($_)) } 
-        
+            $item = $_
+
+            $item | ForEach-Object { $array.AddItem([GroupPolicyObject]::Analyze($_)) }
         }
 
         $this.Finding = $array
 
         $this.SyncFindings()
-
     }
-
 }
+
 class GroupPolicyTable : Table {
 
-    GroupPolicyTable() {} 
+    GroupPolicyTable() {
+    }
 
     static [GroupPolicyTable]SetDefault() {
 
@@ -2119,7 +2336,6 @@ class GroupPolicyTable : Table {
         $object.SetDefaultProperties()
 
         return $object
-
     }
 
     [void]SetDefaultProperties() {
@@ -2128,10 +2344,9 @@ class GroupPolicyTable : Table {
 
         $this.Properties.SetKey($object.Properties.Key)
         $this.Properties.SetList($object.Properties.List)
-
     }
-
 }
+
 class GroupPolicyObject : OrderedDictionary {
 
     [GroupPolicyObject]$Data
@@ -2140,7 +2355,8 @@ class GroupPolicyObject : OrderedDictionary {
 
     [Property]$Properties = [Property]::New()
 
-    GroupPolicyObject() : base([StringComparer]::OrdinalIgnoreCase) { }
+    GroupPolicyObject() : base([StringComparer]::OrdinalIgnoreCase) {
+    }
 
     static [String]GetLink($value) {
 
@@ -2149,7 +2365,6 @@ class GroupPolicyObject : OrderedDictionary {
         if ([String]::IsNullOrEmpty($value)) {
 
             return $null
-
         }
         else {
 
@@ -2158,31 +2373,26 @@ class GroupPolicyObject : OrderedDictionary {
                 if ($item.SOMPath -eq [ADTarget]::FQDN) {
 
                     $object[$item.SOMPath] = $item.Enabled
-
                 }
                 else {
 
                     $object[($item.SOMPath.Replace([ADTarget]::FQDN, ''))] = $item.Enabled
-
                 }
-
             }
-
         }
 
         return ($object | ConvertTo-Json)
-
     }
     static [String]GetLoopback($value) {
 
         $object = $null
 
-        if ($value.Name -contains 'Registry' -and $value.Extension.Policy.Name -contains 'Configure user Group Policy Loopback Processing Mode') {
+        if ($value.Name -contains 'Registry' -and
+            $value.Extension.Policy.Name -contains 'Configure user Group Policy Loopback Processing Mode') {
 
             $item = $value.Extension.Policy | Where-Object { $_.Name -eq 'Configure user Group Policy loopback processing mode' }
 
             $object = ('{0}({1})' -f $item.DropDownList.State, $item.DropDown)
-
         }
 
         if ($null -eq $object) {
@@ -2190,16 +2400,21 @@ class GroupPolicyObject : OrderedDictionary {
                 foreach ($record in @($extension.Extension.Record)) {
                     if ($record.Name -ieq 'HKLM\Software\Policies\Microsoft\Windows\System\UserPolicyMode') {
                         switch ([String]$record.Value) {
-                            '0' { $object = 'Disabled' }
-                            '1' { $object = 'Enabled(Merge)' }
-                            '2' { $object = 'Enabled(Replace)' }
+                            '0' {
+                                $object = 'Disabled'
+                            }
+                            '1' {
+                                $object = 'Enabled(Merge)'
+                            }
+                            '2' {
+                                $object = 'Enabled(Replace)'
+                            }
                         }
                     }
                 }
             }
         }
         return $object
-
     }
 
     static [Hashtable]UserRightsAssignment() {
@@ -2208,54 +2423,52 @@ class GroupPolicyObject : OrderedDictionary {
 
             # Reference : https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/user-rights-assignment
 
-            'SeTrustedCredManAccessPrivilege'           = 'Access Credential Manager as a trusted caller'
-            'SeNetworkLogonRight'                       = 'Access this computer from the network'
-            'SeTcbPrivilege'                            = 'Act as part of the operating system'
-            'SeMachineAccountPrivilege'                 = 'Add workstations to domain'
-            'SeIncreaseQuotaPrivilege'                  = 'Adjust memory quotas for a process'
-            'SeInteractiveLogonRight'                   = 'Allow log on locally'
-            'SeRemoteInteractiveLogonRight'             = 'Allow log on through Remote Desktop Services'
-            'SeBackupPrivilege'                         = 'Back up files and directories'
-            'SeChangeNotifyPrivilege'                   = 'Bypass traverse checking'
-            'SeSystemtimePrivilege'                     = 'Change the system time'
-            'SeTimeZonePrivilege'                       = 'Change the time zone'
-            'SeCreatePagefilePrivilege'                 = 'Create a pagefile'
-            'SeCreateTokenPrivilege'                    = 'Create a token object'
-            'SeCreateGlobalPrivilege'                   = 'Create global objects'
-            'SeCreatePermanentPrivilege'                = 'Create permanent shared objects'
-            'SeCreateSymbolicLinkPrivilege'             = 'Create symbolic links'
-            'SeDebugPrivilege'                          = 'Debug programs'
-            'SeDenyNetworkLogonRight'                   = 'Deny access to this computer from the network'
-            'SeDenyBatchLogonRight'                     = 'Deny log on as a batch job'
-            'SeDenyServiceLogonRight'                   = 'Deny log on as a service'
-            'SeDenyInteractiveLogonRight'               = 'Deny log on locally'
-            'SeDenyRemoteInteractiveLogonRight'         = 'Deny log on through Remote Desktop Services'
-            'SeEnableDelegationPrivilege'               = 'Enable computer and user accounts to be trusted for delegation'
-            'SeRemoteShutdownPrivilege'                 = 'Force shutdown from a remote system'
-            'SeAuditPrivilege'                          = 'Generate security audits'
-            'SeImpersonatePrivilege'                    = 'Impersonate a client after authentication'
-            'SeIncreaseWorkingSetPrivilege'             = 'Increase a process working set'
-            'SeIncreaseBasePriorityPrivilege'           = 'Increase scheduling priority'
-            'SeLoadDriverPrivilege'                     = 'Load and unload device drivers'
-            'SeLockMemoryPrivilege'                     = 'Lock pages in memory'
-            'SeBatchLogonRight'                         = 'Log on as a batch job'
-            'SeServiceLogonRight'                       = 'Log on as a service'
-            'SeSecurityPrivilege'                       = 'Manage auditing and security log'
-            'SeRelabelPrivilege'                        = 'Modify an object label'
-            'SeSystemEnvironmentPrivilege'              = 'Modify firmware environment values'
+            'SeTrustedCredManAccessPrivilege' = 'Access Credential Manager as a trusted caller'
+            'SeNetworkLogonRight' = 'Access this computer from the network'
+            'SeTcbPrivilege' = 'Act as part of the operating system'
+            'SeMachineAccountPrivilege' = 'Add workstations to domain'
+            'SeIncreaseQuotaPrivilege' = 'Adjust memory quotas for a process'
+            'SeInteractiveLogonRight' = 'Allow log on locally'
+            'SeRemoteInteractiveLogonRight' = 'Allow log on through Remote Desktop Services'
+            'SeBackupPrivilege' = 'Back up files and directories'
+            'SeChangeNotifyPrivilege' = 'Bypass traverse checking'
+            'SeSystemtimePrivilege' = 'Change the system time'
+            'SeTimeZonePrivilege' = 'Change the time zone'
+            'SeCreatePagefilePrivilege' = 'Create a pagefile'
+            'SeCreateTokenPrivilege' = 'Create a token object'
+            'SeCreateGlobalPrivilege' = 'Create global objects'
+            'SeCreatePermanentPrivilege' = 'Create permanent shared objects'
+            'SeCreateSymbolicLinkPrivilege' = 'Create symbolic links'
+            'SeDebugPrivilege' = 'Debug programs'
+            'SeDenyNetworkLogonRight' = 'Deny access to this computer from the network'
+            'SeDenyBatchLogonRight' = 'Deny log on as a batch job'
+            'SeDenyServiceLogonRight' = 'Deny log on as a service'
+            'SeDenyInteractiveLogonRight' = 'Deny log on locally'
+            'SeDenyRemoteInteractiveLogonRight' = 'Deny log on through Remote Desktop Services'
+            'SeEnableDelegationPrivilege' = 'Enable computer and user accounts to be trusted for delegation'
+            'SeRemoteShutdownPrivilege' = 'Force shutdown from a remote system'
+            'SeAuditPrivilege' = 'Generate security audits'
+            'SeImpersonatePrivilege' = 'Impersonate a client after authentication'
+            'SeIncreaseWorkingSetPrivilege' = 'Increase a process working set'
+            'SeIncreaseBasePriorityPrivilege' = 'Increase scheduling priority'
+            'SeLoadDriverPrivilege' = 'Load and unload device drivers'
+            'SeLockMemoryPrivilege' = 'Lock pages in memory'
+            'SeBatchLogonRight' = 'Log on as a batch job'
+            'SeServiceLogonRight' = 'Log on as a service'
+            'SeSecurityPrivilege' = 'Manage auditing and security log'
+            'SeRelabelPrivilege' = 'Modify an object label'
+            'SeSystemEnvironmentPrivilege' = 'Modify firmware environment values'
             'SeDelegateSessionUserImpersonatePrivilege' = 'Obtain an impersonation token for another user in the same session'
-            'SeManageVolumePrivilege'                   = 'Perform volume maintenance tasks'
-            'SeProfileSingleProcessPrivilege'           = 'Profile single process'
-            'SeSystemProfilePrivilege'                  = 'Profile system performance'
-            'SeUndockPrivilege'                         = 'Remove computer from docking station'
-            'SeAssignPrimaryTokenPrivilege'             = 'Replace a process level token'
-            'SeRestorePrivilege'                        = 'Restore files and directories'
-            'SeShutdownPrivilege'                       = 'Shut down the system'
-            'SeSyncAgentPrivilege'                      = 'Synchronize directory service data'
-            'SeTakeOwnershipPrivilege'                  = 'Take ownership of files or other objects'
-
+            'SeManageVolumePrivilege' = 'Perform volume maintenance tasks'
+            'SeProfileSingleProcessPrivilege' = 'Profile single process'
+            'SeSystemProfilePrivilege' = 'Profile system performance'
+            'SeUndockPrivilege' = 'Remove computer from docking station'
+            'SeAssignPrimaryTokenPrivilege' = 'Replace a process level token'
+            'SeRestorePrivilege' = 'Restore files and directories'
+            'SeShutdownPrivilege' = 'Shut down the system'
+            'SeSyncAgentPrivilege' = 'Synchronize directory service data'
+            'SeTakeOwnershipPrivilege' = 'Take ownership of files or other objects'
         }
-
     }
     static [GroupPolicyObject]ImportData([OrderedDictionary]$value) {
 
@@ -2266,7 +2479,6 @@ class GroupPolicyObject : OrderedDictionary {
         $value.GetEnumerator() | ForEach-Object { $object.Data[$_.Name] = $_.Value }
 
         return $object
-
     }
     static [GroupPolicyObject]ImportRecord([OrderedDictionary]$value) {
 
@@ -2277,7 +2489,6 @@ class GroupPolicyObject : OrderedDictionary {
         $value.GetEnumerator() | ForEach-Object { $object.Record[$_.Name] = $_.Value }
 
         return $object
-
     }
     static [GroupPolicyObject]SetDefault() {
 
@@ -2286,7 +2497,6 @@ class GroupPolicyObject : OrderedDictionary {
         $object.SetDefaultProperties()
 
         return $object
-
     }
     static [GroupPolicyObject]Initialize([OrderedDictionary]$value) {
 
@@ -2298,7 +2508,6 @@ class GroupPolicyObject : OrderedDictionary {
         $object[$object.Properties.Key] = $object.Record.($object.Properties.Key)
 
         return $object
-
     }
 
     static [Finding]Analyze([PSCustomObject]$value) {
@@ -2311,7 +2520,9 @@ class GroupPolicyObject : OrderedDictionary {
         }
 
         if ($value.'property.setting.secretPresent' -is [bool]) {
-            if ($value.'property.setting.secretPresent') { $list.AddFinding($value, 'Defect - Stored Secret') }
+            if ($value.'property.setting.secretPresent') {
+                $list.AddFinding($value, 'Defect - Stored Secret')
+            }
             return $list
         }
 
@@ -2320,20 +2531,44 @@ class GroupPolicyObject : OrderedDictionary {
             switch ($value.'property.setting.name') {
 
                 # Password
-                { $_ -eq 'MaximumPasswordAge' -and (([bigint]$value.'property.setting.value' -eq -1 -and -not $policy.AllowPasswordNeverExpires) -or [bigint]$value.'property.setting.value' -gt $policy.MaximumPasswordAgeDays) } { $list.AddFinding($value, 'Defect - Max Password Age') }
-                { $_ -eq 'MinimumPasswordAge' -and $value.'property.setting.value' -lt $policy.MinimumPasswordAgeDays } { $list.AddFinding($value, 'Defect - Minimum Password Age') }
-                { $_ -eq 'MinimumPasswordLength' -and [bigint]$value.'property.setting.value' -lt $policy.MinimumPasswordLength } { $list.AddFinding($value, 'Defect - Minimum Password Length') }
-                { $_ -eq 'PasswordComplexity' -and $value.'property.setting.value' -eq $false } { $list.AddFinding($value, 'Defect - Password Complexity Disabled') }
-                { $_ -eq 'PasswordHistorySize' -and [bigint]$value.'property.setting.value' -lt $policy.PasswordHistorySize } { $list.AddFinding($value, 'Defect - Password History') }
-                { $_ -eq 'ClearTextPassword' -and $value.'property.setting.value' -eq $true } { $list.AddFinding($value, 'Defect - ClearText Password') }
+                { $_ -eq 'MaximumPasswordAge' -and
+                    (([bigint]$value.'property.setting.value' -eq -1 -and
+                        -not $policy.AllowPasswordNeverExpires) -or
+                    [bigint]$value.'property.setting.value' -gt $policy.MaximumPasswordAgeDays) } {
+                    $list.AddFinding($value, 'Defect - Max Password Age')
+                }
+                { $_ -eq 'MinimumPasswordAge' -and $value.'property.setting.value' -lt $policy.MinimumPasswordAgeDays } {
+                    $list.AddFinding($value, 'Defect - Minimum Password Age')
+                }
+                { $_ -eq 'MinimumPasswordLength' -and [bigint]$value.'property.setting.value' -lt $policy.MinimumPasswordLength } {
+                    $list.AddFinding($value, 'Defect - Minimum Password Length')
+                }
+                { $_ -eq 'PasswordComplexity' -and $value.'property.setting.value' -eq $false } {
+                    $list.AddFinding($value, 'Defect - Password Complexity Disabled')
+                }
+                { $_ -eq 'PasswordHistorySize' -and [bigint]$value.'property.setting.value' -lt $policy.PasswordHistorySize } {
+                    $list.AddFinding($value, 'Defect - Password History')
+                }
+                { $_ -eq 'ClearTextPassword' -and $value.'property.setting.value' -eq $true } {
+                    $list.AddFinding($value, 'Defect - ClearText Password')
+                }
 
                 # Lockout
-                { $_ -eq 'LockoutBadCount' -and ($policy.LockoutThreshold -gt 0 -and ($value.'property.setting.value' -eq 0 -or $value.'property.setting.value' -gt $policy.LockoutThreshold)) } { $list.AddFinding($value, 'Defect - Invalid Password Attempt Limit') }
-                { $_ -eq 'LockoutDuration' -and $value.'property.setting.value' -ne -1 -and $value.'property.setting.value' -lt $policy.LockoutDurationMinutes } { $list.AddFinding($value, 'Defect - Invalid Password Lockout Duration') }
-                { $_ -eq 'ResetLockoutCount' -and $value.'property.setting.value' -lt $policy.ResetLockoutMinutes } { $list.AddFinding($value, 'Defect - Invalid Password Lockout Duration') }
-
+                { $_ -eq 'LockoutBadCount' -and
+                    ($policy.LockoutThreshold -gt 0 -and
+                    ($value.'property.setting.value' -eq 0 -or
+                    $value.'property.setting.value' -gt $policy.LockoutThreshold)) } {
+                    $list.AddFinding($value, 'Defect - Invalid Password Attempt Limit')
+                }
+                { $_ -eq 'LockoutDuration' -and
+                    $value.'property.setting.value' -ne -1 -and
+                    $value.'property.setting.value' -lt $policy.LockoutDurationMinutes } {
+                    $list.AddFinding($value, 'Defect - Invalid Password Lockout Duration')
+                }
+                { $_ -eq 'ResetLockoutCount' -and $value.'property.setting.value' -lt $policy.ResetLockoutMinutes } {
+                    $list.AddFinding($value, 'Defect - Invalid Password Lockout Duration')
+                }
             }
-
         }
         elseif ($value.'ext.property.name' -eq 'SecurityOptions') {
 
@@ -2342,55 +2577,126 @@ class GroupPolicyObject : OrderedDictionary {
                 # TODO : Add 'Network access: Shares that can be access anonymously' to the list
 
                 # NTLM Settings
-                { $_ -eq 'Network security: LAN Manager authentication level' -and (Get-ADAnalyzerLmLevel $value.'property.setting.value') -lt $policy.MinimumLmCompatibilityLevel } { $list.AddFinding($value, 'Defect - LAN Manager Authentication Level (LmCompatibilityLevel)') }
+                { $_ -eq 'Network security: LAN Manager authentication level' -and
+                    (Get-ADAnalyzerLmLevel $value.'property.setting.value') -lt $policy.MinimumLmCompatibilityLevel } {
+                    $list.AddFinding($value, 'Defect - LAN Manager Authentication Level (LmCompatibilityLevel)')
+                }
 
                 # (Server) Digitally Sign Communications
-                { $_ -eq 'Microsoft network server: Digitally sign communications (if client agrees)' -and $value.'property.setting.value' -eq $false } { $list.AddFinding($value, 'Defect - Digital Signing Disabled') }
-                { $_ -eq 'Microsoft network server: Digitally sign communications (always)' -and $value.'property.setting.value' -eq $false } { $list.AddFinding($value, 'Defect - Digital Signing Disabled') }
+                { $_ -eq 'Microsoft network server: Digitally sign communications (if client agrees)' -and
+                    $value.'property.setting.value' -eq $false } {
+                    $list.AddFinding($value, 'Defect - Digital Signing Disabled')
+                }
+                { $_ -eq 'Microsoft network server: Digitally sign communications (always)' -and
+                    $value.'property.setting.value' -eq $false } {
+                    $list.AddFinding($value, 'Defect - Digital Signing Disabled')
+                }
 
                 # Send Unencrypted Password
-                { $_ -eq 'Microsoft network client: Send unencrypted password to third-party SMB servers' -and ($value.'property.setting.value' -eq $true -or [String]::IsNullOrEmpty($value.'property.setting.value')) } { $list.AddFinding($value, 'Defect - Unencrypted Password w/ 3rd Party SMB') }
+                { $_ -eq 'Microsoft network client: Send unencrypted password to third-party SMB servers' -and
+                    ($value.'property.setting.value' -eq $true -or
+                    [String]::IsNullOrEmpty($value.'property.setting.value')) } {
+                    $list.AddFinding($value, 'Defect - Unencrypted Password w/ 3rd Party SMB')
+                }
 
                 # Send Anonymous SID/Name Translation
-                { $_ -eq 'Network access: Allow anonymous SID/Name translation' -and ($value.'property.setting.value' -eq $true -or [String]::IsNullOrEmpty($value.'property.setting.value')) } { $list.AddFinding($value, 'Defect - Anonymous SID/Name Translation') }
+                { $_ -eq 'Network access: Allow anonymous SID/Name translation' -and
+                    ($value.'property.setting.value' -eq $true -or
+                    [String]::IsNullOrEmpty($value.'property.setting.value')) } {
+                    $list.AddFinding($value, 'Defect - Anonymous SID/Name Translation')
+                }
 
                 # Send Everyone Permissions Apply to Anonymous Users
-                { $_ -eq 'Network access: Let Everyone permissions apply to anonymous users' -and $value.'property.setting.value' -eq $true } { $list.AddFinding($value, 'Defect - Everyone Permissions Apply to Anonymous Users') }
+                { $_ -eq 'Network access: Let Everyone permissions apply to anonymous users' -and
+                    $value.'property.setting.value' -eq $true } {
+                    $list.AddFinding($value, 'Defect - Everyone Permissions Apply to Anonymous Users')
+                }
 
                 # Send Named Pipes Null Session
-                { $_ -eq 'Network access: Named Pipes that can be accessed anonymously' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') -and $value.'property.setting.value' -notin $policy.AllowedAnonymousPipes } { $list.AddFinding($value, 'Defect - Named Pipes Allow Anonymous (Null) Session') }
+                { $_ -eq 'Network access: Named Pipes that can be accessed anonymously' -and
+                    -not [String]::IsNullOrEmpty($value.'property.setting.value') -and
+                    $value.'property.setting.value' -notin $policy.AllowedAnonymousPipes } {
+                    $list.AddFinding($value, 'Defect - Named Pipes Allow Anonymous (Null) Session')
+                }
 
                 # Shares that can be access anonymously
-                { $_ -eq 'Network access: Shares that can be access anonymously' -and -not [String]::IsNullOrEmpty($value.'property.setting.value') } { $list.AddFinding($value, 'Defect - Shares Allow Anonymous (Null) Session') }
+                { $_ -eq 'Network access: Shares that can be access anonymously' -and
+                    -not [String]::IsNullOrEmpty($value.'property.setting.value') } {
+                    $list.AddFinding($value, 'Defect - Shares Allow Anonymous (Null) Session')
+                }
 
                 # Named Pipes Allow Anonymous (Null) Session
-                { $_ -eq 'Network access: Restrict anonymous access to Named Pipes and Shares' -and $value.'property.setting.value' -eq $false } { $list.AddFinding($value, 'Defect - Named Pipes Allow Anonymous (Null) Session') }
+                { $_ -eq 'Network access: Restrict anonymous access to Named Pipes and Shares' -and
+                    $value.'property.setting.value' -eq $false } {
+                    $list.AddFinding($value, 'Defect - Named Pipes Allow Anonymous (Null) Session')
+                }
 
                 # Send Anonymous Enumeration of SAM Accounts
-                { $_ -eq 'Network access: Do not allow anonymous enumeration of SAM accounts' -and ($value.'property.setting.value' -eq $false -or [String]::IsNullOrEmpty($value.'property.setting.value')) } { $list.AddFinding($value, 'Defect - Anonymous Enumeration of SAM Accounts') }
-                { $_ -eq 'Network access: Do not allow anonymous enumeration of SAM accounts and shares' -and ($value.'property.setting.value' -eq $false -or [String]::IsNullOrEmpty($value.'property.setting.value')) } { $list.AddFinding($value, 'Defect - Anonymous Enumeration of SAM Accounts') }
-                
+                { $_ -eq 'Network access: Do not allow anonymous enumeration of SAM accounts' -and
+                    ($value.'property.setting.value' -eq $false -or
+                    [String]::IsNullOrEmpty($value.'property.setting.value')) } {
+                    $list.AddFinding($value, 'Defect - Anonymous Enumeration of SAM Accounts')
+                }
+                { $_ -eq 'Network access: Do not allow anonymous enumeration of SAM accounts and shares' -and
+                    ($value.'property.setting.value' -eq $false -or
+                    [String]::IsNullOrEmpty($value.'property.setting.value')) } {
+                    $list.AddFinding($value, 'Defect - Anonymous Enumeration of SAM Accounts')
+                }
+
                 # (Client) Digitally Sign Communications
-                { $_ -eq 'Microsoft network client: Digitally sign communications (if server agrees)' -and $value.'property.setting.value' -eq $false } { $list.AddFinding($value, 'Defect - Digital Signing Disabled') }
-                { $_ -eq 'Microsoft network client: Digitally sign communications (always)' -and $value.'property.setting.value' -eq $false } { $list.AddFinding($value, 'Defect - Digital Signing Disabled') }
+                { $_ -eq 'Microsoft network client: Digitally sign communications (if server agrees)' -and
+                    $value.'property.setting.value' -eq $false } {
+                    $list.AddFinding($value, 'Defect - Digital Signing Disabled')
+                }
+                { $_ -eq 'Microsoft network client: Digitally sign communications (always)' -and
+                    $value.'property.setting.value' -eq $false } {
+                    $list.AddFinding($value, 'Defect - Digital Signing Disabled')
+                }
 
                 # (Domain Member) Digitally Sign Communications
-                { $_ -eq 'Domain member: Digitally encrypt or sign secure channel data (always)' -and $value.'property.setting.value' -eq $false } { $list.AddFinding($value, 'Defect - Secure Channel Encryption Disabled') }
-                { $_ -eq 'Domain member: Digitally encrypt secure channel data (when possible)' -and $value.'property.setting.value' -eq $false } { $list.AddFinding($value, 'Defect - Secure Channel Encryption Disabled') }
+                { $_ -eq 'Domain member: Digitally encrypt or sign secure channel data (always)' -and
+                    $value.'property.setting.value' -eq $false } {
+                    $list.AddFinding($value, 'Defect - Secure Channel Encryption Disabled')
+                }
+                { $_ -eq 'Domain member: Digitally encrypt secure channel data (when possible)' -and
+                    $value.'property.setting.value' -eq $false } {
+                    $list.AddFinding($value, 'Defect - Secure Channel Encryption Disabled')
+                }
 
                 # (Domain Controller) LDAP Server Signing Requirements
-                { $_ -eq 'Domain controller: LDAP server signing requirements' -and $policy.RequireLdapServerSigning -and $value.'property.setting.value' -notin @('Require signature') } { $list.AddFinding($value, 'Defect - LDAP Signing Not Required') }
-                { $_ -eq 'Network security: LDAP client signing requirements' -and $policy.RequireLdapClientSigning -and $value.'property.setting.value' -ne 'Require signing' } { $list.AddFinding($value, 'Defect - LDAP Signing Not Required') }
+                { $_ -eq 'Domain controller: LDAP server signing requirements' -and
+                    $policy.RequireLdapServerSigning -and
+                    $value.'property.setting.value' -notin @('Require signature') } {
+                    $list.AddFinding($value, 'Defect - LDAP Signing Not Required')
+                }
+                { $_ -eq 'Network security: LDAP client signing requirements' -and
+                    $policy.RequireLdapClientSigning -and
+                    $value.'property.setting.value' -ne 'Require signing' } {
+                    $list.AddFinding($value, 'Defect - LDAP Signing Not Required')
+                }
 
                 # User Account Control
-                { $_ -eq 'User Account Control: Admin Approval Mode for the Built-in Administrator account' -and $value.'property.setting.value' -eq $false } { $list.AddFinding($value, 'Defect - Invalid User Account Control') }
-                { $_ -eq 'User Account Control: Allow UIAccess applications to prompt for elevation without using the secure desktop' -and $value.'property.setting.value' -eq $true } { $list.AddFinding($value, 'Defect - Invalid User Account Control') }
-                { $_ -eq 'User Account Control: Behavior of the elevation prompt for administrators in Admin Approval Mode' -and $value.'property.setting.value' -in @('Elevate without prompting') } { $list.AddFinding($value, 'Defect - Invalid User Account Control') }
-                { $_ -eq 'User Account Control: Detect application installations and prompt for elevation' -and $value.'property.setting.value' -eq $false } { $list.AddFinding($value, 'Defect - Invalid User Account Control') }
-                { $_ -eq 'User Account Control: Run all administrators in Admin Approval Mode' -and $value.'property.setting.value' -eq $false } { $list.AddFinding($value, 'Defect - Invalid User Account Control') }
-
+                { $_ -eq 'User Account Control: Admin Approval Mode for the Built-in Administrator account' -and
+                    $value.'property.setting.value' -eq $false } {
+                    $list.AddFinding($value, 'Defect - Invalid User Account Control')
+                }
+                { $_ -eq 'User Account Control: Allow UIAccess applications to prompt for elevation without using the secure desktop' -and
+                    $value.'property.setting.value' -eq $true } {
+                    $list.AddFinding($value, 'Defect - Invalid User Account Control')
+                }
+                { $_ -eq 'User Account Control: Behavior of the elevation prompt for administrators in Admin Approval Mode' -and
+                    $value.'property.setting.value' -in @('Elevate without prompting') } {
+                    $list.AddFinding($value, 'Defect - Invalid User Account Control')
+                }
+                { $_ -eq 'User Account Control: Detect application installations and prompt for elevation' -and
+                    $value.'property.setting.value' -eq $false } {
+                    $list.AddFinding($value, 'Defect - Invalid User Account Control')
+                }
+                { $_ -eq 'User Account Control: Run all administrators in Admin Approval Mode' -and
+                    $value.'property.setting.value' -eq $false } {
+                    $list.AddFinding($value, 'Defect - Invalid User Account Control')
+                }
             }
-            
         }
         elseif ($value.'ext.property.name' -eq 'UserRightsAssignment') {
 
@@ -2404,7 +2710,9 @@ class GroupPolicyObject : OrderedDictionary {
                     $approved = $rights[$right]
                     $valid = $null -ne $approved -and ($approved -is [string] -or $approved -is [Collections.IList])
                     foreach ($sid in @($approved)) {
-                        if (-not [GroupPolicyObject]::IsUserRightSid($sid)) { $valid = $false }
+                        if (-not [GroupPolicyObject]::IsUserRightSid($sid)) {
+                            $valid = $false
+                        }
                     }
                     if (-not $valid) {
                         $list.AddFinding($value, 'Validate - Invalid UserRightsAssignment Allowlist')
@@ -2420,24 +2728,34 @@ class GroupPolicyObject : OrderedDictionary {
                     }
                 }
             }
-
         }
 
         return $list
-
     }
 
     hidden static [bool]IsUserRightSid([object]$value) {
-        if ($value -isnot [string] -or $value -notmatch '^S-1-(?:0|[1-9][0-9]{0,9}|0x[0-9a-f]{12})(?:-(?:0|[1-9][0-9]{0,9})){1,15}$') { return $false }
+        if ($value -isnot [string] -or $value -notmatch '^S-1-(?:0|[1-9][0-9]{0,9}|0x[0-9a-f]{12})(?:-(?:0|[1-9][0-9]{0,9})){1,15}$') {
+            return $false
+        }
         $parts = $value.Split('-')
         [uint64]$authority = 0
         if ($parts[2].StartsWith('0x', [StringComparison]::OrdinalIgnoreCase)) {
-            if (-not [uint64]::TryParse($parts[2].Substring(2), [Globalization.NumberStyles]::AllowHexSpecifier, [Globalization.CultureInfo]::InvariantCulture, [ref]$authority) -or $authority -lt 4294967296) { return $false }
+            if (-not [uint64]::TryParse($parts[2].Substring(2),
+                    [Globalization.NumberStyles]::AllowHexSpecifier,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [ref]$authority) -or
+                $authority -lt 4294967296) {
+                return $false
+            }
         }
-        elseif (-not [uint64]::TryParse($parts[2], [ref]$authority) -or $authority -gt 4294967295) { return $false }
+        elseif (-not [uint64]::TryParse($parts[2], [ref]$authority) -or $authority -gt 4294967295) {
+            return $false
+        }
         for ($index = 3; $index -lt $parts.Count; $index++) {
             [uint32]$subauthority = 0
-            if (-not [uint32]::TryParse($parts[$index], [ref]$subauthority)) { return $false }
+            if (-not [uint32]::TryParse($parts[$index], [ref]$subauthority)) {
+                return $false
+            }
         }
         return $true
     }
@@ -2446,13 +2764,21 @@ class GroupPolicyObject : OrderedDictionary {
         $record['property.setting.secretPresent'] = $null
         $record['property.setting.source'] = $null
         $marker = $value.SelectSingleNode('./*[local-name()="SecretPresent"]')
-        if ($null -eq $marker) { return $false }
+        if ($null -eq $marker) {
+            return $false
+        }
         $record['property.setting.value'] = $null
         $present = $false
-        if ([bool]::TryParse($marker.InnerText, [ref]$present)) { $record['property.setting.secretPresent'] = $present }
-        else { $record['property.setting.valid'] = $false }
+        if ([bool]::TryParse($marker.InnerText, [ref]$present)) {
+            $record['property.setting.secretPresent'] = $present
+        }
+        else {
+            $record['property.setting.valid'] = $false
+        }
         $source = $value.SelectSingleNode('./*[local-name()="Source"]')
-        if ($null -ne $source) { $record['property.setting.source'] = $source.InnerText }
+        if ($null -ne $source) {
+            $record['property.setting.source'] = $source.InnerText
+        }
         return $true
     }
 
@@ -2472,32 +2798,41 @@ class GroupPolicyObject : OrderedDictionary {
                 $object.Record['property.setting.name'] = $item.name
                 $object.Record['property.setting.valid'] = $null
                 $validityNode = $item.SelectSingleNode('./*[local-name()="ValueValid"]')
-                if ($null -ne $validityNode) { $object.Record['property.setting.valid'] = [System.Convert]::ToBoolean($validityNode.InnerText) }
+                if ($null -ne $validityNode) {
+                    $object.Record['property.setting.valid'] = [System.Convert]::ToBoolean($validityNode.InnerText)
+                }
 
-                if (-not [GroupPolicyObject]::SetSecretPresence($object.Record, $item)) { switch ($item) {
+                if (-not [GroupPolicyObject]::SetSecretPresence($object.Record, $item)) {
+                    switch ($item) {
 
-                    { $item.SettingNumber } { $object.Record['property.setting.value'] = [bigint]$item.SettingNumber }
-                    { $item.SettingBoolean } { $object.Record['property.setting.value'] = [Convert]::ToBoolean($item.SettingBoolean) }
-                    { $null -ne $item.SelectSingleNode('./*[local-name()="SettingString"]') } { $object.Record['property.setting.value'] = $item.SelectSingleNode('./*[local-name()="SettingString"]').InnerText }
-
-                } }
+                        { $item.SettingNumber } {
+                            $object.Record['property.setting.value'] = [bigint]$item.SettingNumber
+                        }
+                        { $item.SettingBoolean } {
+                            $object.Record['property.setting.value'] = [Convert]::ToBoolean($item.SettingBoolean)
+                        }
+                        { $null -ne $item.SelectSingleNode('./*[local-name()="SettingString"]') } {
+                            $object.Record['property.setting.value'] = $item.SelectSingleNode('./*[local-name()="SettingString"]').InnerText
+                        }
+                    }
+                }
 
                 $array.Add([PSCustomObject]$object.Record) > $null
-
             }
-
         }
-        catch { throw '{0}({1})' -f 'Account', $_.Exception.Message }
+        catch {
+            throw '{0}({1})' -f 'Account', $_.Exception.Message
+        }
 
         try {
 
             [PasswordPolicyObject]::Initialize($value.Extension.($name), $this.Record).UpdateInstance()
-
         }
-        catch { throw '{0}({1})' -f 'PasswordPolicy', $_.Exception.Message }
+        catch {
+            throw '{0}({1})' -f 'PasswordPolicy', $_.Exception.Message
+        }
 
         return $array
-
     }
     [List]GetSecurityOptions([XmlElement]$value, [GPOExtensionProperty]$name) {
 
@@ -2514,29 +2849,39 @@ class GroupPolicyObject : OrderedDictionary {
                     $object.Record['ext.property.name'] = $name
                     $object.Record['ext.property.type'] = $null
 
-                    $object.Record['property.setting.name'] = if ($item.Display.Name) { $item.Display.Name } else { [string]$item.Name }
+                    $object.Record['property.setting.name'] = if ($item.Display.Name) {
+                        $item.Display.Name
+                    }
+                    else {
+                        [string]$item.Name
+                    }
                     $object.Record['property.setting.valid'] = $null
                     $validityNode = $item.SelectSingleNode('./*[local-name()="ValueValid"]')
-                    if ($null -ne $validityNode) { $object.Record['property.setting.valid'] = [System.Convert]::ToBoolean($validityNode.InnerText) }
+                    if ($null -ne $validityNode) {
+                        $object.Record['property.setting.valid'] = [System.Convert]::ToBoolean($validityNode.InnerText)
+                    }
 
-                    if (-not [GroupPolicyObject]::SetSecretPresence($object.Record, $item)) { switch ($item) {
+                    if (-not [GroupPolicyObject]::SetSecretPresence($object.Record, $item)) {
+                        switch ($item) {
 
-                        { $null -ne $item.SelectSingleNode('./*[local-name()="Display"]/*[local-name()="DisplayString"]') } { $object.Record['property.setting.value'] = $item.SelectSingleNode('./*[local-name()="Display"]/*[local-name()="DisplayString"]').InnerText }
-                        { $item.Display.DisplayBoolean } { $object.Record['property.setting.value'] = [Convert]::ToBoolean($item.Display.DisplayBoolean) }
-
-                    } }
+                            { $null -ne $item.SelectSingleNode('./*[local-name()="Display"]/*[local-name()="DisplayString"]') } {
+                                $object.Record['property.setting.value'] = $item.SelectSingleNode('./*[local-name()="Display"]/*[local-name()="DisplayString"]').InnerText
+                            }
+                            { $item.Display.DisplayBoolean } {
+                                $object.Record['property.setting.value'] = [Convert]::ToBoolean($item.Display.DisplayBoolean)
+                            }
+                        }
+                    }
 
                     $array.Add([PSCustomObject]$object.Record) > $null
-
                 }
-
             }
-
         }
-        catch { throw '{0}({1})' -f 'SecurityOptions', $_.Exception.Message }
+        catch {
+            throw '{0}({1})' -f 'SecurityOptions', $_.Exception.Message
+        }
 
         return $array
-
     }
     [List]GetUserRightsAssignment([XmlElement]$value, [GPOExtensionProperty]$name) {
 
@@ -2549,7 +2894,12 @@ class GroupPolicyObject : OrderedDictionary {
             foreach ($list in @($value.Extension.($name))) {
 
                 $rightNode = $list.SelectSingleNode('./*[local-name()="Name"]')
-                $right = if ($null -ne $rightNode) { $rightNode.InnerText.Trim() } else { '' }
+                $right = if ($null -ne $rightNode) {
+                    $rightNode.InnerText.Trim()
+                }
+                else {
+                    ''
+                }
                 $members = $list.SelectNodes('./*[local-name()="Member"]')
                 if ($members.Count -eq 0) {
 
@@ -2563,7 +2913,6 @@ class GroupPolicyObject : OrderedDictionary {
                     $object.Record['property.setting.empty'] = $true
 
                     $array.add([PSCustomObject]$object.Record) > $null
-
                 }
                 else {
 
@@ -2581,26 +2930,40 @@ class GroupPolicyObject : OrderedDictionary {
 
                         $nameNode = $item.SelectSingleNode('./*[local-name()="Name"]')
                         $sidNode = $item.SelectSingleNode('./*[local-name()="SID"]')
-                        $memberName = if ($null -ne $nameNode) { $nameNode.InnerText } else { $null }
-                        $memberSID = if ($null -ne $sidNode) { $sidNode.InnerText.Trim() } else { $null }
+                        $memberName = if ($null -ne $nameNode) {
+                            $nameNode.InnerText
+                        }
+                        else {
+                            $null
+                        }
+                        $memberSID = if ($null -ne $sidNode) {
+                            $sidNode.InnerText.Trim()
+                        }
+                        else {
+                            $null
+                        }
                         $object.Record['property.setting.sid'] = $memberSID
-                        $object.Record['property.setting.value'] = if (-not [String]::IsNullOrEmpty($memberName)) { $memberName } else { $memberSID }
+                        $object.Record['property.setting.value'] = if (-not [String]::IsNullOrEmpty($memberName)) {
+                            $memberName
+                        }
+                        else {
+                            $memberSID
+                        }
                         $resolutionNode = $item.SelectSingleNode('./*[local-name()="Resolution"]')
-                        if ($null -ne $resolutionNode) { $object.Record['property.setting.parameter'] = 'SID resolution: ' + $resolutionNode.InnerText }
-                        
+                        if ($null -ne $resolutionNode) {
+                            $object.Record['property.setting.parameter'] = 'SID resolution: ' + $resolutionNode.InnerText
+                        }
+
                         $array.add([PSCustomObject]$object.Record) > $null
-
                     }
-
                 }
-
             }
-
         }
-        catch { throw '{0}({1})' -f 'UserRightsAssignment', $_.Exception.Message } 
+        catch {
+            throw '{0}({1})' -f 'UserRightsAssignment', $_.Exception.Message
+        }
 
         return $array
-
     }
 
     [List]GetSecurityExtension([XmlElement]$value) {
@@ -2614,19 +2977,23 @@ class GroupPolicyObject : OrderedDictionary {
             foreach ($item in $value.Extension.PSObject.Properties.Name | Where-Object { $null -ne ($_ -as [GPOExtensionProperty]) }) {
 
                 switch ($item) {
-                    ([GPOExtensionProperty]::Account) { $array.AddItem($this.GetAccountSettings($value, $item)) }
-                    ([GPOExtensionProperty]::SecurityOptions) { $array.AddItem($this.GetSecurityOptions($value, $item)) }
-                    ([GPOExtensionProperty]::UserRightsAssignment) { $array.AddItem($this.GetUserRightsAssignment($value, $item)) }
-
+                    ([GPOExtensionProperty]::Account) {
+                        $array.AddItem($this.GetAccountSettings($value, $item))
+                    }
+                    ([GPOExtensionProperty]::SecurityOptions) {
+                        $array.AddItem($this.GetSecurityOptions($value, $item))
+                    }
+                    ([GPOExtensionProperty]::UserRightsAssignment) {
+                        $array.AddItem($this.GetUserRightsAssignment($value, $item))
+                    }
                 }
-
             }
-
         }
-        catch { throw '{0}({1})' -f 'SecurityExtension', $_.Exception.Message }
+        catch {
+            throw '{0}({1})' -f 'SecurityExtension', $_.Exception.Message
+        }
 
         return $array
-
     }
     [List]ExpandExtensionData([XmlElement]$value) {
 
@@ -2638,21 +3005,29 @@ class GroupPolicyObject : OrderedDictionary {
 
                 switch ($item.name) {
 
-                    ([GPOExtensionType]::Security) { $array.AddItem($this.GetSecurityExtension($item)) }
-                    ([GPOExtensionType]::Registry) { $array.AddItem($this.GetRawExtension($item)) }
-                    ([GPOExtensionType]::Preferences) { $array.AddItem($this.GetRawExtension($item)) }
-                    ([GPOExtensionType]::Xml) { $array.AddItem($this.GetRawExtension($item)) }
-                    ([GPOExtensionType]::Ini) { $array.AddItem($this.GetRawExtension($item)) }
-
+                    ([GPOExtensionType]::Security) {
+                        $array.AddItem($this.GetSecurityExtension($item))
+                    }
+                    ([GPOExtensionType]::Registry) {
+                        $array.AddItem($this.GetRawExtension($item))
+                    }
+                    ([GPOExtensionType]::Preferences) {
+                        $array.AddItem($this.GetRawExtension($item))
+                    }
+                    ([GPOExtensionType]::Xml) {
+                        $array.AddItem($this.GetRawExtension($item))
+                    }
+                    ([GPOExtensionType]::Ini) {
+                        $array.AddItem($this.GetRawExtension($item))
+                    }
                 }
-
             }
-
         }
-        catch { throw '{0}({1})' -f 'ExtensionData', $_.Exception.Message }
+        catch {
+            throw '{0}({1})' -f 'ExtensionData', $_.Exception.Message
+        }
 
         return $array
-
     }
 
     [List]GetRawExtension([XmlElement]$value) {
@@ -2664,7 +3039,9 @@ class GroupPolicyObject : OrderedDictionary {
             $object.Record['ext.property.type'] = [String]$item.Type
             $object.Record['property.setting.name'] = [String]$item.Name
             $object.Record['property.setting.valid'] = $null
-            if (-not [GroupPolicyObject]::SetSecretPresence($object.Record, $item)) { $object.Record['property.setting.value'] = [String]$item.Value }
+            if (-not [GroupPolicyObject]::SetSecretPresence($object.Record, $item)) {
+                $object.Record['property.setting.value'] = [String]$item.Value
+            }
             $array.Add([PSCustomObject]$object.Record) > $null
         }
         return $array
@@ -2676,19 +3053,35 @@ class GroupPolicyObject : OrderedDictionary {
 
         switch ($this.Record.Properties.List) {
 
-            'gpo.id' { $this.Record[$_] = [String]$this.Data.Id }
-            'gpo.name' { $this.Record[$_] = $this.Data.DisplayName }
-            'gpo.created' { $this.Record[$_] = (Get-Date $this.Data.CreationTime -f 'yyyy/MM/dd HH:mm') }
-            'gpo.modified' { $this.Record[$_] = (Get-Date $this.Data.ModificationTime -f 'yyyy/MM/dd HH:mm') }
-            'gpo.status' { $this.Record[$_] = $this.Data.Gpostatus }
-            'gpo.read' { $this.Record[$_] = (Get-Date $this.Data.xml.GPO.ReadTime -f 'yyyy/MM/dd HH:mm') }
-            'gpo.linked' { $this.Record[$_] = (-not [String]::IsNullOrEmpty($this.Data.xml.GPO.LinksTo)) }
-            'gpo.linked.ou' { $this.Record[$_] = [GroupPolicyObject]::GetLink($this.Data.xml.GPO.LinksTo) }
-            
-            default { $this.Record[$_] = $null }
+            'gpo.id' {
+                $this.Record[$_] = [String]$this.Data.Id
+            }
+            'gpo.name' {
+                $this.Record[$_] = $this.Data.DisplayName
+            }
+            'gpo.created' {
+                $this.Record[$_] = (Get-Date $this.Data.CreationTime -f 'yyyy/MM/dd HH:mm')
+            }
+            'gpo.modified' {
+                $this.Record[$_] = (Get-Date $this.Data.ModificationTime -f 'yyyy/MM/dd HH:mm')
+            }
+            'gpo.status' {
+                $this.Record[$_] = $this.Data.Gpostatus
+            }
+            'gpo.read' {
+                $this.Record[$_] = (Get-Date $this.Data.xml.GPO.ReadTime -f 'yyyy/MM/dd HH:mm')
+            }
+            'gpo.linked' {
+                $this.Record[$_] = (-not [String]::IsNullOrEmpty($this.Data.xml.GPO.LinksTo))
+            }
+            'gpo.linked.ou' {
+                $this.Record[$_] = [GroupPolicyObject]::GetLink($this.Data.xml.GPO.LinksTo)
+            }
 
+            default {
+                $this.Record[$_] = $null
+            }
         }
-
     }
     [void]GetConfiguration() {
 
@@ -2706,7 +3099,6 @@ class GroupPolicyObject : OrderedDictionary {
                 $this.Data['xml'].GPO.($item).ExtensionData | ForEach-Object {
 
                     $array.AddItem($this.ExpandExtensionData($_))
-
                 }
 
                 if ($array.Count -gt 0) {
@@ -2715,12 +3107,11 @@ class GroupPolicyObject : OrderedDictionary {
                 else {
                     $this.Configuration = $null
                 }
-
             }
-
         }
-        catch { throw '{0}({1})' -f 'gpoConfiguration', $_.Exception.Message }
-
+        catch {
+            throw '{0}({1})' -f 'gpoConfiguration', $_.Exception.Message
+        }
     }
     [void]SetDefaultProperties() {
 
@@ -2738,9 +3129,7 @@ class GroupPolicyObject : OrderedDictionary {
             )
 
         )
-
     }
-
 }
 #endregion Group Policy
 ######################################################################################################################################################################################################################################################
@@ -2767,14 +3156,12 @@ class ADTarget {
         [ADTarget]::FQDN = (Get-CimInstance -ClassName Win32_ComputerSystem).Domain
 
         [ADTarget]::Diagnostic = [ADDiagnostic]::Initialize()
-
     }
     ADTarget([String]$value) {
 
         [ADTarget]::FQDN = $value
 
         [ADTarget]::Diagnostic = [ADDiagnostic]::Initialize()
-
     }
     ADTarget([PSCredential]$item) {
 
@@ -2783,7 +3170,6 @@ class ADTarget {
         [ADTarget]::Diagnostic = [ADDiagnostic]::Initialize()
 
         $this.Connect($item)
-
     }
     ADTarget([String]$value, [PSCredential]$item) {
 
@@ -2792,7 +3178,6 @@ class ADTarget {
         [ADTarget]::Diagnostic = [ADDiagnostic]::Initialize()
 
         $this.Connect($item)
-
     }
     static [void]Close() {
 
@@ -2803,38 +3188,53 @@ class ADTarget {
         [ADTarget]::Diagnostic = $null
 
         [ADDiagnostic]::Close()
-
     }
     static [void]Disconnect() {
 
         if (-not [String]::IsNullOrEmpty([ADTarget]::ConnectionDrive)) {
             $restorationError = $null
             $removalError = $null
-            try { Set-Location -LiteralPath ([ADTarget]::PreviousLocation) -ErrorAction Stop }
-            catch { $restorationError = $_ }
-            try { Remove-PSDrive -Name ([ADTarget]::ConnectionDrive) -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false }
-            catch { $removalError = $_ }
+            try {
+                Set-Location -LiteralPath ([ADTarget]::PreviousLocation) -ErrorAction Stop
+            }
+            catch {
+                $restorationError = $_
+            }
+            try {
+                Remove-PSDrive -Name ([ADTarget]::ConnectionDrive) -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false
+            }
+            catch {
+                $removalError = $_
+            }
             if ($null -eq $removalError) {
                 [ADTarget]::ConnectionDrive = $null
                 [ADTarget]::PreviousLocation = $null
             }
             if ($null -ne $restorationError) {
-                if ($null -ne $removalError) { $restorationError.Exception.Data['ADAnalyzerDriveRemovalError'] = $removalError.Exception.Message }
+                if ($null -ne $removalError) {
+                    $restorationError.Exception.Data['ADAnalyzerDriveRemovalError'] = $removalError.Exception.Message
+                }
                 throw $restorationError
             }
-            if ($null -ne $removalError) { throw $removalError }
+            if ($null -ne $removalError) {
+                throw $removalError
+            }
         }
-
     }
 
     [void]Connect([PSCredential]$value) {
 
         $object = $null
 
-try {
+        try {
 
-            $connectionParameters = @{Server=[ADTarget]::FQDN;ErrorAction='Stop'}
-            if ($null -ne $value -and $value -ne [PSCredential]::Empty) { $connectionParameters.Credential = $value }
+            $connectionParameters = @{
+                Server = [ADTarget]::FQDN
+                ErrorAction = 'Stop'
+            }
+            if ($null -ne $value -and $value -ne [PSCredential]::Empty) {
+                $connectionParameters.Credential = $value
+            }
             $item = Get-ADDomain @connectionParameters
 
             [ADTarget]::Disconnect()
@@ -2843,34 +3243,44 @@ try {
                 $driveName = '{0}-ADAnalyzer-{1}' -f $driveName, [guid]::NewGuid().ToString('N')
             }
             [ADTarget]::PreviousLocation = (Get-Location).Path
-            $driveParameters = @{Server=[ADTarget]::FQDN;Name=$driveName;PSProvider='ActiveDirectory';Root=$item.DistinguishedName;Scope='Script';ErrorAction='Stop'}
-            if ($connectionParameters.ContainsKey('Credential')) { $driveParameters.Credential = $value }
+            $driveParameters = @{
+                Server = [ADTarget]::FQDN
+                Name = $driveName
+                PSProvider = 'ActiveDirectory'
+                Root = $item.DistinguishedName
+                Scope = 'Script'
+                ErrorAction = 'Stop'
+            }
+            if ($connectionParameters.ContainsKey('Credential')) {
+                $driveParameters.Credential = $value
+            }
             $object = New-PSDrive @driveParameters -WhatIf:$false -Confirm:$false
             [ADTarget]::ConnectionDrive = $object.Name
 
             Set-Location -Path ('{0}:' -f $object.Name) -ErrorAction Stop
-
         }
-        catch { 
-            
-            throw '{0}({1})' -f 'targetConnection', 'domain connection failed' 
-        
+        catch {
+
+            throw '{0}({1})' -f 'targetConnection', 'domain connection failed'
         }
         finally {
 
             $this.Connection = $object
-
         }
-
     }
     [void]Connect([String]$fqdn, [PSCredential]$value) {
 
         $object = $null
 
-try {
+        try {
 
-            $connectionParameters = @{Server=$fqdn;ErrorAction='Stop'}
-            if ($null -ne $value -and $value -ne [PSCredential]::Empty) { $connectionParameters.Credential = $value }
+            $connectionParameters = @{
+                Server = $fqdn
+                ErrorAction = 'Stop'
+            }
+            if ($null -ne $value -and $value -ne [PSCredential]::Empty) {
+                $connectionParameters.Credential = $value
+            }
             $item = Get-ADDomain @connectionParameters
 
             [ADTarget]::Disconnect()
@@ -2879,28 +3289,33 @@ try {
                 $driveName = '{0}-ADAnalyzer-{1}' -f $driveName, [guid]::NewGuid().ToString('N')
             }
             [ADTarget]::PreviousLocation = (Get-Location).Path
-            $driveParameters = @{Server=$fqdn;Name=$driveName;PSProvider='ActiveDirectory';Root=$item.DistinguishedName;Scope='Script';ErrorAction='Stop'}
-            if ($connectionParameters.ContainsKey('Credential')) { $driveParameters.Credential = $value }
+            $driveParameters = @{
+                Server = $fqdn
+                Name = $driveName
+                PSProvider = 'ActiveDirectory'
+                Root = $item.DistinguishedName
+                Scope = 'Script'
+                ErrorAction = 'Stop'
+            }
+            if ($connectionParameters.ContainsKey('Credential')) {
+                $driveParameters.Credential = $value
+            }
             $object = New-PSDrive @driveParameters -WhatIf:$false -Confirm:$false
             [ADTarget]::ConnectionDrive = $object.Name
 
             Set-Location -Path ('{0}:' -f $object.Name) -ErrorAction Stop
-
         }
-        catch { 
-            
-            throw '{0}({1})' -f 'targetConnection', 'domain connection failed' 
-        
+        catch {
+
+            throw '{0}({1})' -f 'targetConnection', 'domain connection failed'
         }
         finally {
 
             $this.Connection = $object
-
         }
-
     }
-
 }
+
 class ADCollection {
 
     static [ArrayList]$List
@@ -2911,7 +3326,6 @@ class ADCollection {
         $object = (New-Object -TypeName $('{0}Data' -f $value))::Initialize()
 
         [ADCollection]::Data[$value] = $object
-
     }
 
     static [Object]Get([String]$value) {
@@ -2919,14 +3333,11 @@ class ADCollection {
         if ([ADCollection]::Data.Contains($value)) {
 
             return [ADCollection]::Data[$value]
-
         }
         else {
 
             return $null
-
         }
-
     }
 
     static [OrderedDictionary]Initialize([ArrayList]$list) {
@@ -2942,7 +3353,6 @@ class ADCollection {
         $array | ForEach-Object { [ADCollection]::Add($_) }
 
         return [ADCollection]::Data
-
     }
 
     static [void]Close() {
@@ -2950,15 +3360,13 @@ class ADCollection {
         if ($null -ne [ADCollection]::Data -and [ADCollection]::Data.Count -gt 0) {
 
             [ADCollection]::Data.Keys | ForEach-Object { [ADCollection]::Data[$_]::Close() }
-
         }
 
         [ADCollection]::Data = $null
         [ADCollection]::List = $null
-
     }
-
 }
+
 class ADEnvironment : ADTarget {
 
     hidden [Data]$Object
@@ -2974,10 +3382,14 @@ class ADEnvironment : ADTarget {
 
     [FindingData]$Finding
 
-    ADEnvironment() : base() {}
-    ADEnvironment([String]$value) : base([String]$value) {}
-    ADEnvironment([PSCredential]$item) : base([PSCredential]$item) {}
-    ADEnvironment([String]$value, [PSCredential]$item) : base([String]$value, [PSCredential]$item) {}
+    ADEnvironment() : base() {
+    }
+    ADEnvironment([String]$value) : base([String]$value) {
+    }
+    ADEnvironment([PSCredential]$item) : base([PSCredential]$item) {
+    }
+    ADEnvironment([String]$value, [PSCredential]$item) : base([String]$value, [PSCredential]$item) {
+    }
 
     static [ADEnvironment]$Instance
 
@@ -2996,7 +3408,6 @@ class ADEnvironment : ADTarget {
         [ADEnvironment]::Instance = $environment
 
         return [ADEnvironment]::Instance
-
     }
     static [ADEnvironment]Initialize([ArrayList]$list) {
 
@@ -3013,7 +3424,6 @@ class ADEnvironment : ADTarget {
         [ADEnvironment]::Instance = $environment
 
         return [ADEnvironment]::Instance
-
     }
     static [ADEnvironment]Initialize([PSCredential]$item, [ArrayList]$list) {
 
@@ -3032,7 +3442,6 @@ class ADEnvironment : ADTarget {
         [ADEnvironment]::Instance = $environment
 
         return [ADEnvironment]::Instance
-
     }
     static [ADEnvironment]Initialize([String]$value, [ArrayList]$list) {
 
@@ -3043,7 +3452,6 @@ class ADEnvironment : ADTarget {
         $environment.Finding = [FindingData]::Initialize()
         [ADEnvironment]::Instance = $environment
         return [ADEnvironment]::Instance
-
     }
     static [ADEnvironment]Initialize([String]$value, [PSCredential]$item, [ArrayList]$list) {
 
@@ -3062,7 +3470,6 @@ class ADEnvironment : ADTarget {
         [ADEnvironment]::Instance = $environment
 
         return [ADEnvironment]::Instance
-
     }
 
     static [ADEnvironment]GetEnvironment() {
@@ -3070,14 +3477,11 @@ class ADEnvironment : ADTarget {
         if ($null -eq [ADEnvironment]::Instance) {
 
             throw '{0}({1})' -f 'environmentInstance', 'environment not initialized'
-
         }
         else {
 
             return [ADEnvironment]::Instance
-
         }
-
     }
 
     static [void]Close() {
@@ -3086,7 +3490,6 @@ class ADEnvironment : ADTarget {
         [ADCollection]::Close()
         [FindingData]::Close()
         [ADEnvironment]::Instance = $null
-
     }
 
     [void]Analyze() {
@@ -3099,28 +3502,26 @@ class ADEnvironment : ADTarget {
             [ADTarget]::Diagnostic['StopWatch'].Start()
 
             $this.Collection.Keys | ForEach-Object { $this.($_).Analyze() }
-
         }
         catch {
 
             throw '{0}({1})' -f 'analyze', $_.Exception.Message
-
         }
         finally {
 
             [ADTarget]::Diagnostic['StopWatch'].Stop()
-
         }
-
     }
     [void]Remediate() {
         throw [NotSupportedException]::new('Legacy automatic remediation is disabled. Use New-ADAnalyzerRemediationPlan and Invoke-ADAnalyzerRemediationPlan.')
     }
-
 }
+
 class ADDiagnostic : Hashtable {
 
-    ADDiagnostic() : base([StringComparer]::OrdinalIgnoreCase) { $this.AddStopWatch() }
+    ADDiagnostic() : base([StringComparer]::OrdinalIgnoreCase) {
+        $this.AddStopWatch()
+    }
 
     static [ADDiagnostic]$Instance
 
@@ -3129,35 +3530,28 @@ class ADDiagnostic : Hashtable {
         [ADDiagnostic]::Instance = [ADDiagnostic]::New()
 
         return [ADDiagnostic]::Instance
-
     }
     static [ADDiagnostic]GetInstance() {
 
         if ($null -eq [ADDiagnostic]::Instance) {
 
             throw '{0}({1})' -f 'diagnosticInstance', 'diagnostic not initialized'
-
         }
         else {
 
             return [ADDiagnostic]::Instance
-
         }
-
     }
 
     static [void]Close() {
 
         [ADDiagnostic]::Instance = $null
-
     }
 
     [void]AddStopWatch() {
 
         $this['StopWatch'] = [System.Diagnostics.Stopwatch]::New()
-
     }
-
 }
 #endregion Environment
 ######################################################################################################################################################################################################################################################
@@ -3205,11 +3599,19 @@ function Get-ADEnvironment () {
     try {
 
         $var = $PSCmdlet.MyInvocation.BoundParameters
-        if ($ProfilePath -and $null -ne $Profile) { throw 'Specify ProfilePath or Profile, not both' }
-        $script:ADAnalyzerLegacyProfile = if ($ProfilePath) { Import-ADAnalyzerProfile -Path $ProfilePath } else { Import-ADAnalyzerProfile -Profile $Profile }
-
+        if ($ProfilePath -and $null -ne $Profile) {
+            throw 'Specify ProfilePath or Profile, not both'
+        }
+        $script:ADAnalyzerLegacyProfile = if ($ProfilePath) {
+            Import-ADAnalyzerProfile -Path $ProfilePath
+        }
+        else {
+            Import-ADAnalyzerProfile -Profile $Profile
+        }
     }
-    catch { throw '{0}({1})' -f 'error', 'unable to evaluate parameters' }
+    catch {
+        throw '{0}({1})' -f 'error', 'unable to evaluate parameters'
+    }
 
     try {
 
@@ -3221,53 +3623,49 @@ function Get-ADEnvironment () {
             if ($hasCredential -and [String]::IsNullOrEmpty($FQDN)) {
 
                 $adEnvironment = [ADEnvironment]::Initialize($Credential, $Class)
-
             }
             elseif ($hasCredential -and -not [String]::IsNullOrEmpty($FQDN)) {
 
                 $adEnvironment = [ADEnvironment]::Initialize($FQDN, $Credential, $Class)
-
             }
             elseif (-not [String]::IsNullOrEmpty($FQDN)) {
 
                 $adEnvironment = [ADEnvironment]::Initialize($FQDN, $Class)
-
             }
             else {
 
                 $adEnvironment = [ADEnvironment]::Initialize($Class)
-
             }
 
             # Reuse an ambient AD drive so its credentials and search base stay
             # intact. Constructors remain usable for offline graph creation.
-            if (-not $hasCredential -and $script:ADAnalyzerLegacyProfile.Analysis.DirectoryConnection -eq 'PSDrive' -and (Get-Location).Provider.Name -ne 'ActiveDirectory') {
+            if (-not $hasCredential -and
+                $script:ADAnalyzerLegacyProfile.Analysis.DirectoryConnection -eq 'PSDrive' -and
+                (Get-Location).Provider.Name -ne 'ActiveDirectory') {
                 $adEnvironment.Connect([PSCredential]::Empty)
             }
             $adEnvironment.Analyze()
 
             return $adEnvironment
-
         }
-        else { Get-Help -Name 'Get-ADEnvironment' -Detailed; return }
-
+        else {
+            Get-Help -Name 'Get-ADEnvironment' -Detailed
+            return
+        }
     }
-    catch { 
-        
-        throw '{0}({1})' -f 'get', $_.Exception.Message 
-    
+    catch {
+
+        throw '{0}({1})' -f 'get', $_.Exception.Message
     }
     finally {
 
         [ADEnvironment]::Close()
         $script:ADAnalyzerLegacyProfile = $null
-        
+
         Write-Verbose -Message ('[ {0} ] {1} {2} : {3}' -f '$', 'Analysis', 'Completed', (Get-Date -Format 'MM.dd @ HH:mm:ss'))
-
     }
-
-
 }
+
 function Set-ADEnvironment {
     <#
     .SYNOPSIS
@@ -3276,34 +3674,68 @@ function Set-ADEnvironment {
     Automatic disable/delete by finding label is retired. Apply requires a plan,
     journal, stable identity/state preconditions, and per-object ShouldProcess.
     #>
-    [CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact='High')]
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
-        [Alias('Domain')][string]$FQDN,[pscredential]$Credential=[pscredential]::Empty,
-        [Alias('Remediate','Fix')][ValidateSet('User','Computer')][string[]]$Class=@('User','Computer'),
-        $Plan,[string]$JournalPath,[switch]$Apply,[string]$ProfilePath,$Profile
+        [Alias('Domain')][string]$FQDN,
+        [pscredential]$Credential = [pscredential]::Empty,
+        [Alias('Remediate', 'Fix')][ValidateSet('User', 'Computer')][string[]]$Class = @('User', 'Computer'),
+        $Plan,
+        [string]$JournalPath,
+        [switch]$Apply,
+        [string]$ProfilePath,
+        $Profile
+
     )
-    if($Apply) {
-        if(-not $Plan -or -not $JournalPath){throw 'Apply requires Plan and JournalPath'}
-        $arguments=@{Plan=$Plan;Server=$FQDN;Credential=$Credential;JournalPath=$JournalPath;WhatIf=[bool]$WhatIfPreference}
-        if($PSBoundParameters.ContainsKey('Confirm')){$arguments.Confirm=$PSBoundParameters.Confirm}
+    if ($Apply) {
+        if (-not $Plan -or -not $JournalPath) {
+            throw 'Apply requires Plan and JournalPath'
+        }
+        $arguments = @{
+            Plan = $Plan
+            Server = $FQDN
+            Credential = $Credential
+            JournalPath = $JournalPath
+            WhatIf = [bool]$WhatIfPreference
+        }
+        if ($PSBoundParameters.ContainsKey('Confirm')) {
+            $arguments.Confirm = $PSBoundParameters.Confirm
+        }
         return Invoke-ADAnalyzerRemediationPlan @arguments
     }
-    if($ProfilePath -and $null -ne $Profile){throw 'Specify ProfilePath or Profile, not both'}
-    if($Plan){return $Plan}
-    $configuration=if($ProfilePath){Import-ADAnalyzerProfile -Path $ProfilePath}else{Import-ADAnalyzerProfile -Profile $Profile}
-    $arguments=@{Credential=$Credential;Profile=$configuration;SkipGpo=$true}
-    if($FQDN){$arguments.Domain=$FQDN}
-    $assessment=Get-ADAnalyzerAssessment @arguments
-    $allowed=@()
-    if($Class -contains 'User'){$allowed+='ACCOUNT.INACTIVE'}
-    if($Class -contains 'Computer'){$allowed+='COMPUTER.INACTIVE'}
-    $assessment.Findings=@($assessment.Findings | Where-Object RuleId -in $allowed)
+    if ($ProfilePath -and $null -ne $Profile) {
+        throw 'Specify ProfilePath or Profile, not both'
+    }
+    if ($Plan) {
+        return $Plan
+    }
+    $configuration = if ($ProfilePath) {
+        Import-ADAnalyzerProfile -Path $ProfilePath
+    }
+    else {
+        Import-ADAnalyzerProfile -Profile $Profile
+    }
+    $arguments = @{
+        Credential = $Credential
+        Profile = $configuration
+        SkipGpo = $true
+    }
+    if ($FQDN) {
+        $arguments.Domain = $FQDN
+    }
+    $assessment = Get-ADAnalyzerAssessment @arguments
+    $allowed = @()
+    if ($Class -contains 'User') {
+        $allowed += 'ACCOUNT.INACTIVE'
+    }
+    if ($Class -contains 'Computer') {
+        $allowed += 'COMPUTER.INACTIVE'
+    }
+    $assessment.Findings = @($assessment.Findings | Where-Object RuleId -in $allowed)
     New-ADAnalyzerRemediationPlan -Assessment $assessment -Profile $configuration
 }
 
 #endregion Cmdlets
 ######################################################################################################################################################################################################################################################
-
 
 ######################################################################################################################################################################################################################################################
 #endregion Classes

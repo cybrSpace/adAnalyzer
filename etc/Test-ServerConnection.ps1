@@ -13,7 +13,6 @@ $servers = @(
 if (Test-Path -Path $filePath) {
 
     $filePath = $filePath -replace '.csv', ('.{0}.csv' -f (Get-Date -Format 'yyyyMMdd.HHmm'))
-
 }
 
 $results = [System.Collections.ArrayList]::new()
@@ -24,39 +23,42 @@ foreach ($name in $servers) {
 
         try {
 
-            $r = Test-NetConnection -ComputerName $name -Port $_ -WarningAction SilentlyContinue -InformationLevel Detailed | Select-Object ComputerName, RemoteAddress, RemotePort, TcpTestSucceeded
-
+            $r = Test-NetConnection `
+                -ComputerName $name `
+                -Port $_ `
+                -WarningAction SilentlyContinue `
+                -InformationLevel Detailed | Select-Object ComputerName,
+            RemoteAddress,
+            RemotePort,
+            TcpTestSucceeded
         }
-        catch { $r = $null }
-        
-        
+        catch {
+            $r = $null
+        }
+
         if ($null -ne $r) {
 
             $object = [ordered]@{
-                'ComputerName'  = $name
+                'ComputerName' = $name
                 'RemoteAddress' = $r.RemoteAddress
-                'RemotePort'    = $_
-                'tcpTest'       = $r.TcpTestSucceeded
-                'result'        = $true
+                'RemotePort' = $_
+                'tcpTest' = $r.TcpTestSucceeded
+                'result' = $true
             }
-
         }
         else {
 
             $object = [ordered]@{
-                'ComputerName'  = $name
+                'ComputerName' = $name
                 'RemoteAddress' = $null
-                'RemotePort'    = $_
-                'tcpTest'       = $null
-                'result'        = $false
+                'RemotePort' = $_
+                'tcpTest' = $null
+                'result' = $false
             }
-
         }
 
         $results.Add([pscustomobject]$object) > $null
-
     }
-
 }
 
 $results | Export-Csv -Path $filePath -NoTypeInformation

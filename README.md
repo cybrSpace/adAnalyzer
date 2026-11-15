@@ -16,7 +16,7 @@ $profile = Import-ADAnalyzerProfile -Path .\profiles\example.psd1
 # Customize example.invalid and the account-role rules before collecting.
 $scan = Get-ADAnalyzerAssessment -Profile $profile -Credential $credential
 $scan.Coverage
-$scan.Findings | Select-Object RuleId,Target,Status,Severity,Applicability,Suppressed
+$scan.Findings | Select-Object RuleId, Target, Status, Severity, Applicability, Suppressed
 Export-ADAnalyzerAssessment -Assessment $scan -Path .\reports\current -Format All
 ```
 
@@ -139,7 +139,12 @@ $profile.Remediation.ApprovedObjectGuids = @('<explicit approved object GUID>')
 $plan = New-ADAnalyzerRemediationPlan -Assessment $scan -Profile $profile
 $plan.Actions
 $plan | ConvertTo-Json -Depth 100 | Set-Content .\reviewed-plan.json -Encoding UTF8
-Invoke-ADAnalyzerRemediationPlan -Plan .\reviewed-plan.json -Server $scan.Context.Server -Credential $credential -JournalPath .\journal.json -WhatIf
+Invoke-ADAnalyzerRemediationPlan `
+    -Plan .\reviewed-plan.json `
+    -Server $scan.Context.Server `
+    -Credential $credential `
+    -JournalPath .\journal.json `
+    -WhatIf
 # After reviewing the exact plan, run the same command without -WhatIf.
 ```
 

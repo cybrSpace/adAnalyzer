@@ -10,14 +10,27 @@ $script:ClassPassed = 0
 $script:ClassFailed = 0
 
 function Assert-ClassEqual($Expected, $Actual) {
-    if ($Expected -ne $Actual) { throw "Expected [$Expected], received [$Actual]" }
+    if ($Expected -ne $Actual) {
+        throw "Expected [$Expected], received [$Actual]"
+    }
 }
+
 function Assert-ClassTrue($Actual, [string]$Message) {
-    if (-not $Actual) { throw $Message }
+    if (-not $Actual) {
+        throw $Message
+    }
 }
+
 function Invoke-ClassTest([string]$Name, [scriptblock]$Body) {
-    try { & $Body; $script:ClassPassed++; Write-Host "PASS $Name" }
-    catch { $script:ClassFailed++; Write-Host "FAIL $Name : $_" }
+    try {
+        & $Body
+        $script:ClassPassed++
+        Write-Host "PASS $Name"
+    }
+    catch {
+        $script:ClassFailed++
+        Write-Host "FAIL $Name : $_"
+    }
 }
 
 # These DTOs supply only external CLR contracts. All analyzer class definitions,
@@ -53,6 +66,7 @@ namespace Microsoft.ActiveDirectory.Management.Provider {
 '@
 
 $script:ClassModule = Import-Module (Join-Path $RepositoryRoot 'bin/ADEnvironment.psm1') -Force -PassThru
+
 function Invoke-ClassScope([string]$Source) {
     & $script:ClassModule ([scriptblock]::Create($Source))
 }
@@ -149,7 +163,7 @@ function script:Remove-ADObject { param($Identity,$Server,[switch]$Recursive,[sw
 '@
 
 Invoke-ClassTest 'all Data subclasses construct and inherit shared typed containers' {
-    $count=Invoke-ClassScope @'
+    $count = Invoke-ClassScope @'
 $count=0
 foreach($name in @('DomainData','ObjectData','UserData','GroupData','ComputerData','GroupPolicyData')) {
     $model=New-Object $name
@@ -164,7 +178,7 @@ $count
 }
 
 Invoke-ClassTest 'all table factories initialize valid keys and metadata' {
-    $count=Invoke-ClassScope @'
+    $count = Invoke-ClassScope @'
 $count=0
 foreach($name in @('UserTable','GroupTable','ComputerTable','GroupPolicyTable')) {
     $table=(New-Object $name)::SetDefault()
@@ -177,22 +191,22 @@ $count
 }
 
 Invoke-ClassTest 'diagnostic timer is initialized and usable' {
-    $running=Invoke-ClassScope '$d=[ADDiagnostic]::Initialize(); $d["StopWatch"].Start(); $r=$d["StopWatch"].IsRunning; $d["StopWatch"].Stop(); $r'
+    $running = Invoke-ClassScope '$d=[ADDiagnostic]::Initialize(); $d["StopWatch"].Start(); $r=$d["StopWatch"].IsRunning; $d["StopWatch"].Stop(); $r'
     Assert-ClassTrue $running 'Expected a running instance stopwatch'
 }
 
 Invoke-ClassTest 'process flags reset when initialized with false' {
-    $result=Invoke-ClassScope '[Process]::Initialize($true,$true); [Process]::Initialize($false,$false); [Process]::WhatIf -or [Process]::Confirm'
+    $result = Invoke-ClassScope '[Process]::Initialize($true,$true); [Process]::Initialize($false,$false); [Process]::WhatIf -or [Process]::Confirm'
     Assert-ClassEqual $false $result
 }
 
 Invoke-ClassTest 'collection factory maps all object classes and dependencies' {
-    $result=Invoke-ClassScope '$c=[ADCollection]::Initialize([System.Collections.ArrayList]@("User","Group","Computer","GroupPolicy")); ($c.Keys -join ",")'
+    $result = Invoke-ClassScope '$c=[ADCollection]::Initialize([System.Collections.ArrayList]@("User","Group","Computer","GroupPolicy")); ($c.Keys -join ",")'
     Assert-ClassEqual 'Domain,Object,User,Group,Computer,GroupPolicy' $result
 }
 
 Invoke-ClassTest 'environment factories cover local-domain and credential overloads' {
-    $count=Invoke-ClassScope @'
+    $count = Invoke-ClassScope @'
 $count=0
 try {
     $e=[ADEnvironment]::Initialize()
@@ -212,7 +226,7 @@ $count
 }
 
 Invoke-ClassTest 'group-member lookup uses the shared object table' {
-    $name=Invoke-ClassScope @'
+    $name = Invoke-ClassScope @'
 try {
     $null=[ADCollection]::Initialize([System.Collections.ArrayList]@('Group'))
     [ObjectData]::GetInstance().Data=[Table]::new()
@@ -224,7 +238,7 @@ try {
 }
 
 Invoke-ClassTest 'full report pipeline handles all four classes and aggregate findings' {
-    $result=Invoke-ClassScope @'
+    $result = Invoke-ClassScope @'
 $e=Get-ADEnvironment -Class @('User','Group','Computer','GroupPolicy') -FQDN 'target.example.invalid'
 [pscustomobject]@{User=$e.User.Report.Count;Group=$e.Group.Report.Count;Computer=$e.Computer.Report.Count;GPO=$e.GroupPolicy.Data.Count;Finding=$e.Finding.Count;Target=$e.Domain.FQDN;PolicyRetained=$null -ne $e.Domain.PasswordPolicy;Stopped=$null -eq [ADDiagnostic]::Instance}
 '@
@@ -239,12 +253,12 @@ $e=Get-ADEnvironment -Class @('User','Group','Computer','GroupPolicy') -FQDN 'ta
 }
 
 Invoke-ClassTest 'public report accepts a scalar class and reinitializes cleanly' {
-    $count=Invoke-ClassScope '$e=Get-ADEnvironment -Analyze User -FQDN "target.example.invalid"; $e.User.Report.Count'
+    $count = Invoke-ClassScope '$e=Get-ADEnvironment -Analyze User -FQDN "target.example.invalid"; $e.User.Report.Count'
     Assert-ClassEqual 1 $count
 }
 
 Invoke-ClassTest 'query failures clean up class singletons' {
-    $result=Invoke-ClassScope @'
+    $result = Invoke-ClassScope @'
 $script:FailUserQuery=$true; $failed=$false
 try { $null=Get-ADEnvironment -Class User -FQDN 'target.example.invalid' } catch { $failed=$true } finally { $script:FailUserQuery=$false }
 $failed -and $null -eq [ADEnvironment]::Instance -and $null -eq [ADCollection]::Data -and $null -eq [FindingData]::Instance
@@ -257,7 +271,7 @@ Invoke-ClassTest 'repeated cleanup is safe before or after initialization' {
 }
 
 Invoke-ClassTest 'credential connections persist until cleanup and preserve preexisting drives' {
-    $result=Invoke-ClassScope @'
+    $result = Invoke-ClassScope @'
 $existing=[Microsoft.ActiveDirectory.Management.Provider.ADDriveInfo]::new(); $existing.Name='FIXTURE'; $null=$script:FixtureDrives.Add($existing)
 $credential=[pscredential]::new('fixture',(ConvertTo-SecureString 'fixture-only' -AsPlainText -Force))
 $e=[ADEnvironment]::Initialize('target.example.invalid',$credential,[System.Collections.ArrayList]@('User'))
@@ -270,9 +284,9 @@ $during=$script:FixtureDrives.Count; [ADEnvironment]::Close()
     Assert-ClassEqual 'Script' $result.Scope
 }
 
-foreach($mode in @('Default','Direct','Ambient','Credential','CredentialDirect','CreateFail','EntryFail','QueryFail')){
-    Invoke-ClassTest ('legacy public reads preserve the preferred drive context: '+$mode) {
-        $source=@'
+foreach ($mode in @('Default', 'Direct', 'Ambient', 'Credential', 'CredentialDirect', 'CreateFail', 'EntryFail', 'QueryFail')) {
+    Invoke-ClassTest ('legacy public reads preserve the preferred drive context: ' + $mode) {
+        $source = @'
 $originals=@{}
 foreach($name in @('Get-Location','Set-Location','New-PSDrive','Get-ADDomain','Get-ADObject','Get-ADUser')){$originals[$name]=(Get-Command $name).ScriptBlock}
 $ambient='__MODE__' -eq 'Ambient'
@@ -343,11 +357,11 @@ try{
     [ADEnvironment]::Close()
 }
 '@
-        Assert-ClassTrue (Invoke-ClassScope ($source.Replace('__MODE__',$mode))) 'Legacy read context contract failed'
+        Assert-ClassTrue (Invoke-ClassScope ($source.Replace('__MODE__', $mode))) 'Legacy read context contract failed'
     }
 }
 Invoke-ClassTest 'both legacy connection overloads omit null or empty credentials' {
-    $count=Invoke-ClassScope @'
+    $count = Invoke-ClassScope @'
 $domain=(Get-Command Get-ADDomain).ScriptBlock;$drive=(Get-Command New-PSDrive).ScriptBlock
 $script:OptionalDomain=$domain;$script:OptionalDrive=$drive;$script:OptionalCount=0
 try{
@@ -373,9 +387,9 @@ try{
 '@
     Assert-ClassEqual 4 $count
 }
-foreach($mode in @('Restore','Remove','Both')){
-    Invoke-ClassTest ('owned AD drive cleanup preserves failures and retry state: '+$mode) {
-        $source=@'
+foreach ($mode in @('Restore', 'Remove', 'Both')) {
+    Invoke-ClassTest ('owned AD drive cleanup preserves failures and retry state: ' + $mode) {
+        $source = @'
 $setLocation=(Get-Command Set-Location).ScriptBlock;$removeDrive=(Get-Command Remove-PSDrive).ScriptBlock
 $callerNames=@($script:FixtureDrives | ForEach-Object Name);$owned=$null
 try{
@@ -404,21 +418,34 @@ try{
     foreach($drive in @($script:FixtureDrives | Where-Object Name -eq $owned)){$script:FixtureDrives.Remove($drive)}
 }
 '@
-        $r=Invoke-ClassScope ($source.Replace('__MODE__',$mode))
-        Assert-ClassEqual 1 $r.Attempts;Assert-ClassEqual $true $r.Force
-        if($mode -eq 'Restore'){
-            Assert-ClassEqual $false $r.FirstExists;Assert-ClassEqual $false $r.Retained
-        }else{
-            Assert-ClassEqual $true $r.FirstExists;Assert-ClassEqual $true $r.Retained
+        $r = Invoke-ClassScope ($source.Replace('__MODE__', $mode))
+        Assert-ClassEqual 1 $r.Attempts
+        Assert-ClassEqual $true $r.Force
+        if ($mode -eq 'Restore') {
+            Assert-ClassEqual $false $r.FirstExists
+            Assert-ClassEqual $false $r.Retained
         }
-        $primary=if($mode -eq 'Remove'){'fixture removal failure'}else{'fixture restoration failure'}
+        else {
+            Assert-ClassEqual $true $r.FirstExists
+            Assert-ClassEqual $true $r.Retained
+        }
+        $primary = if ($mode -eq 'Remove') {
+            'fixture removal failure'
+        }
+        else {
+            'fixture restoration failure'
+        }
         Assert-ClassTrue ($r.Primary.Contains($primary)) 'Original cleanup failure was replaced'
-        if($mode -eq 'Both'){Assert-ClassTrue ($r.Secondary.Contains('fixture removal failure')) 'Secondary removal failure was hidden'}
-        Assert-ClassEqual $true $r.RetryGone;Assert-ClassEqual $true $r.Cleared;Assert-ClassEqual $true $r.CallerPreserved
+        if ($mode -eq 'Both') {
+            Assert-ClassTrue ($r.Secondary.Contains('fixture removal failure')) 'Secondary removal failure was hidden'
+        }
+        Assert-ClassEqual $true $r.RetryGone
+        Assert-ClassEqual $true $r.Cleared
+        Assert-ClassEqual $true $r.CallerPreserved
     }
 }
 Invoke-ClassTest 'failed directory authentication never creates a connection drive' {
-    $result=Invoke-ClassScope @'
+    $result = Invoke-ClassScope @'
 $script:FailDomainQuery=$true; $before=$script:FixtureDrives.Count; $failed=$false
 try { $credential=[pscredential]::new('fixture',(ConvertTo-SecureString 'fixture-only' -AsPlainText -Force)); $null=[ADTarget]::new('target.example.invalid',$credential) } catch { $failed=$true } finally {$script:FailDomainQuery=$false;[ADEnvironment]::Close()}
 $failed -and $script:FixtureDrives.Count -eq $before
@@ -427,7 +454,7 @@ $failed -and $script:FixtureDrives.Count -eq $before
 }
 
 Invoke-ClassTest 'legacy automatic remediation is rejected without directory writes' {
-    $result=Invoke-ClassScope @'
+    $result = Invoke-ClassScope @'
 $script:FixtureWrites=0;$e=Get-ADEnvironment -Class User -FQDN 'target.example.invalid';$rejected=$false
 try{$e.Remediate()}catch{$rejected=$_.Exception.Message -match 'New-ADAnalyzerRemediationPlan'}
 [pscustomobject]@{Writes=$script:FixtureWrites;Rejected=$rejected}
@@ -437,7 +464,7 @@ try{$e.Remediate()}catch{$rejected=$_.Exception.Message -match 'New-ADAnalyzerRe
 }
 
 Invoke-ClassTest 'legacy direct disable and delete methods cannot bypass plans' {
-    $result=Invoke-ClassScope @'
+    $result = Invoke-ClassScope @'
 $before=$script:FixtureWrites;$failures=0
 try{[Finding]::Disable([pscustomobject]@{samaccountname='fixture'})}catch{$failures++}
 try{[Finding]::Delete([pscustomobject]@{samaccountname='fixture'})}catch{$failures++}
@@ -447,7 +474,7 @@ $failures -eq 2 -and $script:FixtureWrites -eq $before
 }
 
 Invoke-ClassTest 'stale legacy environments cannot query a later target' {
-    $result=Invoke-ClassScope @'
+    $result = Invoke-ClassScope @'
 $a=[ADEnvironment]::Initialize('a.example.invalid',[System.Collections.ArrayList]@('User'))
 $b=[ADEnvironment]::Initialize('b.example.invalid',[System.Collections.ArrayList]@('Computer'))
 $before=$script:QueryServers.Count;$blocked=$false
@@ -458,7 +485,7 @@ $blocked -and $script:QueryServers.Count -eq $before
 }
 
 Invoke-ClassTest 'CSV projection does not mutate the live record or leak credential XML' {
-    $result=Invoke-ClassScope @'
+    $result = Invoke-ClassScope @'
 $source=[pscustomobject]@{members=[System.Collections.ArrayList]@('one','two');xml='<Item cpassword="fixture-secret" />'}
 $finding=[Finding]::new();$null=$finding.Add($source)
 $path=Join-Path ([IO.Path]::GetTempPath()) ('ad-export-'+[guid]::NewGuid().ToString('N')+'.csv')
@@ -470,7 +497,7 @@ try {
     Assert-ClassTrue $result 'Export changed the source or exposed a secret'
 }
 Invoke-ClassTest 'legacy CSV projection failures preserve the exact previous destination' {
-    $result=Invoke-ClassScope @'
+    $result = Invoke-ClassScope @'
 $path=Join-Path ([IO.Path]::GetTempPath()) ('ad-legacy-csv-'+[guid]::NewGuid().ToString('N')+'.csv')
 $projection=(Get-Item Function:ConvertTo-ADAnalyzerSafeData).ScriptBlock
 try{
@@ -483,7 +510,7 @@ try{
     Assert-ClassTrue $result 'CSV conversion failure erased the previous report'
 }
 Invoke-ClassTest 'successful empty legacy CSV export replaces stale content explicitly' {
-    $result=Invoke-ClassScope @'
+    $result = Invoke-ClassScope @'
 $path=Join-Path ([IO.Path]::GetTempPath()) ('ad-empty-csv-'+[guid]::NewGuid().ToString('N')+'.csv')
 try{
     [IO.File]::WriteAllText($path,'stale report');[Export]::CSV(@(),$path)
@@ -493,7 +520,7 @@ try{
     Assert-ClassTrue $result 'Empty export left stale content or removed the destination'
 }
 Invoke-ClassTest 'mixed unreadable and configured GPO findings retain every per-class CSV field' {
-    $r=Invoke-ClassScope @'
+    $r = Invoke-ClassScope @'
 $getGpos=(Get-Command Get-ADAnalyzerGpo).ScriptBlock;$getReport=(Get-Command Get-ADAnalyzerGpoReport).ScriptBlock
 $path=Join-Path ([IO.Path]::GetTempPath()) ('ad-mixed-gpo-'+[guid]::NewGuid().ToString('N')+'.csv')
 function script:Get-ADAnalyzerGpo {
@@ -524,13 +551,16 @@ try{
 '@
     Assert-ClassTrue ($r.Count -ge 2) 'Mixed fixture findings missing'
     Assert-ClassEqual 'fixture unreadable GPO' $r.ReadError
-    Assert-ClassEqual MinimumPasswordLength $r.Name;Assert-ClassEqual '0' $r.Value
+    Assert-ClassEqual MinimumPasswordLength $r.Name
+    Assert-ClassEqual '0' $r.Value
     Assert-ClassEqual '22222222-2222-2222-2222-222222222222' $r.Id
-    Assert-ClassEqual MinimumPasswordLength $r.ReverseName;Assert-ClassEqual $true $r.Unchanged
-    Assert-ClassEqual 'class,finding,object' $r.AggregateColumns;Assert-ClassEqual 0 $r.AggregateValue
+    Assert-ClassEqual MinimumPasswordLength $r.ReverseName
+    Assert-ClassEqual $true $r.Unchanged
+    Assert-ClassEqual 'class,finding,object' $r.AggregateColumns
+    Assert-ClassEqual 0 $r.AggregateValue
 }
 Invoke-ClassTest 'legacy CSV unions safe literal columns with stable case-insensitive order and skips null rows' {
-    $r=Invoke-ClassScope @'
+    $r = Invoke-ClassScope @'
 $rows=@([pscustomobject][ordered]@{Name='first'},$null,[pscustomobject][ordered]@{NAME='second';Secret='fixture-column-secret';Later='value';Members=[Collections.ArrayList]@('one','two');'literal[*]'='literal'})
 $before=ConvertTo-Json -InputObject $rows -Depth 20 -Compress
 $path=Join-Path ([IO.Path]::GetTempPath()) ('ad-union-csv-'+[guid]::NewGuid().ToString('N')+'.csv')
@@ -539,13 +569,18 @@ try{
     [pscustomobject]@{Count=$csv.Count;Columns=($csv[0].PSObject.Properties.Name -join ',');Name=$csv[1].Name;Present=$csv[1].SecretPresent;Later=$csv[1].Later;Members=$csv[1].Members;Literal=$csv[1].'literal[*]';Safe=($text -notmatch 'fixture-column-secret|REDACTED');Unchanged=($before -ceq (ConvertTo-Json -InputObject $rows -Depth 20 -Compress))}
 }finally{if([IO.File]::Exists($path)){[IO.File]::Delete($path)}}
 '@
-    Assert-ClassEqual 2 $r.Count;Assert-ClassEqual 'Name,SecretPresent,Later,Members,literal[*]' $r.Columns
-    Assert-ClassEqual second $r.Name;Assert-ClassEqual 'True' $r.Present
-    Assert-ClassEqual value $r.Later;Assert-ClassEqual 'one;two' $r.Members;Assert-ClassEqual literal $r.Literal
-    Assert-ClassEqual $true $r.Safe;Assert-ClassEqual $true $r.Unchanged
+    Assert-ClassEqual 2 $r.Count
+    Assert-ClassEqual 'Name,SecretPresent,Later,Members,literal[*]' $r.Columns
+    Assert-ClassEqual second $r.Name
+    Assert-ClassEqual 'True' $r.Present
+    Assert-ClassEqual value $r.Later
+    Assert-ClassEqual 'one;two' $r.Members
+    Assert-ClassEqual literal $r.Literal
+    Assert-ClassEqual $true $r.Safe
+    Assert-ClassEqual $true $r.Unchanged
 }
 Invoke-ClassTest 'aggregate JSON preserves exact flat policy integers without changing native records' {
-    $r=Invoke-ClassScope @'
+    $r = Invoke-ClassScope @'
 $numbers=@('0','-9223372036854775808','9223372036854775807','18446744073709551615','18446744073709551616','-9223372036854775809')
 $list=[Finding]::new();foreach($number in $numbers){$null=$list.Add([pscustomobject]@{finding='fixture';Number=[bigint]::Parse($number,[Globalization.CultureInfo]::InvariantCulture)})}
 $before=@($list | ForEach-Object {$_.Number.ToString([Globalization.CultureInfo]::InvariantCulture)})
@@ -555,17 +590,29 @@ try{
     [pscustomobject]@{Json=@($records | ForEach-Object object);Values=@($roundtrip | ForEach-Object {[string]$_.Number});LargeStrings=($roundtrip[4].Number -is [string] -and $roundtrip[5].Number -is [string]);Native=(@($list | Where-Object {$_.Number -isnot [bigint]}).Count -eq 0);Unchanged=(($before -join ',') -ceq (($list | ForEach-Object {$_.Number.ToString([Globalization.CultureInfo]::InvariantCulture)}) -join ','))}
 }finally{[FindingData]::Close()}
 '@
-    $expected=@('0','-9223372036854775808','9223372036854775807','18446744073709551615','18446744073709551616','-9223372036854775809')
-    for($i=0;$i -lt $expected.Count;$i++){
+    $expected = @('0',
+        '-9223372036854775808',
+        '9223372036854775807',
+        '18446744073709551615',
+        '18446744073709551616',
+        '-9223372036854775809')
+    for ($i = 0; $i -lt $expected.Count; $i++) {
         Assert-ClassEqual $expected[$i] $r.Values[$i]
-        $valuePattern=if($i -lt 4){'"Number"\s*:\s*'+[regex]::Escape($expected[$i])+'\s*[,}]'}else{'"Number"\s*:\s*"'+[regex]::Escape($expected[$i])+'"'}
+        $valuePattern = if ($i -lt 4) {
+            '"Number"\s*:\s*' + [regex]::Escape($expected[$i]) + '\s*[,}]'
+        }
+        else {
+            '"Number"\s*:\s*"' + [regex]::Escape($expected[$i]) + '"'
+        }
         Assert-ClassTrue ($r.Json[$i] -match $valuePattern) 'Aggregate integer JSON lost numeric/text representation'
     }
-    Assert-ClassEqual $true $r.LargeStrings;Assert-ClassEqual $true $r.Native;Assert-ClassEqual $true $r.Unchanged
+    Assert-ClassEqual $true $r.LargeStrings
+    Assert-ClassEqual $true $r.Native
+    Assert-ClassEqual $true $r.Unchanged
 }
-if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
     Invoke-ClassTest 'legacy CSV locked destinations fail without silently choosing another filename' {
-        $result=Invoke-ClassScope @'
+        $result = Invoke-ClassScope @'
 $directory=Join-Path ([IO.Path]::GetTempPath()) ('ad-locked-csv-'+[guid]::NewGuid().ToString('N'));$null=[IO.Directory]::CreateDirectory($directory)
 $path=Join-Path $directory 'report.csv';$held=$null
 try{
@@ -580,7 +627,7 @@ try{
     }
 }
 Invoke-ClassTest 'legacy queries use required metadata and retain only presence for unexpected secrets' {
-    $result=Invoke-ClassScope @'
+    $result = Invoke-ClassScope @'
 $user=$script:UserRecord;$group=$script:GroupRecord
 try {
     $script:UserRecord=[ordered]@{};foreach($key in $user.Keys){$script:UserRecord[$key]=$user[$key]}
@@ -603,7 +650,7 @@ try {
     Assert-ClassTrue $result 'Legacy metadata/secret retention contract failed'
 }
 Invoke-ClassTest 'legacy classification rejects secret-valued attributes before account queries' {
-    $result=Invoke-ClassScope @'
+    $result = Invoke-ClassScope @'
 $before=$script:UserQueryCount;$rejected=$false
 $profile=Get-ADAnalyzerDefaultProfile;$profile.AccountClassification.AttributeRules=@(@{Attribute='apiKey';Type='Service';Value='unit3-secret'})
 try{$null=Get-ADEnvironment -Class User -FQDN 'target.example.invalid' -Profile $profile}catch{$rejected=$_.Exception.Message -notmatch 'unit3-secret'}
@@ -612,31 +659,33 @@ $rejected -and $script:UserQueryCount -eq $before
     Assert-ClassTrue $result 'Secret classification attributes were queried'
 }
 
-$temporaryDirectory=Join-Path ([IO.Path]::GetTempPath()) ('ad-class-tests-'+[guid]::NewGuid())
+$temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ('ad-class-tests-' + [guid]::NewGuid())
 New-Item -Path $temporaryDirectory -ItemType Directory > $null
 try {
     Invoke-ClassTest 'aggregate findings export as usable CSV records' {
-        $path=Join-Path $temporaryDirectory 'findings.csv'
-        $escaped=$path.Replace("'","''")
+        $path = Join-Path $temporaryDirectory 'findings.csv'
+        $escaped = $path.Replace("'", "''")
         Invoke-ClassScope ("`$e=Get-ADEnvironment -Class User -FQDN 'target.example.invalid'; `$e.Finding.ExportCSV('$escaped')")
-        $rows=@(Import-Csv -LiteralPath $path)
+        $rows = @(Import-Csv -LiteralPath $path)
         Assert-ClassTrue ($rows.Count -gt 0) 'Expected exported findings'
         Assert-ClassEqual 'User' $rows[0].class
     }
     Invoke-ClassTest 'user group and computer report tables export their record columns' {
-        foreach($class in @('User','Group','Computer')) {
-            $path=Join-Path $temporaryDirectory ($class+'.csv')
-            $escaped=$path.Replace("'","''")
+        foreach ($class in @('User', 'Group', 'Computer')) {
+            $path = Join-Path $temporaryDirectory ($class + '.csv')
+            $escaped = $path.Replace("'", "''")
             Invoke-ClassScope ("`$e=Get-ADEnvironment -Class '$class' -FQDN 'target.example.invalid'; `$e.$class.Report.ExportCSV('$escaped')")
-            $rows=@(Import-Csv -LiteralPath $path)
+            $rows = @(Import-Csv -LiteralPath $path)
             Assert-ClassEqual 1 $rows.Count
             Assert-ClassTrue ($rows[0].PSObject.Properties.Name -contains 'samaccountname') 'Expected object record columns'
             Assert-ClassTrue ($rows[0].PSObject.Properties.Name -contains 'orgUnit.L0') 'Expected normalized directory hierarchy'
         }
     }
-    foreach($name in @('ObjectContractCases.ps1','GroupPolicyContractCases.ps1','LegacyProfileContractCases.ps1')) {
-        $path=Join-Path (Join-Path $RepositoryRoot 'tests') $name
-        if(-not (Test-Path -LiteralPath $path)){throw "Missing required test cases: $name"}
+    foreach ($name in @('ObjectContractCases.ps1', 'GroupPolicyContractCases.ps1', 'LegacyProfileContractCases.ps1')) {
+        $path = Join-Path (Join-Path $RepositoryRoot 'tests') $name
+        if (-not (Test-Path -LiteralPath $path)) {
+            throw "Missing required test cases: $name"
+        }
         . $path
     }
 }
@@ -644,5 +693,7 @@ finally {
     Invoke-ClassScope '[ADEnvironment]::Close()'
     Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -WhatIf:$false -Confirm:$false
 }
-Write-Host ("{0} class-contract tests passed; {1} failed" -f $script:ClassPassed,$script:ClassFailed)
-if($script:ClassFailed){exit 1}
+Write-Host ("{0} class-contract tests passed; {1} failed" -f $script:ClassPassed, $script:ClassFailed)
+if ($script:ClassFailed) {
+    exit 1
+}

@@ -35,24 +35,29 @@ jobs:
           TEST_VERSION: ${{ matrix.version }}
           TEST_ARCHIVE_SHA256: ${{ matrix.sha256 }}
         run: |
-          $ErrorActionPreference='Stop'
-          $ProgressPreference='SilentlyContinue'
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
           if ($env:TEST_VERSION -eq '5.1') {
-            # Windows services the 5.1 build; the suite asserts 5.1/Desktop/x64.
-            $engine=Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe'
-          } else {
-            [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-            $directory=Join-Path $env:RUNNER_TEMP ('powershell-'+$env:TEST_VERSION)
-            $archive=$directory+'.zip'
-            $url='https://github.com/PowerShell/PowerShell/releases/download/v{0}/PowerShell-{0}-win-x64.zip' -f $env:TEST_VERSION
-            Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
-            $actualHash=(Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
-            if ($actualHash -ne $env:TEST_ARCHIVE_SHA256) { throw 'PowerShell archive SHA256 mismatch' }
-            Expand-Archive -LiteralPath $archive -DestinationPath $directory
-            $engine=Join-Path $directory 'pwsh.exe'
+              # Windows services the 5.1 build; the suite asserts 5.1/Desktop/x64.
+              $engine = Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe'
           }
-          if (-not (Test-Path -LiteralPath $engine -PathType Leaf)) { throw 'Selected PowerShell executable is missing' }
-          'ADANALYZER_TEST_POWERSHELL='+$engine | Out-File -LiteralPath $env:GITHUB_ENV -Encoding utf8 -Append
+          else {
+              [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+              $directory = Join-Path $env:RUNNER_TEMP ('powershell-' + $env:TEST_VERSION)
+              $archive = $directory + '.zip'
+              $url = 'https://github.com/PowerShell/PowerShell/releases/download/v{0}/PowerShell-{0}-win-x64.zip' -f $env:TEST_VERSION
+              Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
+              $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+              if ($actualHash -ne $env:TEST_ARCHIVE_SHA256) {
+                  throw 'PowerShell archive SHA256 mismatch'
+              }
+              Expand-Archive -LiteralPath $archive -DestinationPath $directory
+              $engine = Join-Path $directory 'pwsh.exe'
+          }
+          if (-not (Test-Path -LiteralPath $engine -PathType Leaf)) {
+              throw 'Selected PowerShell executable is missing'
+          }
+          'ADANALYZER_TEST_POWERSHELL=' + $engine | Out-File -LiteralPath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Save optional pinned development tools
         # The runner shell only downloads packages. Every check below executes
         # in the selected engine, including Pester/PSScriptAnalyzer on 5.1.
@@ -61,5 +66,13 @@ jobs:
       - name: Log runtime and run all tests in the selected engine
         shell: powershell
         run: |
-          & $env:ADANALYZER_TEST_POWERSHELL -NoLogo -NoProfile -NonInteractive -File ./tests/Invoke-TestSuite.ps1 -ExpectedVersion '${{ matrix.version }}' -Mode All
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:ADANALYZER_TEST_POWERSHELL `
+              -NoLogo `
+              -NoProfile `
+              -NonInteractive `
+              -File ./tests/Invoke-TestSuite.ps1 `
+              -ExpectedVersion '${{ matrix.version }}' `
+              -Mode All
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
