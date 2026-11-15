@@ -963,47 +963,36 @@ if((`$rows -join ',') -ne 'Display One,Display Two'){throw 'Explicit name CLI fa
         Assert-Equal (($rows.RuleId | Sort-Object) -join ',') (($csv.RuleId | Sort-Object) -join ',')
         Assert-NoSecret ([IO.File]::ReadAllText($path))
     }
-    $connectionFixture = Join-Path $script:Temporary 'connection-csv-fixture.ps1'
-    Write-FixtureText $connectionFixture @'
-param([string]$Root,[string]$WorkingDirectory,[ValidateSet('Success','Refused','Throw')][string]$Mode)
-$ErrorActionPreference='Stop';$global:ADAnalyzerConnectionFixture=@{Calls=0;Mode=$Mode;ArgumentsValid=$true}
-function Test-NetConnection {
-    [CmdletBinding()]param($ComputerName,$Port,$InformationLevel)
-    $global:ADAnalyzerConnectionFixture.Calls++
-    if($ComputerName -ne 'srv1' -or $Port -ne 445 -or $InformationLevel -ne 'Detailed'){$global:ADAnalyzerConnectionFixture.ArgumentsValid=$false;throw 'Unexpected connection probe parameters'}
-    if($global:ADAnalyzerConnectionFixture.Mode -eq 'Throw'){throw 'fixture connection failure'}
-    [pscustomobject]@{ComputerName=$ComputerName;RemoteAddress='192.0.2.10';RemotePort=$Port;TcpTestSucceeded=($global:ADAnalyzerConnectionFixture.Mode -eq 'Success')}
-}
-$null=[IO.Directory]::CreateDirectory((Join-Path $WorkingDirectory 'tmp/expport'))
-$location=(Get-Location).Path
-try{
-    Set-Location -LiteralPath $WorkingDirectory
-    & (Join-Path $Root 'etc/Test-ServerConnection.ps1') | Out-Null
-}finally{Set-Location -LiteralPath $location}
-if($global:ADAnalyzerConnectionFixture.Calls -ne 1 -or -not $global:ADAnalyzerConnectionFixture.ArgumentsValid){throw 'Actual script did not make exactly one expected mocked probe'}
-$files=@(Get-ChildItem -LiteralPath (Join-Path $WorkingDirectory 'tmp/expport') -Filter 'AD-Servers.*.csv' -File)
-if($files.Count -ne 1){throw 'Actual script did not create exactly one CSV'}
-$rows=@(Import-Csv -LiteralPath $files[0].FullName)
-if($rows.Count -ne 1){throw 'Actual script did not export exactly one row'}
-$headers=$rows[0].PSObject.Properties.Name -join ','
-if($headers -cne 'ComputerName,RemoteAddress,RemotePort,tcpTest,result'){throw ('Unexpected native CSV columns: '+$headers)}
-$expected=[ordered]@{ComputerName='srv1';RemoteAddress=if($Mode -eq 'Throw'){''}else{'192.0.2.10'};RemotePort='445';tcpTest=if($Mode -eq 'Throw'){''}elseif($Mode -eq 'Success'){'True'}else{'False'};result=if($Mode -eq 'Throw'){'False'}else{'True'}}
-foreach($name in $expected.Keys){if([string]$rows[0].$name -cne $expected[$name]){throw ('Unexpected native CSV value for '+$name)}}
-'PASS actual connection CSV '+$Mode
-'@
-    foreach ($mode in @('Success', 'Refused', 'Throw')) {
-        Invoke-AuxiliaryTest ('actual connection CSV preserves native columns and values: ' + $mode) {
-            $output = @(& (Get-Process `
-                        -Id $PID).Path `
-                    -NoLogo `
-                    -NoProfile `
-                    -NonInteractive `
-                    -File $connectionFixture `
-                    -Root $RepositoryRoot `
-                    -WorkingDirectory (Join-Path $script:Temporary ('connection-' + $mode)) `
-                    -Mode $mode)
+    foreach ($mode in @('Success',
+            'Refused',
+            'Throw',
+            'Nonterminating',
+            'Malformed',
+            'Selection',
+            'Inert',
+            'Validation',
+            'Class',
+            'Csv',
+            'ExportFailures',
+            'WhatIf',
+            'Cli')) {
+        Invoke-AuxiliaryTest ('connection CSV contract: ' + $mode) {
+            $childArguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                (Join-Path $RepositoryRoot 'tests/ConnectionCsvFixture.ps1')
+                '-RepositoryRoot'
+                $RepositoryRoot
+                '-WorkingDirectory'
+                (Join-Path $script:Temporary ('connection-csv-' + $mode))
+                '-Mode'
+                $mode
+            )
+            $output = @(& (Get-Process -Id $PID).Path @childArguments)
             Assert-Equal 0 $LASTEXITCODE
-            Assert-True (($output -join ' ') -match ('PASS actual connection CSV ' + $mode)) 'Native CSV child did not finish'
+            Assert-True (($output -join ' ') -match ('PASS connection CSV ' + $mode)) 'Connection CSV child did not finish'
         }
     }
     Invoke-AuxiliaryTest 'an empty all-policy selection exports explicit CSV headers and no fabricated rows' {
