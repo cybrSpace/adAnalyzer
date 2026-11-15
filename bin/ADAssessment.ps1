@@ -36,7 +36,7 @@ function Invoke-ADAnalyzerAssessment {
     $coverage['Total']=$evaluated.Count
     $objects=@(@($DirectoryData.Users)+@($DirectoryData.Computers)+@($DirectoryData.ServiceAccounts) | Where-Object { $null -ne $_ })
     $errors=@($DirectoryData.Errors | Where-Object { $null -ne $_ })+@($GpoData | Where-Object Error | ForEach-Object { [pscustomobject]@{Collection='GroupPolicy';Target=[string]$_.Gpo.Id;Message=[string]$_.Error} })
-    $state=if($errors.Count -or $coverage.Unreadable -or $coverage.Unknown){'Partial'}else{'Complete'}
+    $state=if($errors.Count -or $coverage.Unreadable -or $coverage.Unknown -or $coverage.Invalid){'Partial'}else{'Complete'}
     if(-not $DirectoryData.Domain -and $Target -ne 'offline'){$state='Failed'}
     $result=[pscustomobject][ordered]@{
         SchemaVersion=1;RunId=[guid]::NewGuid().ToString();Timestamp=[datetime]::UtcNow.ToString('o');Target=$Target;State=$state

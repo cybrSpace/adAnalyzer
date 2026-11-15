@@ -153,6 +153,8 @@ Journal paths resolve once against the caller's PowerShell FileSystem location a
 
 `Get-ADAnalyzerPrerequisite` reports platform/runtime, bundled DLL version/hash and optional ADWS/SMB reachability/authentication. `DependencyHashes` may pin a trusted SHA256 for `Microsoft.ActiveDirectory.Management.dll`; availability is not signature verification. `Start-ADAnalyzer -Operation prerequisites -FQDN example.com -Online` accepts the same target/profile configuration. No prerequisite command installs RSAT or changes domain/host configuration.
 
+Assessment state describes evidence completeness. Invalid stored values or observations produce `Partial`, as do unknown evidence and collection errors. A fully evaluated failed check can still belong to a `Complete` assessment; `Complete` does not mean compliant.
+
 ## Validation
 
 Run `./tests/Invoke-TestSuite.ps1` for the regression suites, each in a separate fresh PowerShell process. CI pins Windows PowerShell 5.1, PowerShell 7.6 LTS at 7.6.10, and PowerShell 7.7 at 7.7.0 on Windows Server 2025. The PowerShell 7 portable downloads are SHA256-verified against the published release digests; Windows supplies and services its 5.1 build. Each job logs `$PSVersionTable`, executable path, process architecture and .NET runtime, and rejects an unexpected version/edition/architecture before running tests. All three engines run the regression suites, native DLL/provider and host-adapter checks, Pester, and selected static security rules without installed RSAT modules. Fixture tests do not contact a live domain controller or perform real AD changes; live AD/SMB/WinRM behavior still requires a representative lab.

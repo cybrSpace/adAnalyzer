@@ -54,6 +54,29 @@ function New-RegistryIdentityFixture([string]$Name,[switch]$Deleted){
 }
 $temp=Join-Path ([IO.Path]::GetTempPath()) ('ad-assessment-'+[guid]::NewGuid().ToString('N'));$null=New-Item -Path $temp -ItemType Directory
 try {
+    Test-Assessment 'invalid-only evidence is Partial while evaluated failures remain Complete' {
+        $directory=New-AssessmentFixture
+        $profile=Get-ADAnalyzerDefaultProfile;$profile.Host.RegistryRules=@(@{Key='SYSTEM\Fixture';ValueName='Enabled';Type=4;Expected=0})
+        $record=[pscustomobject]@{ComputerName='fixture';Services=@();Registry=@([pscustomobject]@{Path='SYSTEM\Fixture';Name='Enabled';Status='Observed';Value=0;Type=1})}
+        $directory | Add-Member -NotePropertyName HostChecks -NotePropertyValue @(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $profile)
+        $hostResult=Invoke-ADAnalyzerAssessment -DirectoryData $directory -Profile $profile
+        $policy=New-PolicyFixture;$policy.SecuritySettings=@([pscustomobject]@{Kind='Account';Name='MinimumPasswordLength';Value=12;ValueValid=$false;Scope='Computer';Source='Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf'})
+        $gpo=[pscustomobject]@{Id=[guid]::Empty;Version=1;Flags=0;Links=@()}
+        $gpoResult=Invoke-ADAnalyzerAssessment -DirectoryData (New-AssessmentFixture) -GpoData @([pscustomobject]@{Gpo=$gpo;Policy=$policy})
+        foreach($result in @($hostResult,$gpoResult)){
+            Assert-Equal 0 $result.Coverage.Unknown;Assert-Equal 0 $result.Coverage.Unreadable;Assert-Equal 0 $result.Errors.Count
+            Assert-Equal 1 $result.Coverage.Invalid;Assert-Equal Partial $result.State
+            $path=Join-Path $temp ('invalid-only-'+$result.RunId)
+            $null=Export-ADAnalyzerAssessment $result $path -Format All -Confirm:$false
+            $saved=Get-Content -LiteralPath ($path+'.json') -Raw | ConvertFrom-Json
+            Assert-Equal Partial $saved.State;Assert-Equal 1 $saved.Coverage.Invalid
+            Assert-True ((Get-Content -LiteralPath ($path+'.html') -Raw) -match 'State: Partial') 'HTML state disagrees with assessment'
+        }
+        $directory=New-AssessmentFixture;$directory.Domain.MachineAccountQuota=99
+        $failed=Invoke-ADAnalyzerAssessment -DirectoryData $directory
+        Assert-True ($failed.Coverage.Fail -gt 0) 'Fail-only control missing'
+        Assert-Equal 0 $failed.Coverage.Invalid;Assert-Equal Complete $failed.State
+    }
     Test-Assessment 'registry metadata identities preserve literal component separators' {
         $fixture=New-RegistryIdentityFixture 'metadata-separators'
         $fixture.Policy.RegistrySettings=@(
