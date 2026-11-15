@@ -106,13 +106,9 @@ $scan = $engine.Evaluate($directorySnapshot, $policyReports, 'example.com')
 # Defaults: an independent default profile, no policies, target 'offline'.
 $offlineEngine = [ADAnalyzerAssessmentEngine]::new()
 $scan = $offlineEngine.Evaluate($directorySnapshot)
-$reader = [ADAnalyzerGpoReader]::new()
-$policy = $reader.Read('C:\PolicyCopies\{GPO-GUID}')
 ```
 
 The constructor validates and copies its in-memory profile without importing native modules or connecting to AD. Instance methods own assessment composition, policy/version evidence, suppression, duplicate detection, coverage, state, and safe report projection. Reports retain the existing detached assessment shape; the engine stores no credentials or collected records. A bundled C# configuration holder uses a private field, so serializing an engine does not serialize its profile. The built-in `Add-Type` loads that small source component; no separate build tool or external package is required. Each instance owns its configuration, and evaluating again does not retain earlier results. Direct methods throw on evaluation errors. The existing `Invoke-ADAnalyzerAssessment` command is a thin compatibility adapter with its original parameters and a transient command context for PowerShell error-stream/common-parameter behavior. Other engine components are being converted in separate verified units.
-
-`ADAnalyzerGpoReader` owns the actual folder reader and INI, CSV, Registry.pol, XML, INF-flag, and security-option parsers. It retains no scan data or handles. `Read(path)` returns the existing policy DTO, and `ReadRegistryPolicy(path, scope)` returns typed registry records. Raw INI/XML and scalar parsing methods are internal implementation helpers; their compatibility functions retain the original source-parser contracts. Direct registry parsing buffers records and throws on invalid content; the compatibility `Read-AnalyzerRegistryPolicy` command preserves its earlier record streaming before a late parse failure. Existing reader commands delegate to the class; their consumer boundaries remain available. Reader construction is inert, and file/reader resources are closed before a successful direct return or after failure.
 
 Use this explicit dot-source entrypoint for literal constructor calls. Importing `ADEnvironment.psd1` remains the supported command interface; it does not promise caller visibility of classes defined in its dot-sourced component files. The constructor entrypoint supports portable offline evaluation; live collection still uses the package manifest and its bundled AD PSDrive/provider.
 
