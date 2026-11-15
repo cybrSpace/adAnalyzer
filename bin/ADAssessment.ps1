@@ -261,7 +261,13 @@ function Invoke-ADAnalyzerAssessment {
 
     )
     $engine = [ADAnalyzerAssessmentEngine]::new($Profile)
-    return $engine.EvaluateForCommand($DirectoryData, $GpoData, $Target, $PSCmdlet, $ErrorActionPreference)
+    $preference = if ($PSBoundParameters.ContainsKey('ErrorAction')) {
+        $PSBoundParameters.ErrorAction
+    }
+    else {
+        $ErrorActionPreference
+    }
+    return $engine.EvaluateForCommand($DirectoryData, $GpoData, $Target, $PSCmdlet, $preference)
 }
 
 function Get-ADAnalyzerAssessment {

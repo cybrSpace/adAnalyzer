@@ -80,7 +80,15 @@ function Test-ADAnalyzerDirectoryPolicy {
         throw 'Fixture evaluation failed'
     }
     if ($global:AssessmentEngineFixture.Fault -eq 'Error') {
-        Write-Error 'Fixture nonterminating evaluation failure'
+        if ($PSBoundParameters.ContainsKey('ErrorAction')) {
+            Write-Error 'Fixture nonterminating evaluation failure' -ErrorAction $PSBoundParameters.ErrorAction
+        }
+        else {
+            Write-Error 'Fixture nonterminating evaluation failure'
+        }
+    }
+    if ($global:AssessmentEngineFixture.Fault -eq 'InheritedError') {
+        Write-Error 'Fixture inherited evaluation failure'
     }
     $Data.TestChecks
 }
@@ -97,6 +105,17 @@ function Get-ComparableJson($Report) {
     $copy.RunId = ''
     $copy.Timestamp = ''
     ConvertTo-Json -InputObject $copy -Depth 100 -Compress
+}
+
+function Invoke-NativeIgnoreControl {
+    [CmdletBinding()]
+    param($DirectoryData)
+    # Match the original function's nested-command boundary without class methods.
+    $checks = @(Test-ADAnalyzerDirectoryPolicy -Data $DirectoryData -Profile @{} -ErrorAction Ignore)
+    [pscustomobject]@{
+        SchemaVersion = 1
+        Checks = $checks
+    }
 }
 
 Assert-Equal 0 $global:AssessmentEngineFixture.ExternalCalls
@@ -242,6 +261,32 @@ switch ($Mode) {
             }
             Assert-Equal $expected $savedErrors.Count
         }
+        # Windows PowerShell 5.1 has a native nested-function Ignore limitation.
+        # Compare against the actual engine control rather than disabling this path.
+        $global:AssessmentEngineFixture.Fault = 'InheritedError'
+        $nativeResults = @()
+        foreach ($command in @('Invoke-NativeIgnoreControl', 'Invoke-ADAnalyzerAssessment')) {
+            $Error.Clear()
+            $caught = $null
+            $stream = @()
+            try {
+                $stream = @(& $command -DirectoryData $directory -ErrorAction Ignore 2>&1)
+            }
+            catch {
+                $caught = $_
+            }
+            $unsupported = @($Error | Where-Object {
+                    $_.Exception.ToString() -match 'Ignore is not supported'
+                }).Count -gt 0
+            $nativeResults += [pscustomobject]@{
+                Reports = @($stream | Where-Object { $_.SchemaVersion -eq 1 }).Count
+                Errors = @($stream | Where-Object { $_ -is [Management.Automation.ErrorRecord] }).Count
+                Unsupported = $unsupported
+                Terminated = $null -ne $caught
+            }
+        }
+        Write-Output ('Native Ignore parity: ' + (ConvertTo-Json -InputObject $nativeResults -Compress))
+        Assert-Equal (ConvertTo-Json $nativeResults[0] -Compress) (ConvertTo-Json $nativeResults[1] -Compress)
         $global:AssessmentEngineFixture.Fault = ''
         $ErrorActionPreference = 'Stop'
         Assert-Equal 0 $engine.Evaluate($directory).Coverage.Total
