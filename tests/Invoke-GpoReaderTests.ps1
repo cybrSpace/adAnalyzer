@@ -186,6 +186,26 @@ $records = @(
 Write-Pol $pol $records
 try {
     $parsed = Read-ADAnalyzerGpo $policyRoot
+    foreach ($mode in @('Construction', 'Read', 'Parsers', 'Errors', 'Streaming', 'Compatibility', 'Isolation', 'Paths', 'Rights')) {
+        Test-Gpo ('constructor GPO reader: ' + $mode) {
+            $childArguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                (Join-Path $RepositoryRoot 'tests/GpoReaderClassFixture.ps1')
+                '-RepositoryRoot'
+                $RepositoryRoot
+                '-Mode'
+                $mode
+            )
+            $output = @(& (Get-Process -Id $PID).Path @childArguments)
+            Assert-Equal 0 $LASTEXITCODE
+            if (($output -join ' ') -notmatch ('PASS GPO reader class ' + $mode)) {
+                throw 'GPO reader constructor consumer did not finish.'
+            }
+        }
+    }
     Test-Gpo 'zero-byte numeric records remain key-only inventory rather than effective values' {
         foreach ($name in @('ADProfile', 'ADPolicyAnalysis')) {
             . (Join-Path $RepositoryRoot ('bin/' + $name + '.ps1'))

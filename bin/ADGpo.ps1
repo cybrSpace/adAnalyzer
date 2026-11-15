@@ -1,65 +1,613 @@
 # Package-owned GPO collection. No GroupPolicy module or GPMC COM objects.
 . (Join-Path $PSScriptRoot 'ADSecret.ps1')
 
-function Read-AnalyzerPolicyIni {
-    param([Parameter(Mandatory)][string]$Path)
-    $sections = [ordered]@{}
-    $section = ''
-    $reader = [IO.StreamReader]::new($Path, [Text.Encoding]::UTF8, $true)
-    try {
-        while ($null -ne ($line = $reader.ReadLine())) {
-            $line = $line.Trim()
-            if (-not $line -or $line.StartsWith(';')) {
-                continue
-            }
-            if ($line -match '^\[(.+)\]$') {
-                $section = $Matches[1]
-                if (-not $sections.Contains($section)) {
-                    $sections[$section] = [ordered]@{}
-                }
-                continue
-            }
-            $split = $line.IndexOf('=')
-            if ($split -gt 0 -and $section) {
-                $sections[$section][$line.Substring(0, $split).Trim()] = $line.Substring($split + 1).Trim()
-            }
+class ADAnalyzerGpoReader {
+    ADAnalyzerGpoReader() {
+    }
+
+    hidden [void] ValidatePath([string]$Path) {
+        if ([string]::IsNullOrEmpty($Path)) {
+            throw 'Path is required.'
         }
     }
-    finally {
-        $reader.Dispose()
+
+    hidden [Collections.Specialized.OrderedDictionary] ReadIni([string]$Path) {
+        $this.ValidatePath($Path)
+        $sections = [ordered]@{}
+        $section = ''
+        $reader = [IO.StreamReader]::new($Path, [Text.Encoding]::UTF8, $true)
+        try {
+            while ($null -ne ($line = $reader.ReadLine())) {
+                $line = $line.Trim()
+                if (-not $line -or $line.StartsWith(';')) {
+                    continue
+                }
+                if ($line -match '^\[(.+)\]$') {
+                    $section = $Matches[1]
+                    if (-not $sections.Contains($section)) {
+                        $sections[$section] = [ordered]@{}
+                    }
+                    continue
+                }
+                $split = $line.IndexOf('=')
+                if ($split -gt 0 -and $section) {
+                    $sections[$section][$line.Substring(0, $split).Trim()] = $line.Substring($split + 1).Trim()
+                }
+            }
+        }
+        finally {
+            $reader.Dispose()
+        }
+        return $sections
     }
-    return $sections
+
+    hidden [string[]] SplitCsv([string]$Value) {
+        $items = [Collections.Generic.List[string]]::new()
+        $part = [Text.StringBuilder]::new()
+        $quoted = $false
+        for ($i = 0; $i -lt $Value.Length; $i++) {
+            $c = $Value[$i]
+            if ($c -eq '"') {
+                if ($quoted -and $i + 1 -lt $Value.Length -and $Value[$i + 1] -eq '"') {
+                    $null = $part.Append('"')
+                    $i++
+                }
+                else {
+                    $quoted = -not $quoted
+                }
+            }
+            elseif ($c -eq ',' -and -not $quoted) {
+                $items.Add($part.ToString().Trim())
+                $null = $part.Clear()
+            }
+            else {
+                $null = $part.Append($c)
+            }
+        }
+        if ($quoted) {
+            throw 'Unterminated quoted policy value'
+        }
+        $items.Add($part.ToString().Trim())
+        return $items.ToArray()
+    }
+
+    [object[]] ReadRegistryPolicy([string]$Path) {
+        return $this.ReadRegistryPolicyCore($Path, '', $null)
+    }
+
+    [object[]] ReadRegistryPolicy([string]$Path, [string]$Scope) {
+        if ($Scope -notin 'Computer', 'User') {
+            throw 'Scope must be Computer or User.'
+        }
+        return $this.ReadRegistryPolicyCore($Path, $Scope, $null)
+    }
+
+    hidden [object[]] ReadRegistryPolicyCore(
+        [string]$Path,
+        [string]$Scope,
+        [Management.Automation.PSCmdlet]$CommandContext
+    ) {
+        $this.ValidatePath($Path)
+        if ($Scope -and $Scope -notin 'Computer', 'User') {
+            throw 'Scope must be Computer or User.'
+        }
+        $records = [Collections.Generic.List[object]]::new()
+        $stream = [IO.File]::OpenRead($Path)
+        $reader = [IO.BinaryReader]::new($stream, [Text.Encoding]::Unicode)
+        try {
+            if ([Text.Encoding]::ASCII.GetString($reader.ReadBytes(4)) -ne 'PReg' -or $reader.ReadUInt32() -ne 1) {
+                throw 'Invalid Registry.pol header/version'
+            }
+            while ($stream.Position -lt $stream.Length) {
+                if ($reader.ReadUInt16() -ne 91) {
+                    throw 'Invalid Registry.pol opening delimiter'
+                }
+                $strings = @()
+                foreach ($field in @('key', 'value')) {
+                    $text = [Text.StringBuilder]::new()
+                    while (($c = $reader.ReadUInt16()) -ne 0) {
+                        $null = $text.Append([char]$c)
+                    }
+                    if ($reader.ReadUInt16() -ne 59) {
+                        throw "Invalid Registry.pol $field delimiter"
+                    }
+                    $strings += $text.ToString()
+                }
+                $type = $reader.ReadUInt32()
+                if ($reader.ReadUInt16() -ne 59) {
+                    throw 'Invalid Registry.pol type delimiter'
+                }
+                $size = $reader.ReadUInt32()
+                if ($reader.ReadUInt16() -ne 59) {
+                    throw 'Invalid Registry.pol size delimiter'
+                }
+                if ($size -gt [int]::MaxValue -or $size -gt ($stream.Length - $stream.Position - 2)) {
+                    throw 'Invalid Registry.pol data length'
+                }
+                $bytes = $reader.ReadBytes([int]$size)
+                if ($reader.ReadUInt16() -ne 93) {
+                    throw 'Invalid Registry.pol closing delimiter'
+                }
+                $value = if ($size -eq 0) {
+                    , [byte[]]@()
+                }
+                else {
+                    switch ($type) {
+                        { $_ -in 1, 2 } {
+                            if ($size % 2) {
+                                throw 'Invalid UTF-16 registry value'
+                            }
+                            [Text.Encoding]::Unicode.GetString($bytes).TrimEnd([char]0)
+                        }
+                        4 {
+                            if ($size -ne 4) {
+                                throw 'Invalid DWORD length'
+                            }
+                            [BitConverter]::ToUInt32($bytes, 0)
+                        }
+                        5 {
+                            if ($size -ne 4) {
+                                throw 'Invalid big-endian DWORD length'
+                            }
+                            $copy = [byte[]]$bytes.Clone()
+                            [Array]::Reverse($copy)
+                            [BitConverter]::ToUInt32($copy, 0)
+                        }
+                        7 {
+                            if ($size % 2) {
+                                throw 'Invalid multi-string length'
+                            }
+                            $decoded = [Text.Encoding]::Unicode.GetString($bytes).TrimEnd([char]0)
+                            if ($decoded) {
+                                , $decoded.Split([char]0)
+                            }
+                            else {
+                                , [string[]]@()
+                            }
+                        }
+                        11 {
+                            if ($size -ne 8) {
+                                throw 'Invalid QWORD length'
+                            }
+                            [BitConverter]::ToUInt64($bytes, 0)
+                        }
+                        default {
+                            , $bytes
+                        }
+                    }
+                }
+                $record = ConvertTo-ADAnalyzerSecretRecord ([pscustomobject]@{
+                        Scope = $Scope
+                        Hive = $(if ($Scope -eq 'Computer') {
+                                'HKLM'
+                            }
+                            else {
+                                'HKCU'
+                            })
+                        Key = $strings[0]
+                        ValueName = $strings[1]
+                        Type = $type
+                        Value = $value
+                        RawData = $bytes
+                        KeyOnly = ($size -eq 0 -and ($strings[1] -eq '' -or ($type -in 4, 5, 11 -and -not $strings[1].StartsWith('**'))))
+                        DeletionDirective = $strings[1].StartsWith('**')
+                        Source = $Path
+                    })
+                if ($null -ne $CommandContext) {
+                    $CommandContext.WriteObject($record)
+                }
+                else {
+                    $records.Add($record)
+                }
+            }
+        }
+        catch {
+            throw "Unable to parse '$Path': $($_.Exception.Message)"
+        }
+        finally {
+            $reader.Dispose()
+            $stream.Dispose()
+        }
+        return $records.ToArray()
+    }
+
+    hidden [Xml.XmlDocument] ReadXml([string]$Path) {
+        $settings = [Xml.XmlReaderSettings]::new()
+        $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+        $settings.XmlResolver = $null
+        $reader = [Xml.XmlReader]::Create($Path, $settings)
+        try {
+            $xml = [Xml.XmlDocument]::new()
+            $xml.XmlResolver = $null
+            $xml.Load($reader)
+            return $xml
+        }
+        finally {
+            $reader.Dispose()
+        }
+    }
+
+    hidden [object[]] ConvertSecurityOption([string]$Name, [object]$Value) {
+        # Keep unknown registry settings verbatim. These names match the analyzer's
+        # existing security-option contract; raw INF values remain in IniSettings.
+        $key = $Name -replace '^(?i)MACHINE\\', ''
+        $booleanNames = @{
+            'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters\RequireSecuritySignature' = 'Microsoft network server: Digitally sign communications (always)'
+            'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters\EnableSecuritySignature' = 'Microsoft network server: Digitally sign communications (if client agrees)'
+            'SYSTEM\CurrentControlSet\Services\LanManWorkstation\Parameters\RequireSecuritySignature' = 'Microsoft network client: Digitally sign communications (always)'
+            'SYSTEM\CurrentControlSet\Services\LanManWorkstation\Parameters\EnableSecuritySignature' = 'Microsoft network client: Digitally sign communications (if server agrees)'
+            'SYSTEM\CurrentControlSet\Services\LanManWorkstation\Parameters\EnablePlainTextPassword' = 'Microsoft network client: Send unencrypted password to third-party SMB servers'
+            'SYSTEM\CurrentControlSet\Services\NetLogon\Parameters\RequireSignOrSeal' = 'Domain member: Digitally encrypt or sign secure channel data (always)'
+            'SYSTEM\CurrentControlSet\Services\NetLogon\Parameters\SealSecureChannel' = 'Domain member: Digitally encrypt secure channel data (when possible)'
+            'SYSTEM\CurrentControlSet\Control\Lsa\EveryoneIncludesAnonymous' = 'Network access: Let Everyone permissions apply to anonymous users'
+            'SYSTEM\CurrentControlSet\Control\Lsa\RestrictAnonymousSAM' = 'Network access: Do not allow anonymous enumeration of SAM accounts'
+            'SYSTEM\CurrentControlSet\Control\Lsa\RestrictAnonymous' = 'Network access: Do not allow anonymous enumeration of SAM accounts and shares'
+            'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters\RestrictNullSessAccess' = 'Network access: Restrict anonymous access to Named Pipes and Shares'
+            'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\FilterAdministratorToken' = 'User Account Control: Admin Approval Mode for the Built-in Administrator account'
+            'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\EnableUIADesktopToggle' = 'User Account Control: Allow UIAccess applications to prompt for elevation without using the secure desktop'
+            'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\EnableInstallerDetection' = 'User Account Control: Detect application installations and prompt for elevation'
+            'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\EnableLUA' = 'User Account Control: Run all administrators in Admin Approval Mode'
+        }
+        if ($booleanNames.ContainsKey($key)) {
+            $Name = $booleanNames[$key]
+            $Value = [bool][uint32]$Value
+        }
+        else {
+            switch ($key) {
+                'SYSTEM\CurrentControlSet\Control\Lsa\LmCompatibilityLevel' {
+                    $Name = 'Network security: LAN Manager authentication level'
+                    $levels = @('Send LM & NTLM responses',
+                        'Send LM & NTLM - use NTLMv2 session security if negotiated',
+                        'Send NTLM response only',
+                        'Send NTLMv2 response only',
+                        'Send NTLMv2 response only. Refuse LM',
+                        'Send NTLMv2 response only. Refuse LM & NTLM')
+                    if ([int]$Value -ge 0 -and [int]$Value -lt $levels.Count) {
+                        $Value = $levels[[int]$Value]
+                    }
+                }
+                'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\ConsentPromptBehaviorAdmin' {
+                    $Name = 'User Account Control: Behavior of the elevation prompt for administrators in Admin Approval Mode'
+                    $levels = @('Elevate without prompting',
+                        'Prompt for credentials on the secure desktop',
+                        'Prompt for consent on the secure desktop',
+                        'Prompt for credentials',
+                        'Prompt for consent',
+                        'Prompt for consent for non-Windows binaries')
+                    if ([int]$Value -ge 0 -and [int]$Value -lt $levels.Count) {
+                        $Value = $levels[[int]$Value]
+                    }
+                }
+                'SYSTEM\CurrentControlSet\Services\NTDS\Parameters\LDAPServerIntegrity' {
+                    $Name = 'Domain controller: LDAP server signing requirements'
+                    if ($Value -eq 2) {
+                        $Value = 'Require signature'
+                    }
+                    else {
+                        $Value = 'None'
+                    }
+                }
+                'SYSTEM\CurrentControlSet\Services\LDAP\LDAPClientIntegrity' {
+                    $Name = 'Network security: LDAP client signing requirements'
+                    $levels = @('None', 'Negotiate signing', 'Require signing')
+                    if ([int]$Value -ge 0 -and [int]$Value -lt 3) {
+                        $Value = $levels[[int]$Value]
+                    }
+                }
+                'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters\NullSessionPipes' {
+                    $Name = 'Network access: Named Pipes that can be accessed anonymously'
+                }
+                'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters\NullSessionShares' {
+                    $Name = 'Network access: Shares that can be access anonymously'
+                }
+            }
+        }
+        return @(foreach ($entry in @($Value)) {
+            [pscustomobject]@{
+                Name = $Name
+                Value = $entry
+            }
+        })
+    }
+
+    hidden [object] ConvertInfFlag([string]$Name, [string]$RawValue) {
+        # MS-GPSB flag domains are numeric and are not uniformly limited to 0/1.
+        $domains = @{
+            PasswordComplexity = @(10, 65536)
+            ClearTextPassword = @(10, 65536)
+            LSAAnonymousNameLookup = @(1, 9)
+            TicketValidateClient = @(5, 99999)
+            ForceLogoffWhenHourExpire = @(10, 9999999999)
+        }
+        if (-not $domains.ContainsKey($Name)) {
+            return $null
+        }
+        [uint64]$number = 0
+        $domain = $domains[$Name]
+        $pattern = '^[0-9]{1,' + $domain[0] + '}$'
+        $valid = $RawValue -cmatch $pattern -and [uint64]::TryParse($RawValue, [ref]$number) -and $number -le $domain[1]
+        return [pscustomobject]@{
+            Value = $(if ($valid) {
+                    $number -ne 0
+                }
+                else {
+                    $RawValue
+                })
+            ValueValid = [bool]$valid
+        }
+    }
+
+    [object] Read([string]$Path) {
+        return $this.ReadCore($Path, $null, $null)
+    }
+
+    hidden [object] ReadForCommand(
+        [string]$Path,
+        [Management.Automation.CommandInfo]$IniReader,
+        [Management.Automation.CommandInfo]$XmlReader
+    ) {
+        return $this.ReadCore($Path, $IniReader, $XmlReader)
+    }
+
+    hidden [object] ReadCore(
+        [string]$Path,
+        [Management.Automation.CommandInfo]$IniReader,
+        [Management.Automation.CommandInfo]$XmlReader
+    ) {
+        $this.ValidatePath($Path)
+        $root = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if (-not $root.PSIsContainer) {
+            throw 'GPO path must be a directory'
+        }
+        $security = [Collections.ArrayList]::new()
+        $registry = [Collections.ArrayList]::new()
+        $xmlFiles = [Collections.ArrayList]::new()
+        $files = [Collections.ArrayList]::new()
+        $iniSettings = [Collections.ArrayList]::new()
+        $sysvolVersion = $null
+        # MS-GPSB assigns these keys to distinct client-side stores by section.
+        $accountKeys = @{
+            'System Access' = @('MinimumPasswordAge',
+                'MaximumPasswordAge',
+                'MinimumPasswordLength',
+                'PasswordComplexity',
+                'PasswordHistorySize',
+                'ClearTextPassword',
+                'RequireLogonToChangePassword',
+                'LockoutBadCount',
+                'ResetLockoutCount',
+                'LockoutDuration',
+                'ForceLogoffWhenHourExpire',
+                'LSAAnonymousNameLookup',
+                'EnableAdminAccount',
+                'EnableGuestAccount',
+                'NewAdministratorName',
+                'NewGuestName')
+            'Kerberos Policy' = @('MaxTicketAge', 'MaxRenewAge', 'MaxServiceAge', 'MaxClockSkew', 'TicketValidateClient')
+        }
+        foreach ($file in Get-ChildItem -LiteralPath $root.FullName -File -Force -ErrorAction Stop) {
+            $kind = 'Unparsed'
+            if ($file.Name -ieq 'GPT.INI') {
+                $kind = 'Metadata'
+                $ini = if ($IniReader) {
+                    & $IniReader $file.FullName
+                }
+                else {
+                    $this.ReadIni($file.FullName)
+                }
+                if ($ini.Contains('General') -and $ini['General'].Contains('Version')) {
+                    $sysvolVersion = [uint32]$ini['General']['Version']
+                }
+            }
+            $null = $files.Add([pscustomobject]@{
+                    Scope = 'Gpo'
+                    Path = $file.Name
+                    Kind = $kind
+                    Length = $file.Length
+                })
+        }
+        foreach ($pair in @(@('Computer', 'Machine'), @('User', 'User'))) {
+            $scope = $pair[0]
+            $side = Join-Path $root.FullName $pair[1]
+            try {
+                $null = Get-Item -LiteralPath $side -Force -ErrorAction Stop
+            }
+            catch [System.Management.Automation.ItemNotFoundException] {
+                continue
+            }
+            foreach ($file in Get-ChildItem -LiteralPath $side -Recurse -File -Force -ErrorAction Stop) {
+                $relative = $file.FullName.Substring($root.FullName.TrimEnd('\', '/').Length + 1)
+                $normalized = $relative.Replace('\', '/')
+                $relative = $normalized
+                $securityTemplate = $normalized -ieq ('{0}/Microsoft/Windows NT/SecEdit/GptTmpl.inf' -f $pair[1])
+                $kind = 'Unparsed'
+                if ($file.Extension -in '.ini', '.inf') {
+                    $kind = 'Ini'
+                    $ini = if ($IniReader) {
+                        & $IniReader $file.FullName
+                    }
+                    else {
+                        $this.ReadIni($file.FullName)
+                    }
+                    foreach ($section in $ini.Keys) {
+                        foreach ($entry in $ini[$section].GetEnumerator()) {
+                            $iniValue = $entry.Value
+                            if ($section -eq 'Registry Values' -and (Test-ADAnalyzerSecretName $entry.Key)) {
+                                $parts = $this.SplitCsv($entry.Value)
+                                $iniValue = if ($parts.Count -ge 2) {
+                                    $parts[1..($parts.Count - 1)] -join ','
+                                }
+                                else {
+                                    ''
+                                }
+                            }
+                            $analyzed = $securityTemplate -and
+                            (($section -in 'Privilege Rights',
+                                'Registry Values') -or
+                            ($accountKeys.ContainsKey($section) -and
+                            $entry.Key -in $accountKeys[$section]))
+                            $null = $iniSettings.Add((ConvertTo-ADAnalyzerSecretRecord ([pscustomobject]@{
+                                            Scope = $scope
+                                            Section = $section
+                                            Name = $entry.Key
+                                            Value = $iniValue
+                                            Source = $relative
+                                            Analyzed = $analyzed
+                                        })))
+                        }
+                    }
+                    if (-not $securityTemplate) {
+                        $null = $files.Add([pscustomobject]@{
+                                Scope = $scope
+                                Path = $relative
+                                Kind = $kind
+                                Length = $file.Length
+                            })
+                        continue
+                    }
+                    $kind = 'SecurityTemplate'
+                    foreach ($section in @('System Access', 'Kerberos Policy')) {
+                        if (-not $ini.Contains($section)) {
+                            continue
+                        }
+                        foreach ($entry in $ini[$section].GetEnumerator()) {
+                            if ($entry.Key -notin $accountKeys[$section]) {
+                                continue
+                            }
+                            $flag = $this.ConvertInfFlag($entry.Key, $entry.Value)
+                            $value = $entry.Value
+                            if ($null -ne $flag) {
+                                $value = $flag.Value
+                            }
+                            elseif ($entry.Key -ne 'RequireLogonToChangePassword') {
+                                if ($value -match '^-?\d+$') {
+                                    $value = [long]$value
+                                }
+                                if ($value -is [string] -and $value.StartsWith('"')) {
+                                    $value = ($this.SplitCsv($value))[0]
+                                }
+                            }
+                            $name = $entry.Key
+                            $settingKind = 'Account'
+                            if ($entry.Key -eq 'LSAAnonymousNameLookup') {
+                                $name = 'Network access: Allow anonymous SID/Name translation'
+                                $settingKind = 'SecurityOptions'
+                            }
+                            $record = [ordered]@{
+                                Scope = $scope
+                                Kind = $settingKind
+                                Name = $name
+                                Value = $value
+                                Source = $relative
+                            }
+                            if ($null -ne $flag) {
+                                $record.ValueValid = $flag.ValueValid
+                            }
+                            $null = $security.Add([pscustomobject]$record)
+                        }
+                    }
+                    if ($ini.Contains('Privilege Rights')) {
+                        foreach ($entry in $ini['Privilege Rights'].GetEnumerator()) {
+                            $members = if ($entry.Value) {
+                                , $this.SplitCsv($entry.Value)
+                            }
+                            else {
+                                @()
+                            }
+                            $null = $security.Add([pscustomobject]@{
+                                    Scope = $scope
+                                    Kind = 'UserRightsAssignment'
+                                    Name = $entry.Key
+                                    Value = $members
+                                    Source = $relative
+                                })
+                        }
+                    }
+                    if ($ini.Contains('Registry Values')) {
+                        foreach ($entry in $ini['Registry Values'].GetEnumerator()) {
+                            $parts = $this.SplitCsv($entry.Value)
+                            if ($parts.Count -lt 2) {
+                                throw "Invalid registry setting in $relative"
+                            }
+                            $value = if ($parts[0] -eq '7') {
+                                , $parts[1..($parts.Count - 1)]
+                            }
+                            else {
+                                $parts[1..($parts.Count - 1)] -join ','
+                            }
+                            if ($parts[0] -eq '4' -and $value -match '^\d+$') {
+                                $value = [uint32]$value
+                            }
+                            foreach ($option in $this.ConvertSecurityOption($entry.Key, $value)) {
+                                $null = $security.Add([pscustomobject]@{
+                                        Scope = $scope
+                                        Kind = 'SecurityOptions'
+                                        Name = $option.Name
+                                        Value = $option.Value
+                                        Source = $relative
+                                    })
+                            }
+                        }
+                    }
+                }
+                elseif ($normalized -ieq ('{0}/Registry.pol' -f $pair[1])) {
+                    $kind = 'RegistryPolicy'
+                    foreach ($item in $this.ReadRegistryPolicy($file.FullName, $scope)) {
+                        $item.Source = $pair[1] + '/Registry.pol'
+                        $null = $registry.Add($item)
+                    }
+                }
+                elseif ($file.Extension -ieq '.xml') {
+                    $kind = 'Xml'
+                    $xml = if ($XmlReader) {
+                        & $XmlReader $file.FullName
+                    }
+                    else {
+                        $this.ReadXml($file.FullName)
+                    }
+                    $xmlKind = if ($relative -match '(^|[\\/])Preferences[\\/]') {
+                        'Preferences'
+                    }
+                    else {
+                        'Xml'
+                    }
+                    $null = $xmlFiles.Add([pscustomobject]@{
+                            Scope = $scope
+                            Kind = $xmlKind
+                            Path = $relative
+                            Xml = (ConvertTo-ADAnalyzerSecretIndicatorXml $xml).OuterXml
+                        })
+                }
+                $null = $files.Add([pscustomobject]@{
+                        Scope = $scope
+                        Path = $relative
+                        Kind = $kind
+                        Length = $file.Length
+                    })
+            }
+        }
+        return [pscustomobject]@{
+            Path = $root.FullName
+            SysvolVersion = $sysvolVersion
+            SecuritySettings = @($security | ForEach-Object { ConvertTo-ADAnalyzerSecretRecord $_ })
+            RegistrySettings = $registry.ToArray()
+            XmlFiles = $xmlFiles.ToArray()
+            IniSettings = $iniSettings.ToArray()
+            Files = $files.ToArray()
+            UnparsedFiles = @($files | Where-Object Kind -eq 'Unparsed')
+        }
+    }
+
+}
+
+function Read-AnalyzerPolicyIni {
+    param([Parameter(Mandatory)][string]$Path)
+    return [ADAnalyzerGpoReader]::new().ReadIni($Path)
 }
 
 function Split-AnalyzerPolicyCsv {
     param([string]$Value)
-    $items = [Collections.Generic.List[string]]::new()
-    $part = [Text.StringBuilder]::new()
-    $quoted = $false
-    for ($i = 0; $i -lt $Value.Length; $i++) {
-        $c = $Value[$i]
-        if ($c -eq '"') {
-            if ($quoted -and $i + 1 -lt $Value.Length -and $Value[$i + 1] -eq '"') {
-                $null = $part.Append('"')
-                $i++
-            }
-            else {
-                $quoted = -not $quoted
-            }
-        }
-        elseif ($c -eq ',' -and -not $quoted) {
-            $items.Add($part.ToString().Trim())
-            $null = $part.Clear()
-        }
-        else {
-            $null = $part.Append($c)
-        }
-    }
-    if ($quoted) {
-        throw 'Unterminated quoted policy value'
-    }
-    $items.Add($part.ToString().Trim())
-    return , $items.ToArray()
+    return , ([ADAnalyzerGpoReader]::new().SplitCsv($Value))
 }
 
 function Read-AnalyzerRegistryPolicy {
@@ -68,133 +616,13 @@ function Read-AnalyzerRegistryPolicy {
         [ValidateSet('Computer', 'User')][string]$Scope
 
     )
-    $stream = [IO.File]::OpenRead($Path)
-    $reader = [IO.BinaryReader]::new($stream, [Text.Encoding]::Unicode)
-    try {
-        if ([Text.Encoding]::ASCII.GetString($reader.ReadBytes(4)) -ne 'PReg' -or $reader.ReadUInt32() -ne 1) {
-            throw 'Invalid Registry.pol header/version'
-        }
-        while ($stream.Position -lt $stream.Length) {
-            if ($reader.ReadUInt16() -ne 91) {
-                throw 'Invalid Registry.pol opening delimiter'
-            }
-            $strings = @()
-            foreach ($field in @('key', 'value')) {
-                $text = [Text.StringBuilder]::new()
-                while (($c = $reader.ReadUInt16()) -ne 0) {
-                    $null = $text.Append([char]$c)
-                }
-                if ($reader.ReadUInt16() -ne 59) {
-                    throw "Invalid Registry.pol $field delimiter"
-                }
-                $strings += $text.ToString()
-            }
-            $type = $reader.ReadUInt32()
-            if ($reader.ReadUInt16() -ne 59) {
-                throw 'Invalid Registry.pol type delimiter'
-            }
-            $size = $reader.ReadUInt32()
-            if ($reader.ReadUInt16() -ne 59) {
-                throw 'Invalid Registry.pol size delimiter'
-            }
-            if ($size -gt [int]::MaxValue -or $size -gt ($stream.Length - $stream.Position - 2)) {
-                throw 'Invalid Registry.pol data length'
-            }
-            $bytes = $reader.ReadBytes([int]$size)
-            if ($reader.ReadUInt16() -ne 93) {
-                throw 'Invalid Registry.pol closing delimiter'
-            }
-            $value = if ($size -eq 0) {
-                , [byte[]]@()
-            }
-            else {
-                switch ($type) {
-                    { $_ -in 1, 2 } {
-                        if ($size % 2) {
-                            throw 'Invalid UTF-16 registry value'
-                        }
-                        [Text.Encoding]::Unicode.GetString($bytes).TrimEnd([char]0)
-                    }
-                    4 {
-                        if ($size -ne 4) {
-                            throw 'Invalid DWORD length'
-                        }
-                        [BitConverter]::ToUInt32($bytes, 0)
-                    }
-                    5 {
-                        if ($size -ne 4) {
-                            throw 'Invalid big-endian DWORD length'
-                        }
-                        $copy = [byte[]]$bytes.Clone()
-                        [Array]::Reverse($copy)
-                        [BitConverter]::ToUInt32($copy, 0)
-                    }
-                    7 {
-                        if ($size % 2) {
-                            throw 'Invalid multi-string length'
-                        }
-                        $decoded = [Text.Encoding]::Unicode.GetString($bytes).TrimEnd([char]0)
-                        if ($decoded) {
-                            , $decoded.Split([char]0)
-                        }
-                        else {
-                            , [string[]]@()
-                        }
-                    }
-                    11 {
-                        if ($size -ne 8) {
-                            throw 'Invalid QWORD length'
-                        }
-                        [BitConverter]::ToUInt64($bytes, 0)
-                    }
-                    default {
-                        , $bytes
-                    }
-                }
-            }
-            ConvertTo-ADAnalyzerSecretRecord ([pscustomobject]@{
-                    Scope = $Scope
-                    Hive = $(if ($Scope -eq 'Computer') {
-                            'HKLM'
-                        }
-                        else {
-                            'HKCU'
-                        })
-                    Key = $strings[0]
-                    ValueName = $strings[1]
-                    Type = $type
-                    Value = $value
-                    RawData = $bytes
-                    KeyOnly = ($size -eq 0 -and ($strings[1] -eq '' -or ($type -in 4, 5, 11 -and -not $strings[1].StartsWith('**'))))
-                    DeletionDirective = $strings[1].StartsWith('**')
-                    Source = $Path
-                })
-        }
-    }
-    catch {
-        throw "Unable to parse '$Path': $($_.Exception.Message)"
-    }
-    finally {
-        $reader.Dispose()
-        $stream.Dispose()
-    }
+    $reader = [ADAnalyzerGpoReader]::new()
+    $null = $reader.ReadRegistryPolicyCore($Path, $Scope, $PSCmdlet)
 }
 
 function Read-AnalyzerPolicyXml {
     param([string]$Path)
-    $settings = [Xml.XmlReaderSettings]::new()
-    $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
-    $settings.XmlResolver = $null
-    $reader = [Xml.XmlReader]::Create($Path, $settings)
-    try {
-        $xml = [Xml.XmlDocument]::new()
-        $xml.XmlResolver = $null
-        $xml.Load($reader)
-        return $xml
-    }
-    finally {
-        $reader.Dispose()
-    }
+    return [ADAnalyzerGpoReader]::new().ReadXml($Path)
 }
 
 function ConvertTo-AnalyzerSecurityOption {
@@ -203,86 +631,7 @@ function ConvertTo-AnalyzerSecurityOption {
         $Value
 
     )
-    # Keep unknown registry settings verbatim. These names match the analyzer's
-    # existing security-option contract; raw INF values remain in IniSettings.
-    $key = $Name -replace '^(?i)MACHINE\\', ''
-    $booleanNames = @{
-        'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters\RequireSecuritySignature' = 'Microsoft network server: Digitally sign communications (always)'
-        'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters\EnableSecuritySignature' = 'Microsoft network server: Digitally sign communications (if client agrees)'
-        'SYSTEM\CurrentControlSet\Services\LanManWorkstation\Parameters\RequireSecuritySignature' = 'Microsoft network client: Digitally sign communications (always)'
-        'SYSTEM\CurrentControlSet\Services\LanManWorkstation\Parameters\EnableSecuritySignature' = 'Microsoft network client: Digitally sign communications (if server agrees)'
-        'SYSTEM\CurrentControlSet\Services\LanManWorkstation\Parameters\EnablePlainTextPassword' = 'Microsoft network client: Send unencrypted password to third-party SMB servers'
-        'SYSTEM\CurrentControlSet\Services\NetLogon\Parameters\RequireSignOrSeal' = 'Domain member: Digitally encrypt or sign secure channel data (always)'
-        'SYSTEM\CurrentControlSet\Services\NetLogon\Parameters\SealSecureChannel' = 'Domain member: Digitally encrypt secure channel data (when possible)'
-        'SYSTEM\CurrentControlSet\Control\Lsa\EveryoneIncludesAnonymous' = 'Network access: Let Everyone permissions apply to anonymous users'
-        'SYSTEM\CurrentControlSet\Control\Lsa\RestrictAnonymousSAM' = 'Network access: Do not allow anonymous enumeration of SAM accounts'
-        'SYSTEM\CurrentControlSet\Control\Lsa\RestrictAnonymous' = 'Network access: Do not allow anonymous enumeration of SAM accounts and shares'
-        'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters\RestrictNullSessAccess' = 'Network access: Restrict anonymous access to Named Pipes and Shares'
-        'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\FilterAdministratorToken' = 'User Account Control: Admin Approval Mode for the Built-in Administrator account'
-        'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\EnableUIADesktopToggle' = 'User Account Control: Allow UIAccess applications to prompt for elevation without using the secure desktop'
-        'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\EnableInstallerDetection' = 'User Account Control: Detect application installations and prompt for elevation'
-        'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\EnableLUA' = 'User Account Control: Run all administrators in Admin Approval Mode'
-    }
-    if ($booleanNames.ContainsKey($key)) {
-        $Name = $booleanNames[$key]
-        $Value = [bool][uint32]$Value
-    }
-    else {
-        switch ($key) {
-            'SYSTEM\CurrentControlSet\Control\Lsa\LmCompatibilityLevel' {
-                $Name = 'Network security: LAN Manager authentication level'
-                $levels = @('Send LM & NTLM responses',
-                    'Send LM & NTLM - use NTLMv2 session security if negotiated',
-                    'Send NTLM response only',
-                    'Send NTLMv2 response only',
-                    'Send NTLMv2 response only. Refuse LM',
-                    'Send NTLMv2 response only. Refuse LM & NTLM')
-                if ([int]$Value -ge 0 -and [int]$Value -lt $levels.Count) {
-                    $Value = $levels[[int]$Value]
-                }
-            }
-            'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\ConsentPromptBehaviorAdmin' {
-                $Name = 'User Account Control: Behavior of the elevation prompt for administrators in Admin Approval Mode'
-                $levels = @('Elevate without prompting',
-                    'Prompt for credentials on the secure desktop',
-                    'Prompt for consent on the secure desktop',
-                    'Prompt for credentials',
-                    'Prompt for consent',
-                    'Prompt for consent for non-Windows binaries')
-                if ([int]$Value -ge 0 -and [int]$Value -lt $levels.Count) {
-                    $Value = $levels[[int]$Value]
-                }
-            }
-            'SYSTEM\CurrentControlSet\Services\NTDS\Parameters\LDAPServerIntegrity' {
-                $Name = 'Domain controller: LDAP server signing requirements'
-                if ($Value -eq 2) {
-                    $Value = 'Require signature'
-                }
-                else {
-                    $Value = 'None'
-                }
-            }
-            'SYSTEM\CurrentControlSet\Services\LDAP\LDAPClientIntegrity' {
-                $Name = 'Network security: LDAP client signing requirements'
-                $levels = @('None', 'Negotiate signing', 'Require signing')
-                if ([int]$Value -ge 0 -and [int]$Value -lt 3) {
-                    $Value = $levels[[int]$Value]
-                }
-            }
-            'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters\NullSessionPipes' {
-                $Name = 'Network access: Named Pipes that can be accessed anonymously'
-            }
-            'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters\NullSessionShares' {
-                $Name = 'Network access: Shares that can be access anonymously'
-            }
-        }
-    }
-    foreach ($entry in @($Value)) {
-        [pscustomobject]@{
-            Name = $Name
-            Value = $entry
-        }
-    }
+    return [ADAnalyzerGpoReader]::new().ConvertSecurityOption($Name, $Value)
 }
 
 function ConvertFrom-ADAnalyzerInfFlag {
@@ -291,261 +640,18 @@ function ConvertFrom-ADAnalyzerInfFlag {
         [AllowEmptyString()][string]$RawValue
 
     )
-    # MS-GPSB flag domains are numeric and are not uniformly limited to 0/1.
-    $domains = @{
-        PasswordComplexity = @(10, 65536)
-        ClearTextPassword = @(10, 65536)
-        LSAAnonymousNameLookup = @(1, 9)
-        TicketValidateClient = @(5, 99999)
-        ForceLogoffWhenHourExpire = @(10, 9999999999)
-    }
-    if (-not $domains.ContainsKey($Name)) {
-        return $null
-    }
-    [uint64]$number = 0
-    $domain = $domains[$Name]
-    $pattern = '^[0-9]{1,' + $domain[0] + '}$'
-    $valid = $RawValue -cmatch $pattern -and [uint64]::TryParse($RawValue, [ref]$number) -and $number -le $domain[1]
-    [pscustomobject]@{
-        Value = $(if ($valid) {
-                $number -ne 0
-            }
-            else {
-                $RawValue
-            })
-        ValueValid = [bool]$valid
-    }
+    return [ADAnalyzerGpoReader]::new().ConvertInfFlag($Name, $RawValue)
 }
 
 function Read-ADAnalyzerGpo {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
-    $root = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    if (-not $root.PSIsContainer) {
-        throw 'GPO path must be a directory'
-    }
-    $security = [Collections.ArrayList]::new()
-    $registry = [Collections.ArrayList]::new()
-    $xmlFiles = [Collections.ArrayList]::new()
-    $files = [Collections.ArrayList]::new()
-    $iniSettings = [Collections.ArrayList]::new()
-    $sysvolVersion = $null
-    # MS-GPSB assigns these keys to distinct client-side stores by section.
-    $accountKeys = @{
-        'System Access' = @('MinimumPasswordAge',
-            'MaximumPasswordAge',
-            'MinimumPasswordLength',
-            'PasswordComplexity',
-            'PasswordHistorySize',
-            'ClearTextPassword',
-            'RequireLogonToChangePassword',
-            'LockoutBadCount',
-            'ResetLockoutCount',
-            'LockoutDuration',
-            'ForceLogoffWhenHourExpire',
-            'LSAAnonymousNameLookup',
-            'EnableAdminAccount',
-            'EnableGuestAccount',
-            'NewAdministratorName',
-            'NewGuestName')
-        'Kerberos Policy' = @('MaxTicketAge', 'MaxRenewAge', 'MaxServiceAge', 'MaxClockSkew', 'TicketValidateClient')
-    }
-    foreach ($file in Get-ChildItem -LiteralPath $root.FullName -File -Force -ErrorAction Stop) {
-        $kind = 'Unparsed'
-        if ($file.Name -ieq 'GPT.INI') {
-            $kind = 'Metadata'
-            $ini = Read-AnalyzerPolicyIni $file.FullName
-            if ($ini.Contains('General') -and $ini['General'].Contains('Version')) {
-                $sysvolVersion = [uint32]$ini['General']['Version']
-            }
-        }
-        $null = $files.Add([pscustomobject]@{
-                Scope = 'Gpo'
-                Path = $file.Name
-                Kind = $kind
-                Length = $file.Length
-            })
-    }
-    foreach ($pair in @(@('Computer', 'Machine'), @('User', 'User'))) {
-        $scope = $pair[0]
-        $side = Join-Path $root.FullName $pair[1]
-        try {
-            $null = Get-Item -LiteralPath $side -Force -ErrorAction Stop
-        }
-        catch [System.Management.Automation.ItemNotFoundException] {
-            continue
-        }
-        foreach ($file in Get-ChildItem -LiteralPath $side -Recurse -File -Force -ErrorAction Stop) {
-            $relative = $file.FullName.Substring($root.FullName.TrimEnd('\', '/').Length + 1)
-            $normalized = $relative.Replace('\', '/')
-            $relative = $normalized
-            $securityTemplate = $normalized -ieq ('{0}/Microsoft/Windows NT/SecEdit/GptTmpl.inf' -f $pair[1])
-            $kind = 'Unparsed'
-            if ($file.Extension -in '.ini', '.inf') {
-                $kind = 'Ini'
-                $ini = Read-AnalyzerPolicyIni $file.FullName
-                foreach ($section in $ini.Keys) {
-                    foreach ($entry in $ini[$section].GetEnumerator()) {
-                        $iniValue = $entry.Value
-                        if ($section -eq 'Registry Values' -and (Test-ADAnalyzerSecretName $entry.Key)) {
-                            $parts = Split-AnalyzerPolicyCsv $entry.Value
-                            $iniValue = if ($parts.Count -ge 2) {
-                                $parts[1..($parts.Count - 1)] -join ','
-                            }
-                            else {
-                                ''
-                            }
-                        }
-                        $analyzed = $securityTemplate -and
-                        (($section -in 'Privilege Rights',
-                            'Registry Values') -or
-                        ($accountKeys.ContainsKey($section) -and
-                        $entry.Key -in $accountKeys[$section]))
-                        $null = $iniSettings.Add((ConvertTo-ADAnalyzerSecretRecord ([pscustomobject]@{
-                                        Scope = $scope
-                                        Section = $section
-                                        Name = $entry.Key
-                                        Value = $iniValue
-                                        Source = $relative
-                                        Analyzed = $analyzed
-                                    })))
-                    }
-                }
-                if (-not $securityTemplate) {
-                    $null = $files.Add([pscustomobject]@{
-                            Scope = $scope
-                            Path = $relative
-                            Kind = $kind
-                            Length = $file.Length
-                        })
-                    continue
-                }
-                $kind = 'SecurityTemplate'
-                foreach ($section in @('System Access', 'Kerberos Policy')) {
-                    if (-not $ini.Contains($section)) {
-                        continue
-                    }
-                    foreach ($entry in $ini[$section].GetEnumerator()) {
-                        if ($entry.Key -notin $accountKeys[$section]) {
-                            continue
-                        }
-                        $flag = ConvertFrom-ADAnalyzerInfFlag -Name $entry.Key -RawValue $entry.Value
-                        $value = $entry.Value
-                        if ($null -ne $flag) {
-                            $value = $flag.Value
-                        }
-                        elseif ($entry.Key -ne 'RequireLogonToChangePassword') {
-                            if ($value -match '^-?\d+$') {
-                                $value = [long]$value
-                            }
-                            if ($value -is [string] -and $value.StartsWith('"')) {
-                                $value = (Split-AnalyzerPolicyCsv $value)[0]
-                            }
-                        }
-                        $name = $entry.Key
-                        $settingKind = 'Account'
-                        if ($entry.Key -eq 'LSAAnonymousNameLookup') {
-                            $name = 'Network access: Allow anonymous SID/Name translation'
-                            $settingKind = 'SecurityOptions'
-                        }
-                        $record = [ordered]@{
-                            Scope = $scope
-                            Kind = $settingKind
-                            Name = $name
-                            Value = $value
-                            Source = $relative
-                        }
-                        if ($null -ne $flag) {
-                            $record.ValueValid = $flag.ValueValid
-                        }
-                        $null = $security.Add([pscustomobject]$record)
-                    }
-                }
-                if ($ini.Contains('Privilege Rights')) {
-                    foreach ($entry in $ini['Privilege Rights'].GetEnumerator()) {
-                        $members = if ($entry.Value) {
-                            Split-AnalyzerPolicyCsv $entry.Value
-                        }
-                        else {
-                            @()
-                        }
-                        $null = $security.Add([pscustomobject]@{
-                                Scope = $scope
-                                Kind = 'UserRightsAssignment'
-                                Name = $entry.Key
-                                Value = $members
-                                Source = $relative
-                            })
-                    }
-                }
-                if ($ini.Contains('Registry Values')) {
-                    foreach ($entry in $ini['Registry Values'].GetEnumerator()) {
-                        $parts = Split-AnalyzerPolicyCsv $entry.Value
-                        if ($parts.Count -lt 2) {
-                            throw "Invalid registry setting in $relative"
-                        }
-                        $value = if ($parts[0] -eq '7') {
-                            , $parts[1..($parts.Count - 1)]
-                        }
-                        else {
-                            $parts[1..($parts.Count - 1)] -join ','
-                        }
-                        if ($parts[0] -eq '4' -and $value -match '^\d+$') {
-                            $value = [uint32]$value
-                        }
-                        foreach ($option in ConvertTo-AnalyzerSecurityOption $entry.Key $value) {
-                            $null = $security.Add([pscustomobject]@{
-                                    Scope = $scope
-                                    Kind = 'SecurityOptions'
-                                    Name = $option.Name
-                                    Value = $option.Value
-                                    Source = $relative
-                                })
-                        }
-                    }
-                }
-            }
-            elseif ($normalized -ieq ('{0}/Registry.pol' -f $pair[1])) {
-                $kind = 'RegistryPolicy'
-                foreach ($item in @(Read-AnalyzerRegistryPolicy $file.FullName $scope)) {
-                    $item.Source = $pair[1] + '/Registry.pol'
-                    $null = $registry.Add($item)
-                }
-            }
-            elseif ($file.Extension -ieq '.xml') {
-                $kind = 'Xml'
-                $xml = Read-AnalyzerPolicyXml $file.FullName
-                $xmlKind = if ($relative -match '(^|[\\/])Preferences[\\/]') {
-                    'Preferences'
-                }
-                else {
-                    'Xml'
-                }
-                $null = $xmlFiles.Add([pscustomobject]@{
-                        Scope = $scope
-                        Kind = $xmlKind
-                        Path = $relative
-                        Xml = (ConvertTo-ADAnalyzerSecretIndicatorXml $xml).OuterXml
-                    })
-            }
-            $null = $files.Add([pscustomobject]@{
-                    Scope = $scope
-                    Path = $relative
-                    Kind = $kind
-                    Length = $file.Length
-                })
-        }
-    }
-    [pscustomobject]@{
-        Path = $root.FullName
-        SysvolVersion = $sysvolVersion
-        SecuritySettings = @($security | ForEach-Object { ConvertTo-ADAnalyzerSecretRecord $_ })
-        RegistrySettings = $registry.ToArray()
-        XmlFiles = $xmlFiles.ToArray()
-        IniSettings = $iniSettings.ToArray()
-        Files = $files.ToArray()
-        UnparsedFiles = @($files | Where-Object Kind -eq 'Unparsed')
-    }
+    $reader = [ADAnalyzerGpoReader]::new()
+    return $reader.ReadForCommand(
+        $Path,
+        (Get-Command Read-AnalyzerPolicyIni),
+        (Get-Command Read-AnalyzerPolicyXml)
+    )
 }
 
 function ConvertTo-ADAnalyzerProvidedGpoPolicy {
