@@ -756,464 +756,355 @@ function Test-ADAnalyzerPolicyComparison {
     }
 }
 
-function Test-ADAnalyzerGpoPolicy {
-    <# .SYNOPSIS Assesses stored GPO content without querying a domain or calculating RSoP.
-       .DESCRIPTION RegistryRules entries use Id, Hive, Key, ValueName, Operator, Expected and Severity.
-       ExpectedGpoSettings use Kind (Account/SecurityOptions/Registry), Name, Operator and Expected.
-       Unknown applicability is preserved; a configured-risk finding is not proof that a target applies it.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]$Gpo,
-        [Parameter(Mandatory)]$Policy,
-        [Parameter(Mandatory)][hashtable]$Profile
+class ADAnalyzerGpoPolicyEvaluator {
+    ADAnalyzerGpoPolicyEvaluator() {
+    }
 
-    )
-    Assert-ADAnalyzerValueBaseline -Profile $Profile
-    $identity = [string](Get-ADAnalyzerPolicyValue $Gpo Id (Get-ADAnalyzerPolicyValue $Gpo DisplayName 'offline'))
-    $target = 'GPO:' + $identity
-    $xmlRecords = @(Get-ADAnalyzerPolicyXmlRecords $Policy.XmlFiles)
-    $secretCount = 0
-    $xmlErrors = 0
-    $xmlSecretChecks = [Collections.Generic.List[object]]::new()
-    foreach ($xmlRecord in $xmlRecords) {
-        if (-not $xmlRecord.Valid) {
-            $xmlErrors++
-            New-ADAnalyzerCheck `
-                -RuleId 'GPO.Xml.Readable' `
-                -Status Unreadable `
-                -Severity Medium `
-                -Category PolicyCoverage `
-                -Target ($target + '/' + $xmlRecord.File.Path) `
-                -Observed 'Unreadable XML' `
-                -Expected 'Well-formed XML without DTDs' `
-                -Evidence @{
-                Path = $xmlRecord.File.Path
-            } `
-                -Message 'XML could not be parsed; its content was not included in the assessment.' `
-                -Applicability Unknown
-            continue
+    [object[]] Evaluate([object]$Gpo, [object]$Policy, [hashtable]$Profile) {
+        return $this.EvaluateCore($Gpo, $Policy, $Profile, $null, 'Stop')
+    }
+
+    hidden [void] EvaluateForCommand(
+        [object]$Gpo,
+        [object]$Policy,
+        [hashtable]$Profile,
+        [Management.Automation.PSCmdlet]$CommandContext,
+        [Management.Automation.ActionPreference]$ErrorPreference
+    ) {
+        $null = $this.EvaluateCore($Gpo, $Policy, $Profile, $CommandContext, $ErrorPreference)
+    }
+
+    hidden [object[]] EvaluateCore(
+        [object]$Gpo,
+        [object]$Policy,
+        [hashtable]$Profile,
+        [Management.Automation.PSCmdlet]$CommandContext,
+        [Management.Automation.ActionPreference]$ErrorPreference
+    ) {
+        if ($null -eq $Gpo -or $null -eq $Policy -or $null -eq $Profile) {
+            throw 'Gpo, Policy and Profile are required.'
         }
-        $credentialOwners = [Collections.Generic.HashSet[Xml.XmlElement]]::new()
-        foreach ($attribute in @($xmlRecord.Document.SelectNodes('//@*') | Where-Object { ($_.LocalName -ieq 'cpassword' -and
-                        -not [string]::IsNullOrEmpty($_.Value)) -or
-                    ($_.LocalName -ieq 'cpasswordPresent' -and
-                    $_.Value -ieq 'true') })) {
-            if (-not $credentialOwners.Add($attribute.OwnerElement)) {
-                continue
-            }
-            $secretCount++
-            $item = $attribute.OwnerElement.ParentNode
-            $safe = [ordered]@{
-                Path = $xmlRecord.File.Path
-                ItemUid = (Get-ADAnalyzerXmlAttribute $item uid)
-                ItemName = (Get-ADAnalyzerXmlAttribute $item name)
-                Account = (Get-ADAnalyzerXmlAttribute $attribute.OwnerElement userName)
-                SecretPresent = $true
-            }
-            $attributePath = (Get-ADAnalyzerPolicyXmlPath $attribute.OwnerElement) + '/@cpassword'
-            $safe['Attribute'] = 'cpassword'
-            $safe['ItemPath'] = $attributePath
-            $xmlSecretChecks.Add(@{
-                    RuleId = 'GPO.Preferences.CPassword'
-                    Status = 'Fail'
-                    Severity = 'Critical'
-                    Category = 'CredentialExposure'
-                    Target = (Join-ADAnalyzerPolicyIdentity @($target, $xmlRecord.File.Scope, $xmlRecord.File.Path, $attributePath))
-                    Observed = $true
-                    Expected = $false
-                    Evidence = $safe
-                    Message = 'A recoverable preference credential remains in stored policy. Remove the exposed credential and rotate the affected password; only its presence is reported.'
-                    Applicability = 'Configured'
-                })
+        Assert-ADAnalyzerValueBaseline -Profile $Profile
+        $identity = [string](Get-ADAnalyzerPolicyValue $Gpo Id (Get-ADAnalyzerPolicyValue $Gpo DisplayName 'offline'))
+        $state = @{
+            Gpo = $Gpo
+            Policy = $Policy
+            Profile = $Profile
+            Target = 'GPO:' + $identity
+            Registry = @()
+            Checks = [Collections.Generic.List[object]]::new()
+            CommandContext = $CommandContext
+            ErrorPreference = $ErrorPreference
         }
-        $presenceDocument = ConvertTo-ADAnalyzerSecretIndicatorXml $xmlRecord.Document
-        foreach ($record in @($presenceDocument.SelectNodes('//*[@SecretPresent]'))) {
-            $name = Get-ADAnalyzerXmlSecretName $record
-            if (-not $name) {
-                continue
+        $this.EvaluateCredentials($state)
+        $this.EvaluateAccount($state)
+        $this.EvaluateSecurity($state)
+        $this.EvaluateMembershipAndRights($state)
+        $this.EvaluateCustomBaseline($state)
+        $this.EvaluateCoverage($state)
+        return $state.Checks.ToArray()
+    }
+
+    hidden [void] Emit([hashtable]$State, [Collections.IDictionary]$Parameters) {
+        $ErrorActionPreference = if ($State.ErrorPreference -eq 'Stop') {
+            'Stop'
+        }
+        else {
+            'Continue'
+        }
+        $arguments = @{}
+        foreach ($name in $Parameters.Keys) {
+            $arguments[$name] = $Parameters[$name]
+        }
+        if ($State.ErrorPreference -eq 'Ignore') {
+            $arguments.ErrorAction = 'Ignore'
+        }
+        foreach ($check in @(New-ADAnalyzerCheck @arguments 2>&1)) {
+            if ($check -is [Management.Automation.ErrorRecord]) {
+                if ($null -eq $State.CommandContext) {
+                    throw $check
+                }
+                $State.CommandContext.WriteError($check)
             }
-            $present = $record.GetAttribute('SecretPresent') -ieq 'true'
-            $itemPath = Get-ADAnalyzerPolicyXmlPath $record
-            $location = Join-ADAnalyzerPolicyIdentity @($target, $xmlRecord.File.Scope, $xmlRecord.File.Path, $itemPath)
-            $xmlSecretChecks.Add(@{
-                    RuleId = 'GPO.StoredSecret'
-                    Status = $(if ($present) {
-                            'Fail'
-                        }
-                        else {
-                            'Pass'
-                        })
-                    Severity = 'Critical'
-                    Category = 'CredentialExposure'
-                    Target = $location
-                    Observed = $present
-                    Expected = $false
+            elseif ($null -ne $State.CommandContext) {
+                $State.CommandContext.WriteObject($check)
+            }
+            else {
+                $State.Checks.Add($check)
+            }
+        }
+    }
+
+    hidden [void] EvaluateCredentials([hashtable]$state) {
+        $Gpo = $state.Gpo
+        $Policy = $state.Policy
+        $Profile = $state.Profile
+        $target = $state.Target
+        $xmlRecords = @(Get-ADAnalyzerPolicyXmlRecords $Policy.XmlFiles)
+        $secretCount = 0
+        $xmlErrors = 0
+        $xmlSecretChecks = [Collections.Generic.List[object]]::new()
+        foreach ($xmlRecord in $xmlRecords) {
+            if (-not $xmlRecord.Valid) {
+                $xmlErrors++
+                $this.Emit($state, @{
+                    RuleId = 'GPO.Xml.Readable'
+                    Status = 'Unreadable'
+                    Severity = 'Medium'
+                    Category = 'PolicyCoverage'
+                    Target = ($target + '/' + $xmlRecord.File.Path)
+                    Observed = 'Unreadable XML'
+                    Expected = 'Well-formed XML without DTDs'
                     Evidence = @{
-                        SecretPresent = $present
                         Path = $xmlRecord.File.Path
-                        Scope = $xmlRecord.File.Scope
-                        ItemPath = $itemPath
-                        SettingName = $name
                     }
-                    Message = 'Only the presence of a named XML secret is reported; its value is omitted.'
-                    Applicability = 'Configured'
+                    Message = 'XML could not be parsed; its content was not included in the assessment.'
+                    Applicability = 'Unknown'
                 })
-        }
-    }
-    foreach ($family in @($xmlSecretChecks | Group-Object RuleId)) {
-        $targets = @(Resolve-ADAnalyzerPolicyIdentityCollisions @($family.Group | ForEach-Object { $_.Target }))
-        for ($index = 0; $index -lt $family.Group.Count; $index++) {
-            $arguments = $family.Group[$index]
-            $arguments.Target = $targets[$index]
-            New-ADAnalyzerCheck @arguments
-        }
-    }
-    if (-not $secretCount) {
-        New-ADAnalyzerCheck `
-            -RuleId 'GPO.Preferences.CPassword' `
-            -Status $(if ($xmlErrors) {
-                'Unknown'
+                continue
             }
-            else {
-                'Pass'
-            }) `
-            -Severity Critical `
-            -Category CredentialExposure `
-            -Target ($target + '/cpassword') `
-            -Observed $(if ($xmlErrors) {
-                $null
-            }
-            else {
-                $false
-            }) `
-            -Expected $false `
-            -Evidence @{
-            SecretPresent = $(if ($xmlErrors) {
-                    $null
+            $credentialOwners = [Collections.Generic.HashSet[Xml.XmlElement]]::new()
+            foreach ($attribute in @($xmlRecord.Document.SelectNodes('//@*') | Where-Object { ($_.LocalName -ieq 'cpassword' -and
+                            -not [string]::IsNullOrEmpty($_.Value)) -or
+                        ($_.LocalName -ieq 'cpasswordPresent' -and
+                        $_.Value -ieq 'true') })) {
+                if (-not $credentialOwners.Add($attribute.OwnerElement)) {
+                    continue
                 }
-                else {
-                    $false
-                })
-            UnreadableXmlFiles = $xmlErrors
-        } `
-            -Message 'Assessed XML contains no nonempty cpassword attribute; unreadable files prevent a complete conclusion.' `
-            -Applicability Configured
-    }
-
-    $storedSecrets = @(
-        foreach ($row in @(Get-ADAnalyzerEffectiveRegistryRecords $Policy.RegistrySettings)) {
-            if (-not $row.Deleted -and (Test-ADAnalyzerSecretName $row.ValueName)) {
-                $row
-            }
-        }
-        foreach ($row in @($Policy.IniSettings)) {
-            if (-not $row.Analyzed -and (Test-ADAnalyzerSecretName $row.Name)) {
-                $row
-            }
-        }
-        foreach ($row in @($Policy.SecuritySettings)) {
-            if (Test-ADAnalyzerSecretName $row.Name) {
-                $row
-            }
-        }
-    )
-    foreach ($row in $storedSecrets) {
-        $name = [string](Get-ADAnalyzerPolicyValue $row ValueName (Get-ADAnalyzerPolicyValue $row Name 'secret'))
-        $present = Get-ADAnalyzerPolicyValue $row SecretPresent $null
-        if ($null -eq $present) {
-            $present = Test-ADAnalyzerSecretPresence (Get-ADAnalyzerPolicyValue $row Value)
-        }
-        $location = ('{0}/{1}/{2}/{3}' -f $row.Scope,
-            $row.Source,
-            (Get-ADAnalyzerPolicyValue $row Key (Get-ADAnalyzerPolicyValue $row Section '')),
-            $name)
-        New-ADAnalyzerCheck `
-            -RuleId 'GPO.StoredSecret' `
-            -Status $(if ($present) {
-                'Fail'
-            }
-            else {
-                'Pass'
-            }) `
-            -Severity Critical `
-            -Category CredentialExposure `
-            -Target ($target + '/' + $location) `
-            -Observed ([bool]$present) `
-            -Expected $false `
-            -Evidence @{
-            SecretPresent = [bool]$present
-            Path = $row.Source
-            Scope = $row.Scope
-            SettingName = $name
-        } `
-            -Message 'Only the presence of a stored secret is reported; its value is omitted.' `
-            -Applicability Configured
-    }
-
-    $accountRules = @(
-        , @('MinimumPasswordLength', 'MinimumPasswordLength', 12, 'Minimum', 0, 65536)
-        , @('MinimumPasswordAge', 'MinimumPasswordAgeDays', 1, 'Minimum', 0, 999)
-        , @('PasswordHistorySize', 'PasswordHistorySize', 10, 'Minimum', 0, 65536)
-        , @('MaximumPasswordAge', 'MaximumPasswordAgeDays', 90, 'Age', -1, 999)
-        , @('LockoutBadCount', 'LockoutThreshold', 6, 'Threshold', 0, 65536)
-        , @('LockoutDuration', 'LockoutDurationMinutes', 30, 'Duration', -1, 99999)
-        , @('ResetLockoutCount', 'ResetLockoutMinutes', 30, 'Minimum', -4294967296, 4294967296)
-        , @('PasswordComplexity', 'PasswordComplexity', $true, 'Boolean', 0, 1)
-        , @('ClearTextPassword', 'AllowReversibleEncryption', $false, 'Boolean', 0, 1)
-    )
-    foreach ($rule in $accountRules) {
-        $rows = @($Policy.SecuritySettings | Where-Object { $_.Kind -eq 'Account' -and $_.Name -eq $rule[0] })
-        $expected = Get-ADAnalyzerPolicyProfileValue $Profile $rule[1] $rule[2]
-        if (-not $rows.Count) {
-            New-ADAnalyzerCheck `
-                -RuleId ('GPO.Account.' + $rule[0]) `
-                -Status NotConfigured `
-                -Severity High `
-                -Category AccountPolicy `
-                -Target ($target + '/Account/' + $rule[0]) `
-                -Observed $null `
-                -Expected $expected `
-                -Evidence $null `
-                -Message 'This setting is absent from this GPO; inherited or effective policy has not been determined.' `
-                -Applicability Unknown
-            continue
-        }
-        foreach ($row in $rows) {
-            $valid = $true
-            $pass = $false
-            $semantic = $null
-            if (-not (Test-ADAnalyzerPolicyValueValid $row)) {
-                $valid = $false
-            }
-            elseif ($rule[3] -eq 'Boolean') {
-                $value = ConvertTo-ADAnalyzerPolicyBoolean $row.Value
-                $valid = $value.Valid
-                $pass = $value.Value -eq $expected
-            }
-            else {
-                $value = ConvertTo-ADAnalyzerPolicyNumber $row.Value
-                $valid = $value.Valid -and $value.Value -ge $rule[4] -and $value.Value -le $rule[5]
-                if ($valid) {
-                    switch ($rule[3]) {
-                        'Minimum' {
-                            $pass = $value.Value -ge [long]$expected
-                        }
-                        'Age' {
-                            $valid = $value.Value -eq -1 -or $value.Value -ge 1
-                            if ($value.Value -eq -1) {
-                                $semantic = 'NeverExpires'
-                                $pass = [bool](Get-ADAnalyzerPolicyProfileValue $Profile AllowPasswordNeverExpires $false)
-                            }
-                            else {
-                                $pass = $value.Value -le [long]$expected
-                            }
-                        }
-                        'Threshold' {
-                            if ($value.Value -eq 0) {
-                                $semantic = 'LockoutDisabled'
-                                $pass = [long]$expected -eq 0
-                            }
-                            else {
-                                $pass = [long]$expected -gt 0 -and $value.Value -le [long]$expected
-                            }
-                        }
-                        'Duration' {
-                            $valid = $value.Value -eq -1 -or $value.Value -ge 1
-                            if ($value.Value -eq -1) {
-                                $semantic = 'AdministratorUnlockRequired'
-                                $pass = $true
-                            }
-                            else {
-                                $pass = $value.Value -ge [long]$expected
-                            }
-                        }
-                    }
+                $secretCount++
+                $item = $attribute.OwnerElement.ParentNode
+                $safe = [ordered]@{
+                    Path = $xmlRecord.File.Path
+                    ItemUid = (Get-ADAnalyzerXmlAttribute $item uid)
+                    ItemName = (Get-ADAnalyzerXmlAttribute $item name)
+                    Account = (Get-ADAnalyzerXmlAttribute $attribute.OwnerElement userName)
+                    SecretPresent = $true
                 }
+                $attributePath = (Get-ADAnalyzerPolicyXmlPath $attribute.OwnerElement) + '/@cpassword'
+                $safe['Attribute'] = 'cpassword'
+                $safe['ItemPath'] = $attributePath
+                $xmlSecretChecks.Add(@{
+                        RuleId = 'GPO.Preferences.CPassword'
+                        Status = 'Fail'
+                        Severity = 'Critical'
+                        Category = 'CredentialExposure'
+                        Target = (Join-ADAnalyzerPolicyIdentity @($target, $xmlRecord.File.Scope, $xmlRecord.File.Path, $attributePath))
+                        Observed = $true
+                        Expected = $false
+                        Evidence = $safe
+                        Message = 'A recoverable preference credential remains in stored policy. Remove the exposed credential and rotate the affected password; only its presence is reported.'
+                        Applicability = 'Configured'
+                    })
             }
-            $status = if (-not $valid) {
-                'Invalid'
+            $presenceDocument = ConvertTo-ADAnalyzerSecretIndicatorXml $xmlRecord.Document
+            foreach ($record in @($presenceDocument.SelectNodes('//*[@SecretPresent]'))) {
+                $name = Get-ADAnalyzerXmlSecretName $record
+                if (-not $name) {
+                    continue
+                }
+                $present = $record.GetAttribute('SecretPresent') -ieq 'true'
+                $itemPath = Get-ADAnalyzerPolicyXmlPath $record
+                $location = Join-ADAnalyzerPolicyIdentity @($target, $xmlRecord.File.Scope, $xmlRecord.File.Path, $itemPath)
+                $xmlSecretChecks.Add(@{
+                        RuleId = 'GPO.StoredSecret'
+                        Status = $(if ($present) {
+                                'Fail'
+                            }
+                            else {
+                                'Pass'
+                            })
+                        Severity = 'Critical'
+                        Category = 'CredentialExposure'
+                        Target = $location
+                        Observed = $present
+                        Expected = $false
+                        Evidence = @{
+                            SecretPresent = $present
+                            Path = $xmlRecord.File.Path
+                            Scope = $xmlRecord.File.Scope
+                            ItemPath = $itemPath
+                            SettingName = $name
+                        }
+                        Message = 'Only the presence of a named XML secret is reported; its value is omitted.'
+                        Applicability = 'Configured'
+                    })
             }
-            elseif ($pass) {
-                'Pass'
-            }
-            else {
-                'Fail'
-            }
-            New-ADAnalyzerCheck `
-                -RuleId ('GPO.Account.' + $rule[0]) `
-                -Status $status `
-                -Severity High `
-                -Category AccountPolicy `
-                -Target ($target + '/' + $row.Scope + '/' + $row.Source + '/Account/' + $rule[0]) `
-                -Observed $row.Value `
-                -Expected $expected `
-                -Evidence @{
-                Scope = $row.Scope
-                Path = $row.Source
-                Semantic = $semantic
-            } `
-                -Message 'Stored account policy was compared with the profile. Applicability and inheritance remain separate.' `
-                -Applicability (Get-ADAnalyzerPolicyApplicability $Gpo $row.Scope $Profile)
         }
-    }
-
-    $registry = @(Get-ADAnalyzerEffectiveRegistryRecords $Policy.RegistrySettings)
-    foreach ($spec in @(Get-ADAnalyzerSecuritySpecifications $Profile)) {
-        $rows = @()
-        foreach ($raw in @($registry | Where-Object { $_.Hive -ieq 'HKLM' -and
-                    $_.Key -ieq $spec.Key -and
-                    $_.ValueName -ieq $spec.ValueName })) {
-            $rows += [pscustomobject]@{
-                Scope = $raw.Scope
-                Source = $raw.Source
-                Value = $raw.Value
-                Type = $raw.Type
-                Raw = $true
-                Deleted = $raw.Deleted
+        foreach ($family in @($xmlSecretChecks | Group-Object RuleId)) {
+            $targets = @(Resolve-ADAnalyzerPolicyIdentityCollisions @($family.Group | ForEach-Object { $_.Target }))
+            for ($index = 0; $index -lt $family.Group.Count; $index++) {
+                $arguments = $family.Group[$index]
+                $arguments.Target = $targets[$index]
+                $this.Emit($state, $arguments)
             }
         }
-        foreach ($setting in @($Policy.SecuritySettings | Where-Object { $_.Kind -eq 'SecurityOptions' -and $_.Name -eq $spec.Name })) {
-            $type = $null
-            $rawValue = $setting.Value
-            $raw = $false
-            foreach ($ini in @($Policy.IniSettings | Where-Object { $_.Section -eq 'Registry Values' -and
-                        $_.Scope -eq $setting.Scope -and
-                        $_.Source -eq $setting.Source -and
-                        ($_.Name -replace '^(?i)MACHINE\\',
-                        '') -ieq ($spec.Key + '\' + $spec.ValueName) })) {
-                try {
-                    $parts = Split-AnalyzerPolicyCsv $ini.Value
-                    $type = [int]$parts[0]
-                    $rawValue = if ($type -eq 7) {
-                        , $parts[1..($parts.Count - 1)]
+        if (-not $secretCount) {
+            $this.Emit($state, @{
+                RuleId = 'GPO.Preferences.CPassword'
+                Status = $(if ($xmlErrors) {
+                        'Unknown'
                     }
                     else {
-                        $parts[1..($parts.Count - 1)] -join ','
+                        'Pass'
+                    })
+                Severity = 'Critical'
+                Category = 'CredentialExposure'
+                Target = ($target + '/cpassword')
+                Observed = $(if ($xmlErrors) {
+                        $null
                     }
-                    $raw = $true
+                    else {
+                        $false
+                    })
+                Expected = $false
+                Evidence = @{
+                    SecretPresent = $(if ($xmlErrors) {
+                            $null
+                        }
+                        else {
+                            $false
+                        })
+                    UnreadableXmlFiles = $xmlErrors
                 }
-                catch {
-                    $type = -1
-                }
-            }
-            $rows += [pscustomobject]@{
-                Scope = $setting.Scope
-                Source = $setting.Source
-                Value = $rawValue
-                Type = $type
-                Raw = $raw
-                Deleted = $false
-                ValueValid = (Get-ADAnalyzerPolicyValue $setting ValueValid $null)
-            }
-        }
-        if (-not $rows.Count) {
-            New-ADAnalyzerCheck `
-                -RuleId ('GPO.Security.' + $spec.Id) `
-                -Status NotConfigured `
-                -Severity High `
-                -Category SecurityOptions `
-                -Target ($target + '/Security/' + $spec.Id) `
-                -Observed $null `
-                -Expected $spec.Expected `
-                -Evidence @{
-                Name = $spec.Name
-            } `
-                -Message 'This GPO does not configure this supported baseline setting.' `
-                -Applicability Unknown
-            continue
-        }
-        $sourceTargets = @(foreach ($row in $rows) {
-                $target + '/' + $row.Scope + '/' + ([string]$row.Source).Replace('\', '/') + '/Security/' + $spec.Id
+                Message = 'Assessed XML contains no nonempty cpassword attribute; unreadable files prevent a complete conclusion.'
+                Applicability = 'Configured'
             })
-        $rowTargets = @(Resolve-ADAnalyzerPolicyIdentityCollisions -Targets $sourceTargets)
-        $rowIndex = 0
-        foreach ($row in $rows) {
-            $checkTarget = $rowTargets[$rowIndex]
-            $rowIndex++
-            $status = 'Unknown'
-            $valid = $true
-            $pass = $false
-            $observed = $row.Value
-            if (-not (Test-ADAnalyzerPolicyValueValid $row)) {
-                $status = 'Invalid'
+        }
+
+        $storedSecrets = @(
+            foreach ($row in @(Get-ADAnalyzerEffectiveRegistryRecords $Policy.RegistrySettings)) {
+                if (-not $row.Deleted -and (Test-ADAnalyzerSecretName $row.ValueName)) {
+                    $row
+                }
             }
-            elseif ($row.Deleted) {
-                $status = 'NotConfigured'
+            foreach ($row in @($Policy.IniSettings)) {
+                if (-not $row.Analyzed -and (Test-ADAnalyzerSecretName $row.Name)) {
+                    $row
+                }
             }
-            elseif ($null -ne $row.Type -and $null -ne $spec.Type -and $row.Type -ne $spec.Type) {
-                $status = 'Invalid'
+            foreach ($row in @($Policy.SecuritySettings)) {
+                if (Test-ADAnalyzerSecretName $row.Name) {
+                    $row
+                }
             }
-            else {
-                if ($spec.Kind -eq 'Boolean') {
+        )
+        foreach ($row in $storedSecrets) {
+            $name = [string](Get-ADAnalyzerPolicyValue $row ValueName (Get-ADAnalyzerPolicyValue $row Name 'secret'))
+            $present = Get-ADAnalyzerPolicyValue $row SecretPresent $null
+            if ($null -eq $present) {
+                $present = Test-ADAnalyzerSecretPresence (Get-ADAnalyzerPolicyValue $row Value)
+            }
+            $location = ('{0}/{1}/{2}/{3}' -f $row.Scope,
+                $row.Source,
+                (Get-ADAnalyzerPolicyValue $row Key (Get-ADAnalyzerPolicyValue $row Section '')),
+                $name)
+            $this.Emit($state, @{
+                RuleId = 'GPO.StoredSecret'
+                Status = $(if ($present) {
+                        'Fail'
+                    }
+                    else {
+                        'Pass'
+                    })
+                Severity = 'Critical'
+                Category = 'CredentialExposure'
+                Target = ($target + '/' + $location)
+                Observed = ([bool]$present)
+                Expected = $false
+                Evidence = @{
+                    SecretPresent = [bool]$present
+                    Path = $row.Source
+                    Scope = $row.Scope
+                    SettingName = $name
+                }
+                Message = 'Only the presence of a stored secret is reported; its value is omitted.'
+                Applicability = 'Configured'
+            })
+        }
+    }
+
+    hidden [void] EvaluateAccount([hashtable]$state) {
+        $Gpo = $state.Gpo
+        $Policy = $state.Policy
+        $Profile = $state.Profile
+        $target = $state.Target
+        $accountRules = @(
+            , @('MinimumPasswordLength', 'MinimumPasswordLength', 12, 'Minimum', 0, 65536)
+            , @('MinimumPasswordAge', 'MinimumPasswordAgeDays', 1, 'Minimum', 0, 999)
+            , @('PasswordHistorySize', 'PasswordHistorySize', 10, 'Minimum', 0, 65536)
+            , @('MaximumPasswordAge', 'MaximumPasswordAgeDays', 90, 'Age', -1, 999)
+            , @('LockoutBadCount', 'LockoutThreshold', 6, 'Threshold', 0, 65536)
+            , @('LockoutDuration', 'LockoutDurationMinutes', 30, 'Duration', -1, 99999)
+            , @('ResetLockoutCount', 'ResetLockoutMinutes', 30, 'Minimum', -4294967296, 4294967296)
+            , @('PasswordComplexity', 'PasswordComplexity', $true, 'Boolean', 0, 1)
+            , @('ClearTextPassword', 'AllowReversibleEncryption', $false, 'Boolean', 0, 1)
+        )
+        foreach ($rule in $accountRules) {
+            $rows = @($Policy.SecuritySettings | Where-Object { $_.Kind -eq 'Account' -and $_.Name -eq $rule[0] })
+            $expected = Get-ADAnalyzerPolicyProfileValue $Profile $rule[1] $rule[2]
+            if (-not $rows.Count) {
+                $this.Emit($state, @{
+                    RuleId = ('GPO.Account.' + $rule[0])
+                    Status = 'NotConfigured'
+                    Severity = 'High'
+                    Category = 'AccountPolicy'
+                    Target = ($target + '/Account/' + $rule[0])
+                    Observed = $null
+                    Expected = $expected
+                    Evidence = $null
+                    Message = 'This setting is absent from this GPO; inherited or effective policy has not been determined.'
+                    Applicability = 'Unknown'
+                })
+                continue
+            }
+            foreach ($row in $rows) {
+                $valid = $true
+                $pass = $false
+                $semantic = $null
+                if (-not (Test-ADAnalyzerPolicyValueValid $row)) {
+                    $valid = $false
+                }
+                elseif ($rule[3] -eq 'Boolean') {
                     $value = ConvertTo-ADAnalyzerPolicyBoolean $row.Value
                     $valid = $value.Valid
-                    $pass = $value.Value -eq $spec.Expected
-                }
-                elseif ($spec.Kind -in 'Pipes', 'Shares') {
-                    $values = @($row.Value | Where-Object { -not [string]::IsNullOrEmpty([string]$_) })
-                    $pass = @($values | Where-Object { @($spec.Expected) -notcontains $_ }).Count -eq 0
+                    $pass = $value.Value -eq $expected
                 }
                 else {
-                    $number = ConvertTo-ADAnalyzerPolicyNumber $row.Value
-                    if ($row.Raw) {
-                        $max = if ($spec.Kind -eq 'Lm' -or $spec.Kind -eq 'UacPrompt') {
-                            5
-                        }
-                        else {
-                            2
-                        }
-                        $valid = $number.Valid -and $number.Value -ge 0 -and $number.Value -le $max
-                        if ($valid) {
-                            switch ($spec.Kind) {
-                                'Lm' {
-                                    $pass = $number.Value -ge [long]$spec.Expected
+                    $value = ConvertTo-ADAnalyzerPolicyNumber $row.Value
+                    $valid = $value.Valid -and $value.Value -ge $rule[4] -and $value.Value -le $rule[5]
+                    if ($valid) {
+                        switch ($rule[3]) {
+                            'Minimum' {
+                                $pass = $value.Value -ge [long]$expected
+                            }
+                            'Age' {
+                                $valid = $value.Value -eq -1 -or $value.Value -ge 1
+                                if ($value.Value -eq -1) {
+                                    $semantic = 'NeverExpires'
+                                    $pass = [bool](Get-ADAnalyzerPolicyProfileValue $Profile AllowPasswordNeverExpires $false)
                                 }
-                                'LdapClient' {
-                                    $pass = $spec.Expected -ne 2 -or $number.Value -eq 2
-                                }
-                                'LdapServer' {
-                                    $valid = $number.Value -in 0, 1, 2
-                                    $pass = $spec.Expected -ne 2 -or $number.Value -eq 2
-                                }
-                                'UacPrompt' {
-                                    $pass = $number.Value -gt 0
+                                else {
+                                    $pass = $value.Value -le [long]$expected
                                 }
                             }
-                        }
-                    }
-                    else {
-                        switch ($spec.Kind) {
-                            'Lm' {
-                                $levels = @('Send LM & NTLM responses',
-                                    'Send LM & NTLM - use NTLMv2 session security if negotiated',
-                                    'Send NTLM response only',
-                                    'Send NTLMv2 response only',
-                                    'Send NTLMv2 response only. Refuse LM',
-                                    'Send NTLMv2 response only. Refuse LM & NTLM')
-                                $index = [array]::IndexOf($levels, [string]$row.Value)
-                                if ([string]$row.Value -eq 'Send NTLMv2 responses only. Refuse LM & NTLM') {
-                                    $index = 5
+                            'Threshold' {
+                                if ($value.Value -eq 0) {
+                                    $semantic = 'LockoutDisabled'
+                                    $pass = [long]$expected -eq 0
                                 }
-                                $valid = $index -ge 0
-                                $pass = $index -ge [long]$spec.Expected
+                                else {
+                                    $pass = [long]$expected -gt 0 -and $value.Value -le [long]$expected
+                                }
                             }
-                            'LdapClient' {
-                                $valid = $row.Value -in 'None', 'Negotiate signing', 'Require signing'
-                                $pass = $spec.Expected -ne 2 -or $row.Value -eq 'Require signing'
-                            }
-                            'LdapServer' {
-                                $valid = $row.Value -in 'None', 'Require signature', 'Require signing'
-                                $pass = $spec.Expected -ne 2 -or $row.Value -in 'Require signature', 'Require signing'
-                            }
-                            'UacPrompt' {
-                                $valid = $row.Value -in 'Elevate without prompting',
-                                'Prompt for credentials on the secure desktop',
-                                'Prompt for consent on the secure desktop',
-                                'Prompt for credentials',
-                                'Prompt for consent',
-                                'Prompt for consent for non-Windows binaries'
-                                $pass = $valid -and $row.Value -ne 'Elevate without prompting'
+                            'Duration' {
+                                $valid = $value.Value -eq -1 -or $value.Value -ge 1
+                                if ($value.Value -eq -1) {
+                                    $semantic = 'AdministratorUnlockRequired'
+                                    $pass = $true
+                                }
+                                else {
+                                    $pass = $value.Value -ge [long]$expected
+                                }
                             }
                         }
                     }
@@ -1227,303 +1118,594 @@ function Test-ADAnalyzerGpoPolicy {
                 else {
                     'Fail'
                 }
-            }
-            New-ADAnalyzerCheck `
-                -RuleId ('GPO.Security.' + $spec.Id) `
-                -Status $status `
-                -Severity High `
-                -Category SecurityOptions `
-                -Target $checkTarget `
-                -Observed $observed `
-                -Expected $spec.Expected `
-                -Evidence @{
-                Name = $spec.Name
-                RegistryType = $row.Type
-                Path = $row.Source
-                Deleted = $row.Deleted
-            } `
-                -Message 'Stored security policy was validated and compared with the profile; this is not a calculation of effective policy.' `
-                -Applicability (Get-ADAnalyzerPolicyApplicability $Gpo $row.Scope $Profile)
-        }
-    }
-
-    $policySection = Get-ADAnalyzerPolicyValue $Profile Policy @{}
-    $approvedValue = @('S-1-5-32-544')
-    if ($policySection -is [Collections.IDictionary] -and $policySection.Contains('ApprovedLocalAdminSids')) {
-        $approvedValue = $policySection['ApprovedLocalAdminSids']
-    }
-    elseif ($null -ne $policySection -and $null -ne $policySection.PSObject.Properties['ApprovedLocalAdminSids']) {
-        $approvedValue = $policySection.PSObject.Properties['ApprovedLocalAdminSids'].Value
-    }
-    $approvedValid = Test-ADAnalyzerPolicySidList $approvedValue
-    $approved = @($approvedValue)
-    $restricted = @(ConvertFrom-ADAnalyzerRestrictedGroups $Policy.IniSettings)
-    foreach ($group in $restricted) {
-        $candidates = @()
-        $privileged = $group.GroupSid -eq 'S-1-5-32-544' -or $group.GroupName -ieq 'Administrators'
-        if ($group.Mode -ieq 'Memberof') {
-            $privileged = @($group.Members | Where-Object { $_.Sid -eq 'S-1-5-32-544' -or $_.Name -ieq 'Administrators' }).Count -gt 0
-            $candidates = @([pscustomobject]@{
-                    Sid = $group.GroupSid
-                    Name = $group.GroupName
+                $this.Emit($state, @{
+                    RuleId = ('GPO.Account.' + $rule[0])
+                    Status = $status
+                    Severity = 'High'
+                    Category = 'AccountPolicy'
+                    Target = ($target + '/' + $row.Scope + '/' + $row.Source + '/Account/' + $rule[0])
+                    Observed = $row.Value
+                    Expected = $expected
+                    Evidence = @{
+                        Scope = $row.Scope
+                        Path = $row.Source
+                        Semantic = $semantic
+                    }
+                    Message = 'Stored account policy was compared with the profile. Applicability and inheritance remain separate.'
+                    Applicability = (Get-ADAnalyzerPolicyApplicability $Gpo $row.Scope $Profile)
                 })
-        }
-        else {
-            $candidates = @($group.Members)
-        }
-        $unknown = @($candidates | Where-Object { -not $_.Sid }).Count -gt 0
-        $bad = @($candidates | Where-Object { $_.Sid -and $approved -notcontains $_.Sid })
-        $status = if (-not $group.Valid -or -not $approvedValid) {
-            'Invalid'
-        }
-        elseif (-not $privileged) {
-            'NotApplicable'
-        }
-        elseif ($bad.Count) {
-            'Fail'
-        }
-        elseif ($unknown) {
-            'Unknown'
-        }
-        else {
-            'Pass'
-        }
-        New-ADAnalyzerCheck `
-            -RuleId 'GPO.RestrictedGroups.LocalAdministrators' `
-            -Status $status `
-            -Severity High `
-            -Category RestrictedGroups `
-            -Target ($target + '/' + $group.Scope + '/' + $group.Source + '/' + $group.SettingName) `
-            -Observed $group `
-            -Expected $approved `
-            -Evidence @{
-            Path = $group.Source
-            Mode = $group.Mode
-        } `
-            -Message 'Members replaces the configured membership; MemberOf requires inclusion. Names without a SID cannot be approved by the SID allowlist.' `
-            -Applicability (Get-ADAnalyzerPolicyApplicability $Gpo $group.Scope $Profile)
-    }
-    if (-not $restricted.Count) {
-        New-ADAnalyzerCheck `
-            -RuleId 'GPO.RestrictedGroups.LocalAdministrators' `
-            -Status NotConfigured `
-            -Severity High `
-            -Category RestrictedGroups `
-            -Target ($target + '/RestrictedGroups') `
-            -Observed $null `
-            -Expected $approved `
-            -Evidence $null `
-            -Message 'No Restricted Groups configuration was found in this GPO.' `
-            -Applicability Unknown
-    }
-    $local = @(ConvertFrom-ADAnalyzerLocalUsersGroups $Policy.XmlFiles)
-    $itemIdentities = @(foreach ($item in $local) {
-            $kind = if ($item.Uid) {
-                'Uid'
-            }
-            else {
-                'Path'
-            }
-            $identity = if ($item.Uid) {
-                $item.Uid
-            }
-            else {
-                $item.ItemPath
-            }
-            $target + '/LocalUsersGroups/' + (Join-ADAnalyzerPolicyIdentity `
-                    -Parts @($item.Scope,
-                    ([string]$item.Source).Replace('\',
-                        '/'),
-                    $kind,
-                    $identity))
-        })
-    $itemTargets = @(Resolve-ADAnalyzerPolicyIdentityCollisions -Targets $itemIdentities)
-    $itemIndex = 0
-    foreach ($item in $local) {
-        $checkTarget = $itemTargets[$itemIndex]
-        $itemIndex++
-        $privileged = $item.Sid -eq 'S-1-5-32-544' -or $item.Name -ieq 'Administrators'
-        $additions = @($item.Members | Where-Object Action -eq 'ADD')
-        $unknown = @($additions | Where-Object { -not $_.Sid }).Count -gt 0
-        $bad = @($additions | Where-Object { $_.Sid -and $approved -notcontains $_.Sid })
-        $status = if (-not $item.Valid -or -not $approvedValid) {
-            'Invalid'
-        }
-        elseif ($item.Disabled -or $item.Action -eq 'D') {
-            'NotApplicable'
-        }
-        elseif ($item.Kind -ne 'Group' -or -not $privileged) {
-            'Unknown'
-        }
-        elseif ($bad.Count) {
-            'Fail'
-        }
-        elseif ($unknown) {
-            'Unknown'
-        }
-        else {
-            'Pass'
-        }
-        New-ADAnalyzerCheck `
-            -RuleId 'GPO.Preferences.LocalUsersGroups' `
-            -Status $status `
-            -Severity High `
-            -Category LocalUsersGroups `
-            -Target $checkTarget `
-            -Observed $item `
-            -Expected $approved `
-            -Evidence @{
-            Path = $item.Source
-            Targeting = $item.Targeted
-            Disabled = $item.Disabled
-            Action = $item.Action
-        } `
-            -Message 'Preference actions and member additions/removals are preserved. Targeting filters have not been evaluated, and an update is not a complete effective membership inventory.' `
-            -Applicability (Get-ADAnalyzerPolicyApplicability $Gpo $item.Scope $Profile `
-                -Targeted:$item.Targeted `
-                -Disabled:$item.Disabled)
-    }
-    if (-not $local.Count) {
-        New-ADAnalyzerCheck `
-            -RuleId 'GPO.Preferences.LocalUsersGroups' `
-            -Status NotConfigured `
-            -Severity High `
-            -Category LocalUsersGroups `
-            -Target ($target + '/LocalUsersGroups') `
-            -Observed $null `
-            -Expected $approved `
-            -Evidence $null `
-            -Message 'No Local Users and Groups preference was found in this GPO.' `
-            -Applicability Unknown
-    }
-
-    $rights = Get-ADAnalyzerPolicyProfileValue $Profile AllowedUserRightSids @{}
-    foreach ($right in @($Policy.SecuritySettings | Where-Object Kind -eq 'UserRightsAssignment')) {
-        $principals = @($right.Value | ForEach-Object { ConvertFrom-ADAnalyzerPolicyPrincipal ([string]$_) })
-        $hasAllowlist = $rights -is [Collections.IDictionary] -and $rights.Contains($right.Name)
-        $expected = $null
-        $allowlistValid = $false
-        if ($hasAllowlist) {
-            $allowlistValid = Test-ADAnalyzerPolicySidList $rights[$right.Name]
-            $expected = @($rights[$right.Name])
-        }
-        $status = if (@($principals | Where-Object { -not $_.Valid }).Count -or ($hasAllowlist -and -not $allowlistValid)) {
-            'Invalid'
-        }
-        elseif (-not $hasAllowlist -or @($principals | Where-Object { -not $_.Sid }).Count) {
-            'Unknown'
-        }
-        elseif (@($principals | Where-Object { @($expected) -notcontains $_.Sid }).Count) {
-            'Fail'
-        }
-        else {
-            'Pass'
-        }
-        New-ADAnalyzerCheck `
-            -RuleId ('GPO.UserRights.' + $right.Name) `
-            -Status $status `
-            -Severity High `
-            -Category UserRightsAssignment `
-            -Target ($target + '/' + $right.Scope + '/' + $right.Source + '/' + $right.Name) `
-            -Observed $principals `
-            -Expected $expected `
-            -Evidence @{
-            Path = $right.Source
-            Right = $right.Name
-        } `
-            -Message 'User rights are compared with exact approved SIDs, never principal-name substrings. An unspecified allowlist is Unknown.' `
-            -Applicability (Get-ADAnalyzerPolicyApplicability $Gpo $right.Scope $Profile)
-    }
-    if ($rights -is [Collections.IDictionary]) {
-        foreach ($name in $rights.Keys) {
-            if (-not @($Policy.SecuritySettings | Where-Object { $_.Kind -eq 'UserRightsAssignment' -and $_.Name -eq $name }).Count) {
-                New-ADAnalyzerCheck `
-                    -RuleId ('GPO.UserRights.' + $name) `
-                    -Status NotConfigured `
-                    -Severity High `
-                    -Category UserRightsAssignment `
-                    -Target ($target + '/UserRights/' + $name) `
-                    -Observed $null `
-                    -Expected $rights[$name] `
-                    -Evidence $null `
-                    -Message 'This configured baseline right is absent from this GPO.' `
-                    -Applicability Unknown
             }
         }
     }
 
-    foreach ($rule in @(Get-ADAnalyzerPolicyValue $Profile RegistryRules @()) + @(Get-ADAnalyzerPolicyValue $Profile ExpectedGpoSettings @())) {
-        $kind = Get-ADAnalyzerPolicyValue $rule Kind 'Registry'
-        $name = Get-ADAnalyzerPolicyValue $rule Name ''
-        $id = Get-ADAnalyzerPolicyValue $rule RuleId (Get-ADAnalyzerPolicyValue $rule Id ($kind + '.' + $name + '.' + $rule.Key + '.' + $rule.ValueName))
-        $severity = Get-ADAnalyzerPolicyValue $rule Severity 'Medium'
-        $expected = $rule.Expected
-        $operator = Get-ADAnalyzerPolicyValue $rule Operator 'Equals'
-        $matches = @(if ($kind -eq 'Registry') {
-                $registry | Where-Object { $_.Hive -ieq (Get-ADAnalyzerPolicyValue $rule Hive 'HKLM') -and
-                    $_.Key -ieq $rule.Key -and
-                    $_.ValueName -ieq $rule.ValueName -and
-                    -not $_.Deleted }
+    hidden [void] EvaluateSecurity([hashtable]$state) {
+        $Gpo = $state.Gpo
+        $Policy = $state.Policy
+        $Profile = $state.Profile
+        $target = $state.Target
+        $registry = @(Get-ADAnalyzerEffectiveRegistryRecords $Policy.RegistrySettings)
+        $state.Registry = $registry
+        foreach ($spec in @(Get-ADAnalyzerSecuritySpecifications $Profile)) {
+            $rows = @()
+            foreach ($raw in @($registry | Where-Object { $_.Hive -ieq 'HKLM' -and
+                        $_.Key -ieq $spec.Key -and
+                        $_.ValueName -ieq $spec.ValueName })) {
+                $rows += [pscustomobject]@{
+                    Scope = $raw.Scope
+                    Source = $raw.Source
+                    Value = $raw.Value
+                    Type = $raw.Type
+                    Raw = $true
+                    Deleted = $raw.Deleted
+                }
+            }
+            foreach ($setting in @($Policy.SecuritySettings | Where-Object { $_.Kind -eq 'SecurityOptions' -and $_.Name -eq $spec.Name })) {
+                $type = $null
+                $rawValue = $setting.Value
+                $raw = $false
+                foreach ($ini in @($Policy.IniSettings | Where-Object { $_.Section -eq 'Registry Values' -and
+                            $_.Scope -eq $setting.Scope -and
+                            $_.Source -eq $setting.Source -and
+                            ($_.Name -replace '^(?i)MACHINE\\',
+                            '') -ieq ($spec.Key + '\' + $spec.ValueName) })) {
+                    try {
+                        $parts = Split-AnalyzerPolicyCsv $ini.Value
+                        $type = [int]$parts[0]
+                        $rawValue = if ($type -eq 7) {
+                            , $parts[1..($parts.Count - 1)]
+                        }
+                        else {
+                            $parts[1..($parts.Count - 1)] -join ','
+                        }
+                        $raw = $true
+                    }
+                    catch {
+                        $type = -1
+                    }
+                }
+                $rows += [pscustomobject]@{
+                    Scope = $setting.Scope
+                    Source = $setting.Source
+                    Value = $rawValue
+                    Type = $type
+                    Raw = $raw
+                    Deleted = $false
+                    ValueValid = (Get-ADAnalyzerPolicyValue $setting ValueValid $null)
+                }
+            }
+            if (-not $rows.Count) {
+                $this.Emit($state, @{
+                    RuleId = ('GPO.Security.' + $spec.Id)
+                    Status = 'NotConfigured'
+                    Severity = 'High'
+                    Category = 'SecurityOptions'
+                    Target = ($target + '/Security/' + $spec.Id)
+                    Observed = $null
+                    Expected = $spec.Expected
+                    Evidence = @{
+                        Name = $spec.Name
+                    }
+                    Message = 'This GPO does not configure this supported baseline setting.'
+                    Applicability = 'Unknown'
+                })
+                continue
+            }
+            $sourceTargets = @(foreach ($row in $rows) {
+                    $target + '/' + $row.Scope + '/' + ([string]$row.Source).Replace('\', '/') + '/Security/' + $spec.Id
+                })
+            $rowTargets = @(Resolve-ADAnalyzerPolicyIdentityCollisions -Targets $sourceTargets)
+            $rowIndex = 0
+            foreach ($row in $rows) {
+                $checkTarget = $rowTargets[$rowIndex]
+                $rowIndex++
+                $status = 'Unknown'
+                $valid = $true
+                $pass = $false
+                $observed = $row.Value
+                if (-not (Test-ADAnalyzerPolicyValueValid $row)) {
+                    $status = 'Invalid'
+                }
+                elseif ($row.Deleted) {
+                    $status = 'NotConfigured'
+                }
+                elseif ($null -ne $row.Type -and $null -ne $spec.Type -and $row.Type -ne $spec.Type) {
+                    $status = 'Invalid'
+                }
+                else {
+                    if ($spec.Kind -eq 'Boolean') {
+                        $value = ConvertTo-ADAnalyzerPolicyBoolean $row.Value
+                        $valid = $value.Valid
+                        $pass = $value.Value -eq $spec.Expected
+                    }
+                    elseif ($spec.Kind -in 'Pipes', 'Shares') {
+                        $values = @($row.Value | Where-Object { -not [string]::IsNullOrEmpty([string]$_) })
+                        $pass = @($values | Where-Object { @($spec.Expected) -notcontains $_ }).Count -eq 0
+                    }
+                    else {
+                        $number = ConvertTo-ADAnalyzerPolicyNumber $row.Value
+                        if ($row.Raw) {
+                            $max = if ($spec.Kind -eq 'Lm' -or $spec.Kind -eq 'UacPrompt') {
+                                5
+                            }
+                            else {
+                                2
+                            }
+                            $valid = $number.Valid -and $number.Value -ge 0 -and $number.Value -le $max
+                            if ($valid) {
+                                switch ($spec.Kind) {
+                                    'Lm' {
+                                        $pass = $number.Value -ge [long]$spec.Expected
+                                    }
+                                    'LdapClient' {
+                                        $pass = $spec.Expected -ne 2 -or $number.Value -eq 2
+                                    }
+                                    'LdapServer' {
+                                        $valid = $number.Value -in 0, 1, 2
+                                        $pass = $spec.Expected -ne 2 -or $number.Value -eq 2
+                                    }
+                                    'UacPrompt' {
+                                        $pass = $number.Value -gt 0
+                                    }
+                                }
+                            }
+                        }
+                        else {
+                            switch ($spec.Kind) {
+                                'Lm' {
+                                    $levels = @('Send LM & NTLM responses',
+                                        'Send LM & NTLM - use NTLMv2 session security if negotiated',
+                                        'Send NTLM response only',
+                                        'Send NTLMv2 response only',
+                                        'Send NTLMv2 response only. Refuse LM',
+                                        'Send NTLMv2 response only. Refuse LM & NTLM')
+                                    $index = [array]::IndexOf($levels, [string]$row.Value)
+                                    if ([string]$row.Value -eq 'Send NTLMv2 responses only. Refuse LM & NTLM') {
+                                        $index = 5
+                                    }
+                                    $valid = $index -ge 0
+                                    $pass = $index -ge [long]$spec.Expected
+                                }
+                                'LdapClient' {
+                                    $valid = $row.Value -in 'None', 'Negotiate signing', 'Require signing'
+                                    $pass = $spec.Expected -ne 2 -or $row.Value -eq 'Require signing'
+                                }
+                                'LdapServer' {
+                                    $valid = $row.Value -in 'None', 'Require signature', 'Require signing'
+                                    $pass = $spec.Expected -ne 2 -or $row.Value -in 'Require signature', 'Require signing'
+                                }
+                                'UacPrompt' {
+                                    $valid = $row.Value -in 'Elevate without prompting',
+                                    'Prompt for credentials on the secure desktop',
+                                    'Prompt for consent on the secure desktop',
+                                    'Prompt for credentials',
+                                    'Prompt for consent',
+                                    'Prompt for consent for non-Windows binaries'
+                                    $pass = $valid -and $row.Value -ne 'Elevate without prompting'
+                                }
+                            }
+                        }
+                    }
+                    $status = if (-not $valid) {
+                        'Invalid'
+                    }
+                    elseif ($pass) {
+                        'Pass'
+                    }
+                    else {
+                        'Fail'
+                    }
+                }
+                $this.Emit($state, @{
+                    RuleId = ('GPO.Security.' + $spec.Id)
+                    Status = $status
+                    Severity = 'High'
+                    Category = 'SecurityOptions'
+                    Target = $checkTarget
+                    Observed = $observed
+                    Expected = $spec.Expected
+                    Evidence = @{
+                        Name = $spec.Name
+                        RegistryType = $row.Type
+                        Path = $row.Source
+                        Deleted = $row.Deleted
+                    }
+                    Message = 'Stored security policy was validated and compared with the profile; this is not a calculation of effective policy.'
+                    Applicability = (Get-ADAnalyzerPolicyApplicability $Gpo $row.Scope $Profile)
+                })
+            }
+        }
+    }
+
+    hidden [void] EvaluateMembershipAndRights([hashtable]$state) {
+        $Gpo = $state.Gpo
+        $Policy = $state.Policy
+        $Profile = $state.Profile
+        $target = $state.Target
+        $policySection = Get-ADAnalyzerPolicyValue $Profile Policy @{}
+        $approvedValue = @('S-1-5-32-544')
+        if ($policySection -is [Collections.IDictionary] -and $policySection.Contains('ApprovedLocalAdminSids')) {
+            $approvedValue = $policySection['ApprovedLocalAdminSids']
+        }
+        elseif ($null -ne $policySection -and $null -ne $policySection.PSObject.Properties['ApprovedLocalAdminSids']) {
+            $approvedValue = $policySection.PSObject.Properties['ApprovedLocalAdminSids'].Value
+        }
+        $approvedValid = Test-ADAnalyzerPolicySidList $approvedValue
+        $approved = @($approvedValue)
+        $restricted = @(ConvertFrom-ADAnalyzerRestrictedGroups $Policy.IniSettings)
+        foreach ($group in $restricted) {
+            $candidates = @()
+            $privileged = $group.GroupSid -eq 'S-1-5-32-544' -or $group.GroupName -ieq 'Administrators'
+            if ($group.Mode -ieq 'Memberof') {
+                $privileged = @($group.Members | Where-Object { $_.Sid -eq 'S-1-5-32-544' -or $_.Name -ieq 'Administrators' }).Count -gt 0
+                $candidates = @([pscustomobject]@{
+                        Sid = $group.GroupSid
+                        Name = $group.GroupName
+                    })
             }
             else {
-                $Policy.SecuritySettings | Where-Object { $_.Kind -eq $kind -and $_.Name -eq $name }
+                $candidates = @($group.Members)
+            }
+            $unknown = @($candidates | Where-Object { -not $_.Sid }).Count -gt 0
+            $bad = @($candidates | Where-Object { $_.Sid -and $approved -notcontains $_.Sid })
+            $status = if (-not $group.Valid -or -not $approvedValid) {
+                'Invalid'
+            }
+            elseif (-not $privileged) {
+                'NotApplicable'
+            }
+            elseif ($bad.Count) {
+                'Fail'
+            }
+            elseif ($unknown) {
+                'Unknown'
+            }
+            else {
+                'Pass'
+            }
+            $this.Emit($state, @{
+                RuleId = 'GPO.RestrictedGroups.LocalAdministrators'
+                Status = $status
+                Severity = 'High'
+                Category = 'RestrictedGroups'
+                Target = ($target + '/' + $group.Scope + '/' + $group.Source + '/' + $group.SettingName)
+                Observed = $group
+                Expected = $approved
+                Evidence = @{
+                    Path = $group.Source
+                    Mode = $group.Mode
+                }
+                Message = 'Members replaces the configured membership; MemberOf requires inclusion. Names without a SID cannot be approved by the SID allowlist.'
+                Applicability = (Get-ADAnalyzerPolicyApplicability $Gpo $group.Scope $Profile)
             })
-        $scope = Get-ADAnalyzerPolicyValue $rule Scope ''
-        if ($scope) {
-            $matches = @($matches | Where-Object { $_.Scope -ieq $scope })
         }
-        if (-not $matches.Count) {
-            New-ADAnalyzerCheck `
-                -RuleId ('GPO.Expected.' + $id) `
-                -Status NotConfigured `
-                -Severity $severity `
-                -Category PolicyBaseline `
-                -Target ($target + '/Expected/' + $id + '/' + $scope) `
-                -Observed $null `
-                -Expected $expected `
-                -Evidence @{
-                Kind = $kind
-                Name = $name
-                Scope = $scope
-            } `
-                -Message 'The expected setting is not configured in the requested GPO scope; effective policy remains unknown.' `
-                -Applicability Unknown
-            continue
+        if (-not $restricted.Count) {
+            $this.Emit($state, @{
+                RuleId = 'GPO.RestrictedGroups.LocalAdministrators'
+                Status = 'NotConfigured'
+                Severity = 'High'
+                Category = 'RestrictedGroups'
+                Target = ($target + '/RestrictedGroups')
+                Observed = $null
+                Expected = $approved
+                Evidence = $null
+                Message = 'No Restricted Groups configuration was found in this GPO.'
+                Applicability = 'Unknown'
+            })
         }
-        $expectedType = Get-ADAnalyzerPolicyValue $rule Type $null
-        $typeAliases = @{
-            REG_NONE = 0
-            REG_SZ = 1
-            REG_EXPAND_SZ = 2
-            REG_BINARY = 3
-            REG_DWORD = 4
-            REG_DWORD_BIG_ENDIAN = 5
-            REG_MULTI_SZ = 7
-            REG_QWORD = 11
+        $local = @(ConvertFrom-ADAnalyzerLocalUsersGroups $Policy.XmlFiles)
+        $itemIdentities = @(foreach ($item in $local) {
+                $kind = if ($item.Uid) {
+                    'Uid'
+                }
+                else {
+                    'Path'
+                }
+                $identity = if ($item.Uid) {
+                    $item.Uid
+                }
+                else {
+                    $item.ItemPath
+                }
+                $target + '/LocalUsersGroups/' + (Join-ADAnalyzerPolicyIdentity `
+                        -Parts @($item.Scope,
+                        ([string]$item.Source).Replace('\',
+                            '/'),
+                        $kind,
+                        $identity))
+            })
+        $itemTargets = @(Resolve-ADAnalyzerPolicyIdentityCollisions -Targets $itemIdentities)
+        $itemIndex = 0
+        foreach ($item in $local) {
+            $checkTarget = $itemTargets[$itemIndex]
+            $itemIndex++
+            $privileged = $item.Sid -eq 'S-1-5-32-544' -or $item.Name -ieq 'Administrators'
+            $additions = @($item.Members | Where-Object Action -eq 'ADD')
+            $unknown = @($additions | Where-Object { -not $_.Sid }).Count -gt 0
+            $bad = @($additions | Where-Object { $_.Sid -and $approved -notcontains $_.Sid })
+            $status = if (-not $item.Valid -or -not $approvedValid) {
+                'Invalid'
+            }
+            elseif ($item.Disabled -or $item.Action -eq 'D') {
+                'NotApplicable'
+            }
+            elseif ($item.Kind -ne 'Group' -or -not $privileged) {
+                'Unknown'
+            }
+            elseif ($bad.Count) {
+                'Fail'
+            }
+            elseif ($unknown) {
+                'Unknown'
+            }
+            else {
+                'Pass'
+            }
+            $this.Emit($state, @{
+                RuleId = 'GPO.Preferences.LocalUsersGroups'
+                Status = $status
+                Severity = 'High'
+                Category = 'LocalUsersGroups'
+                Target = $checkTarget
+                Observed = $item
+                Expected = $approved
+                Evidence = @{
+                    Path = $item.Source
+                    Targeting = $item.Targeted
+                    Disabled = $item.Disabled
+                    Action = $item.Action
+                }
+                Message = 'Preference actions and member additions/removals are preserved. Targeting filters have not been evaluated, and an update is not a complete effective membership inventory.'
+                Applicability = (Get-ADAnalyzerPolicyApplicability $Gpo $item.Scope $Profile `
+                        -Targeted:$item.Targeted `
+                        -Disabled:$item.Disabled)
+            })
         }
-        if ($null -ne $expectedType -and $typeAliases.ContainsKey([string]$expectedType)) {
-            $expectedType = $typeAliases[[string]$expectedType]
+        if (-not $local.Count) {
+            $this.Emit($state, @{
+                RuleId = 'GPO.Preferences.LocalUsersGroups'
+                Status = 'NotConfigured'
+                Severity = 'High'
+                Category = 'LocalUsersGroups'
+                Target = ($target + '/LocalUsersGroups')
+                Observed = $null
+                Expected = $approved
+                Evidence = $null
+                Message = 'No Local Users and Groups preference was found in this GPO.'
+                Applicability = 'Unknown'
+            })
         }
-        if (Get-ADAnalyzerPolicyValue $rule Aggregate $false) {
-            foreach ($group in @($matches | Group-Object Scope, Source)) {
-                $sample = $group.Group[0]
-                $observed = @($group.Group | ForEach-Object { $_.Value })
-                $checkTarget = $target + '/Expected/' + $id + '/Aggregate/' + $sample.Scope + '/' + ([string]$sample.Source).Replace('\',
-                    '/')
+
+        $rights = Get-ADAnalyzerPolicyProfileValue $Profile AllowedUserRightSids @{}
+        foreach ($right in @($Policy.SecuritySettings | Where-Object Kind -eq 'UserRightsAssignment')) {
+            $principals = @($right.Value | ForEach-Object { ConvertFrom-ADAnalyzerPolicyPrincipal ([string]$_) })
+            $hasAllowlist = $rights -is [Collections.IDictionary] -and $rights.Contains($right.Name)
+            $expected = $null
+            $allowlistValid = $false
+            if ($hasAllowlist) {
+                $allowlistValid = Test-ADAnalyzerPolicySidList $rights[$right.Name]
+                $expected = @($rights[$right.Name])
+            }
+            $status = if (@($principals | Where-Object { -not $_.Valid }).Count -or ($hasAllowlist -and -not $allowlistValid)) {
+                'Invalid'
+            }
+            elseif (-not $hasAllowlist -or @($principals | Where-Object { -not $_.Sid }).Count) {
+                'Unknown'
+            }
+            elseif (@($principals | Where-Object { @($expected) -notcontains $_.Sid }).Count) {
+                'Fail'
+            }
+            else {
+                'Pass'
+            }
+            $this.Emit($state, @{
+                RuleId = ('GPO.UserRights.' + $right.Name)
+                Status = $status
+                Severity = 'High'
+                Category = 'UserRightsAssignment'
+                Target = ($target + '/' + $right.Scope + '/' + $right.Source + '/' + $right.Name)
+                Observed = $principals
+                Expected = $expected
+                Evidence = @{
+                    Path = $right.Source
+                    Right = $right.Name
+                }
+                Message = 'User rights are compared with exact approved SIDs, never principal-name substrings. An unspecified allowlist is Unknown.'
+                Applicability = (Get-ADAnalyzerPolicyApplicability $Gpo $right.Scope $Profile)
+            })
+        }
+        if ($rights -is [Collections.IDictionary]) {
+            foreach ($name in $rights.Keys) {
+                if (-not @($Policy.SecuritySettings | Where-Object { $_.Kind -eq 'UserRightsAssignment' -and $_.Name -eq $name }).Count) {
+                    $this.Emit($state, @{
+                        RuleId = ('GPO.UserRights.' + $name)
+                        Status = 'NotConfigured'
+                        Severity = 'High'
+                        Category = 'UserRightsAssignment'
+                        Target = ($target + '/UserRights/' + $name)
+                        Observed = $null
+                        Expected = $rights[$name]
+                        Evidence = $null
+                        Message = 'This configured baseline right is absent from this GPO.'
+                        Applicability = 'Unknown'
+                    })
+                }
+            }
+        }
+    }
+
+    hidden [void] EvaluateCustomBaseline([hashtable]$state) {
+        $Gpo = $state.Gpo
+        $Policy = $state.Policy
+        $Profile = $state.Profile
+        $target = $state.Target
+        $registry = $state.Registry
+        foreach ($rule in @(Get-ADAnalyzerPolicyValue $Profile RegistryRules @()) + @(Get-ADAnalyzerPolicyValue $Profile ExpectedGpoSettings @())) {
+            $kind = Get-ADAnalyzerPolicyValue $rule Kind 'Registry'
+            $name = Get-ADAnalyzerPolicyValue $rule Name ''
+            $id = Get-ADAnalyzerPolicyValue $rule RuleId (Get-ADAnalyzerPolicyValue $rule Id ($kind + '.' + $name + '.' + $rule.Key + '.' + $rule.ValueName))
+            $severity = Get-ADAnalyzerPolicyValue $rule Severity 'Medium'
+            $expected = $rule.Expected
+            $operator = Get-ADAnalyzerPolicyValue $rule Operator 'Equals'
+            $matches = @(if ($kind -eq 'Registry') {
+                    $registry | Where-Object { $_.Hive -ieq (Get-ADAnalyzerPolicyValue $rule Hive 'HKLM') -and
+                        $_.Key -ieq $rule.Key -and
+                        $_.ValueName -ieq $rule.ValueName -and
+                        -not $_.Deleted }
+                }
+                else {
+                    $Policy.SecuritySettings | Where-Object { $_.Kind -eq $kind -and $_.Name -eq $name }
+                })
+            $scope = Get-ADAnalyzerPolicyValue $rule Scope ''
+            if ($scope) {
+                $matches = @($matches | Where-Object { $_.Scope -ieq $scope })
+            }
+            if (-not $matches.Count) {
+                $this.Emit($state, @{
+                    RuleId = ('GPO.Expected.' + $id)
+                    Status = 'NotConfigured'
+                    Severity = $severity
+                    Category = 'PolicyBaseline'
+                    Target = ($target + '/Expected/' + $id + '/' + $scope)
+                    Observed = $null
+                    Expected = $expected
+                    Evidence = @{
+                        Kind = $kind
+                        Name = $name
+                        Scope = $scope
+                    }
+                    Message = 'The expected setting is not configured in the requested GPO scope; effective policy remains unknown.'
+                    Applicability = 'Unknown'
+                })
+                continue
+            }
+            $expectedType = Get-ADAnalyzerPolicyValue $rule Type $null
+            $typeAliases = @{
+                REG_NONE = 0
+                REG_SZ = 1
+                REG_EXPAND_SZ = 2
+                REG_BINARY = 3
+                REG_DWORD = 4
+                REG_DWORD_BIG_ENDIAN = 5
+                REG_MULTI_SZ = 7
+                REG_QWORD = 11
+            }
+            if ($null -ne $expectedType -and $typeAliases.ContainsKey([string]$expectedType)) {
+                $expectedType = $typeAliases[[string]$expectedType]
+            }
+            if (Get-ADAnalyzerPolicyValue $rule Aggregate $false) {
+                foreach ($group in @($matches | Group-Object Scope, Source)) {
+                    $sample = $group.Group[0]
+                    $observed = @($group.Group | ForEach-Object { $_.Value })
+                    $checkTarget = $target + '/Expected/' + $id + '/Aggregate/' + $sample.Scope + '/' + ([string]$sample.Source).Replace('\',
+                        '/')
+                    try {
+                        if (@($group.Group | Where-Object { -not (Test-ADAnalyzerPolicyValueValid $_) }).Count) {
+                            throw 'The stored value is invalid'
+                        }
+                        if ($kind -eq 'Registry' -and $null -ne $expectedType) {
+                            $declared = ConvertTo-ADAnalyzerPolicyNumber $expectedType
+                            foreach ($record in $group.Group) {
+                                $actual = ConvertTo-ADAnalyzerPolicyNumber $record.Type
+                                if (-not $declared.Valid -or -not $actual.Valid -or $declared.Value -ne $actual.Value) {
+                                    throw 'The registry data type does not match the baseline'
+                                }
+                            }
+                        }
+                        $status = if (Test-ADAnalyzerPolicyComparison $observed $expected $operator) {
+                            'Pass'
+                        }
+                        else {
+                            'Fail'
+                        }
+                    }
+                    catch {
+                        $status = 'Invalid'
+                    }
+                    $this.Emit($state, @{
+                        RuleId = ('GPO.Expected.' + $id)
+                        Status = $status
+                        Severity = $severity
+                        Category = 'PolicyBaseline'
+                        Target = $checkTarget
+                        Observed = $observed
+                        Expected = $expected
+                        Evidence = @{
+                            Path = $sample.Source
+                            Scope = $sample.Scope
+                            Operator = $operator
+                            Aggregate = $true
+                            ExpectedRegistryType = $expectedType
+                        }
+                        Message = 'The complete configured value collection was compared as a set within its source and scope.'
+                        Applicability = (Get-ADAnalyzerPolicyApplicability $Gpo $sample.Scope $Profile)
+                    })
+                }
+                continue
+            }
+            $identities = @{}
+            $occurrences = @{}
+            foreach ($row in $matches) {
+                $settingIdentity = if ($kind -eq 'Registry') {
+                    [string]$row.Hive + '/' + $row.Key + '/' + $row.ValueName
+                }
+                else {
+                    $kind + '/' + $row.Name
+                }
+                $rowIdentity = ([string]$row.Source).Replace('\', '/') + '/' + $row.Scope + '/' + $settingIdentity
+                if (-not $identities.ContainsKey($rowIdentity)) {
+                    $identities[$rowIdentity] = 0
+                }
+                $identities[$rowIdentity]++
+            }
+            foreach ($row in $matches) {
+                $settingIdentity = if ($kind -eq 'Registry') {
+                    [string]$row.Hive + '/' + $row.Key + '/' + $row.ValueName
+                }
+                else {
+                    $kind + '/' + $row.Name
+                }
+                $rowIdentity = ([string]$row.Source).Replace('\', '/') + '/' + $row.Scope + '/' + $settingIdentity
+                if (-not $occurrences.ContainsKey($rowIdentity)) {
+                    $occurrences[$rowIdentity] = 0
+                }
+                $occurrences[$rowIdentity]++
+                $checkTarget = $target + '/Expected/' + $id + '/' + $rowIdentity
+                if ($identities[$rowIdentity] -gt 1) {
+                    $checkTarget += '/duplicate/' + $occurrences[$rowIdentity]
+                }
                 try {
-                    if (@($group.Group | Where-Object { -not (Test-ADAnalyzerPolicyValueValid $_) }).Count) {
+                    if (-not (Test-ADAnalyzerPolicyValueValid $row)) {
                         throw 'The stored value is invalid'
                     }
                     if ($kind -eq 'Registry' -and $null -ne $expectedType) {
                         $declared = ConvertTo-ADAnalyzerPolicyNumber $expectedType
-                        foreach ($record in $group.Group) {
-                            $actual = ConvertTo-ADAnalyzerPolicyNumber $record.Type
-                            if (-not $declared.Valid -or -not $actual.Valid -or $declared.Value -ne $actual.Value) {
-                                throw 'The registry data type does not match the baseline'
-                            }
+                        $actual = ConvertTo-ADAnalyzerPolicyNumber $row.Type
+                        if (-not $declared.Valid -or -not $actual.Valid -or $declared.Value -ne $actual.Value) {
+                            throw 'The registry data type does not match the baseline'
                         }
                     }
-                    $status = if (Test-ADAnalyzerPolicyComparison $observed $expected $operator) {
+                    $pass = Test-ADAnalyzerPolicyComparison $row.Value $expected $operator
+                    $status = if ($pass) {
                         'Pass'
                     }
                     else {
@@ -1533,133 +1715,94 @@ function Test-ADAnalyzerGpoPolicy {
                 catch {
                     $status = 'Invalid'
                 }
-                New-ADAnalyzerCheck `
-                    -RuleId ('GPO.Expected.' + $id) `
-                    -Status $status `
-                    -Severity $severity `
-                    -Category PolicyBaseline `
-                    -Target $checkTarget `
-                    -Observed $observed `
-                    -Expected $expected `
-                    -Evidence @{
-                    Path = $sample.Source
-                    Scope = $sample.Scope
-                    Operator = $operator
-                    Aggregate = $true
-                    ExpectedRegistryType = $expectedType
-                } `
-                    -Message 'The complete configured value collection was compared as a set within its source and scope.' `
-                    -Applicability (Get-ADAnalyzerPolicyApplicability $Gpo $sample.Scope $Profile)
-            }
-            continue
-        }
-        $identities = @{}
-        $occurrences = @{}
-        foreach ($row in $matches) {
-            $settingIdentity = if ($kind -eq 'Registry') {
-                [string]$row.Hive + '/' + $row.Key + '/' + $row.ValueName
-            }
-            else {
-                $kind + '/' + $row.Name
-            }
-            $rowIdentity = ([string]$row.Source).Replace('\', '/') + '/' + $row.Scope + '/' + $settingIdentity
-            if (-not $identities.ContainsKey($rowIdentity)) {
-                $identities[$rowIdentity] = 0
-            }
-            $identities[$rowIdentity]++
-        }
-        foreach ($row in $matches) {
-            $settingIdentity = if ($kind -eq 'Registry') {
-                [string]$row.Hive + '/' + $row.Key + '/' + $row.ValueName
-            }
-            else {
-                $kind + '/' + $row.Name
-            }
-            $rowIdentity = ([string]$row.Source).Replace('\', '/') + '/' + $row.Scope + '/' + $settingIdentity
-            if (-not $occurrences.ContainsKey($rowIdentity)) {
-                $occurrences[$rowIdentity] = 0
-            }
-            $occurrences[$rowIdentity]++
-            $checkTarget = $target + '/Expected/' + $id + '/' + $rowIdentity
-            if ($identities[$rowIdentity] -gt 1) {
-                $checkTarget += '/duplicate/' + $occurrences[$rowIdentity]
-            }
-            try {
-                if (-not (Test-ADAnalyzerPolicyValueValid $row)) {
-                    throw 'The stored value is invalid'
-                }
-                if ($kind -eq 'Registry' -and $null -ne $expectedType) {
-                    $declared = ConvertTo-ADAnalyzerPolicyNumber $expectedType
-                    $actual = ConvertTo-ADAnalyzerPolicyNumber $row.Type
-                    if (-not $declared.Valid -or -not $actual.Valid -or $declared.Value -ne $actual.Value) {
-                        throw 'The registry data type does not match the baseline'
+                $this.Emit($state, @{
+                    RuleId = ('GPO.Expected.' + $id)
+                    Status = $status
+                    Severity = $severity
+                    Category = 'PolicyBaseline'
+                    Target = $checkTarget
+                    Observed = $row.Value
+                    Expected = $expected
+                    Evidence = @{
+                        Path = $row.Source
+                        Scope = $row.Scope
+                        Operator = $operator
+                        RegistryType = $row.Type
+                        ExpectedRegistryType = $expectedType
                     }
-                }
-                $pass = Test-ADAnalyzerPolicyComparison $row.Value $expected $operator
-                $status = if ($pass) {
-                    'Pass'
-                }
-                else {
-                    'Fail'
-                }
+                    Message = 'Stored setting scope, registry type when specified, and value were assessed against the configured baseline rule.'
+                    Applicability = (Get-ADAnalyzerPolicyApplicability $Gpo $row.Scope $Profile)
+                })
             }
-            catch {
-                $status = 'Invalid'
-            }
-            New-ADAnalyzerCheck `
-                -RuleId ('GPO.Expected.' + $id) `
-                -Status $status `
-                -Severity $severity `
-                -Category PolicyBaseline `
-                -Target $checkTarget `
-                -Observed $row.Value `
-                -Expected $expected `
-                -Evidence @{
-                Path = $row.Source
-                Scope = $row.Scope
-                Operator = $operator
-                RegistryType = $row.Type
-                ExpectedRegistryType = $expectedType
-            } `
-                -Message 'Stored setting scope, registry type when specified, and value were assessed against the configured baseline rule.' `
-                -Applicability (Get-ADAnalyzerPolicyApplicability $Gpo $row.Scope $Profile)
         }
     }
-    $unsupportedInf = @($Policy.IniSettings | Where-Object {
-            $_.Analyzed -is [bool] -and -not $_.Analyzed -and $_.Section -in 'System Access', 'Kerberos Policy' -and
-            (Test-ADAnalyzerSecurityTemplateSource -Scope $_.Scope -Source $_.Source)
-        })
-    if ($unsupportedInf.Count) {
-        New-ADAnalyzerCheck `
-            -RuleId 'GPO.Coverage.UnsupportedInfSettings' `
-            -Status Unknown `
-            -Severity Information `
-            -Category PolicyCoverage `
-            -Target ($target + '/UnsupportedInfSettings') `
-            -Observed @($unsupportedInf | Select-Object Scope,
-            Source,
-            Section,
-            Name) `
-            -Expected 'Known setting in its authoritative section' `
-            -Evidence $null `
-            -Message 'Unknown or misplaced account-template entries remain inventoried; their policy behavior was not assessed.' `
-            -Applicability Unknown
+
+    hidden [void] EvaluateCoverage([hashtable]$state) {
+        $Gpo = $state.Gpo
+        $Policy = $state.Policy
+        $Profile = $state.Profile
+        $target = $state.Target
+        $unsupportedInf = @($Policy.IniSettings | Where-Object {
+                $_.Analyzed -is [bool] -and -not $_.Analyzed -and $_.Section -in 'System Access', 'Kerberos Policy' -and
+                (Test-ADAnalyzerSecurityTemplateSource -Scope $_.Scope -Source $_.Source)
+            })
+        if ($unsupportedInf.Count) {
+            $this.Emit($state, @{
+                RuleId = 'GPO.Coverage.UnsupportedInfSettings'
+                Status = 'Unknown'
+                Severity = 'Information'
+                Category = 'PolicyCoverage'
+                Target = ($target + '/UnsupportedInfSettings')
+                Observed = @($unsupportedInf | Select-Object Scope,
+                    Source,
+                    Section,
+                    Name)
+                Expected = 'Known setting in its authoritative section'
+                Evidence = $null
+                Message = 'Unknown or misplaced account-template entries remain inventoried; their policy behavior was not assessed.'
+                Applicability = 'Unknown'
+            })
+        }
+        if (@($Policy.UnparsedFiles).Count) {
+            $this.Emit($state, @{
+                RuleId = 'GPO.Coverage.UnsupportedFiles'
+                Status = 'Unknown'
+                Severity = 'Information'
+                Category = 'PolicyCoverage'
+                Target = ($target + '/UnsupportedFiles')
+                Observed = @($Policy.UnparsedFiles | Select-Object Scope,
+                    Path,
+                    Kind)
+                Expected = 'Supported parsed content'
+                Evidence = $null
+                Message = 'Unsupported files remain inventoried; their policy behavior was not assessed.'
+                Applicability = 'Unknown'
+            })
+        }
     }
-    if (@($Policy.UnparsedFiles).Count) {
-        New-ADAnalyzerCheck `
-            -RuleId 'GPO.Coverage.UnsupportedFiles' `
-            -Status Unknown `
-            -Severity Information `
-            -Category PolicyCoverage `
-            -Target ($target + '/UnsupportedFiles') `
-            -Observed @($Policy.UnparsedFiles | Select-Object Scope,
-            Path,
-            Kind) `
-            -Expected 'Supported parsed content' `
-            -Evidence $null `
-            -Message 'Unsupported files remain inventoried; their policy behavior was not assessed.' `
-            -Applicability Unknown
+}
+
+function Test-ADAnalyzerGpoPolicy {
+    <# .SYNOPSIS Assesses stored GPO content without querying a domain or calculating RSoP.
+       .DESCRIPTION RegistryRules entries use Id, Hive, Key, ValueName, Operator, Expected and Severity.
+       ExpectedGpoSettings use Kind (Account/SecurityOptions/Registry), Name, Operator and Expected.
+       Unknown applicability is preserved; a configured-risk finding is not proof that a target applies it.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Gpo,
+        [Parameter(Mandatory)]$Policy,
+        [Parameter(Mandatory)][hashtable]$Profile
+
+    )
+    $evaluator = [ADAnalyzerGpoPolicyEvaluator]::new()
+    $preference = if ($PSBoundParameters.ContainsKey('ErrorAction')) {
+        $PSBoundParameters.ErrorAction
     }
+    else {
+        $ErrorActionPreference
+    }
+    $evaluator.EvaluateForCommand($Gpo, $Policy, $Profile, $PSCmdlet, $preference)
 }
 
 function Get-ADAnalyzerAdmxValue {

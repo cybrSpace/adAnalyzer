@@ -90,6 +90,24 @@ function New-IdentityPreferenceFile([string]$Path, [object[]]$Entries, [string]$
 function Get-IdentityPreferenceChecks($Policy) {
     @(Get-PolicyChecks $Policy | Where-Object RuleId -eq 'GPO.Preferences.LocalUsersGroups')
 }
+foreach ($mode in @('Construction', 'Parity', 'PartialProfile', 'Secrets', 'Types', 'Streaming', 'Validation', 'Isolation', 'Order')) {
+    Test-Policy ('constructor GPO policy: ' + $mode) {
+        $childArguments = @(
+            '-NoLogo'
+            '-NoProfile'
+            '-NonInteractive'
+            '-File'
+            (Join-Path $RepositoryRoot 'tests/GpoPolicyClassFixture.ps1')
+            '-RepositoryRoot'
+            $RepositoryRoot
+            '-Mode'
+            $mode
+        )
+        $output = @(& (Get-Process -Id $PID).Path @childArguments)
+        Assert-Policy ($LASTEXITCODE -eq 0) 'GPO policy class child failed'
+        Assert-Policy (($output -join ' ') -match ('PASS GPO policy class ' + $mode)) 'GPO policy class child did not finish'
+    }
+}
 Test-Policy 'raw credentials and presence markers describe one XML owner' {
     foreach ($attributes in @('cpassword="fixture-secret" cpasswordPresent="true"',
             'cpassword="fixture-secret" cpasswordPresent="false"',
