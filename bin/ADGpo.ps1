@@ -370,9 +370,12 @@ function Read-ADAnalyzerGpo {
         $scope = $pair[0]
         $side = Join-Path $root.FullName $pair[1]
         try {
-            $null = Get-Item -LiteralPath $side -Force -ErrorAction Stop
+            $sideItem = Get-Item -LiteralPath $side -Force -ErrorAction Stop
         }
         catch [System.Management.Automation.ItemNotFoundException] {
+            continue
+        }
+        if ($null -eq $sideItem) {
             continue
         }
         foreach ($file in Get-ChildItem -LiteralPath $side -Recurse -File -Force -ErrorAction Stop) {

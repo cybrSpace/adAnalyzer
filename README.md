@@ -47,6 +47,8 @@ $offline = Read-ADAnalyzerGpo -Path 'C:\PolicyCopies\{GPO-GUID}'
 
 Registry source identities from the outer GPO reader are `Machine/Registry.pol` or `User/Registry.pol`, so copying an identical policy or changing its SYSVOL root does not change its check identities. Raw writes and bytes remain inventory; assessment metadata enrichment uses final effective values, including deletion records. Comparing an older snapshot that uses absolute registry sources may report identity changes. The low-level registry parser retains its supplied file path.
 
+Missing Machine/User folders are skipped on all supported engines, including Windows PowerShell 5.1 when its literal lookup returns no item for a bracketed path. The reader checks the returned side item as well as the missing-item exception. Access-denied and unexpected read errors remain terminating.
+
 All relative GPO source and inventory paths use forward slashes across Windows and portable offline hosts. Physical file-read paths and the returned policy root are preserved. Older snapshots containing native backslash separators may show identity or evidence changes when compared with canonical-path snapshots.
 
 Local Users and Groups preference checks follow their scope, source, and UID; missing UIDs use a file-local XML path. Security-option checks follow their scope, source, and setting. Unrelated file/item insertion or source removal does not renumber existing identities. Repeated identities remain separate, with occurrence suffixes confined to their duplicate family. Missing-UID sibling positions and ambiguous duplicate occurrences can still change identity when those items are reordered. Older ordinal-based snapshots may show identity changes when compared with these snapshots.
