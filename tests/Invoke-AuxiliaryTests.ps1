@@ -394,6 +394,31 @@ try {
             Assert-True (($output -join ' ') -match ('PASS group inventory ' + $mode)) 'Group inventory child did not finish'
         }
     }
+    foreach ($mode in @('Inert',
+            'Comparison',
+            'Sets',
+            'Connections',
+            'Validation',
+            'Failures',
+            'Class',
+            'Cli')) {
+        Invoke-AuxiliaryTest ('group comparison contract: ' + $mode) {
+            $childArguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                (Join-Path $RepositoryRoot 'tests/GroupComparisonFixture.ps1')
+                '-RepositoryRoot'
+                $RepositoryRoot
+                '-Mode'
+                $mode
+            )
+            $output = @(& (Get-Process -Id $PID).Path @childArguments)
+            Assert-Equal 0 $LASTEXITCODE
+            Assert-True (($output -join ' ') -match ('PASS group comparison ' + $mode)) 'Group comparison child did not finish'
+        }
+    }
     $nameFixture = Join-Path $script:Temporary 'computer-admin-name-fixture.ps1'
     Write-FixtureText $nameFixture @"
 param([string]`$Root,[string]`$WorkingDirectory)
