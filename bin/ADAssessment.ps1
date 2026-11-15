@@ -1,3 +1,245 @@
+# Keep configuration in real private .NET state; PowerShell hidden fields serialize.
+if (-not ('ADAnalyzer.ConfigurationState' -as [type])) {
+    Add-Type -Path (Join-Path $PSScriptRoot 'ADConfiguration.cs') -ErrorAction Stop
+}
+
+class ADAnalyzerAssessmentEngine {
+    hidden [object]$Settings
+
+    ADAnalyzerAssessmentEngine() {
+        $profile = Import-ADAnalyzerProfile
+        $this.Settings = [Activator]::CreateInstance(
+            ('ADAnalyzer.ConfigurationState' -as [type]),
+            [object[]]@($profile)
+        )
+    }
+
+    ADAnalyzerAssessmentEngine([object]$Profile) {
+        $configuration = Import-ADAnalyzerProfile -Profile $Profile
+        $this.Settings = [Activator]::CreateInstance(
+            ('ADAnalyzer.ConfigurationState' -as [type]),
+            [object[]]@($configuration)
+        )
+    }
+
+    [object] Evaluate([object]$DirectoryData) {
+        return $this.Evaluate($DirectoryData, @(), 'offline')
+    }
+
+    [object] Evaluate([object]$DirectoryData, [array]$GpoData) {
+        return $this.Evaluate($DirectoryData, $GpoData, 'offline')
+    }
+
+    [object] Evaluate([object]$DirectoryData, [array]$GpoData, [string]$Target) {
+        return $this.EvaluateCore($DirectoryData, $GpoData, $Target, $null, 'Stop')
+    }
+
+    hidden [object] EvaluateForCommand(
+        [object]$DirectoryData,
+        [array]$GpoData,
+        [string]$Target,
+        [Management.Automation.PSCmdlet]$CommandContext,
+        [Management.Automation.ActionPreference]$ErrorPreference
+    ) {
+        return $this.EvaluateCore($DirectoryData, $GpoData, $Target, $CommandContext, $ErrorPreference)
+    }
+
+    hidden [object[]] InvokeChecks(
+        [Management.Automation.CommandInfo]$Command,
+        [hashtable]$Arguments,
+        [Management.Automation.PSCmdlet]$CommandContext,
+        [Management.Automation.ActionPreference]$ErrorPreference
+    ) {
+        $ErrorActionPreference = if ($null -ne $CommandContext -and
+            $ErrorPreference -notin 'Stop', 'Ignore') {
+            'Continue'
+        }
+        else {
+            $ErrorPreference
+        }
+        $values = [Collections.Generic.List[object]]::new()
+        foreach ($item in @(& $Command @Arguments 2>&1)) {
+            if ($item -is [Management.Automation.ErrorRecord]) {
+                if ($null -eq $CommandContext) {
+                    throw $item
+                }
+                $CommandContext.WriteError($item)
+            }
+            else {
+                $values.Add($item)
+            }
+        }
+        return $values.ToArray()
+    }
+
+    hidden [object] EvaluateCore(
+        [object]$DirectoryData,
+        [array]$GpoData,
+        [string]$Target,
+        [Management.Automation.PSCmdlet]$CommandContext,
+        [Management.Automation.ActionPreference]$ErrorPreference
+    ) {
+        $ErrorActionPreference = $ErrorPreference
+        if ($null -eq $DirectoryData) {
+            throw 'DirectoryData is required.'
+        }
+        $configuration = $this.Settings.GetProfile()
+        $checks = [Collections.ArrayList]::new()
+        $directoryArguments = @{
+            Data = $DirectoryData
+            Profile = $configuration
+        }
+        $directoryChecks = $this.InvokeChecks(
+            (Get-Command Test-ADAnalyzerDirectoryPolicy),
+            $directoryArguments,
+            $CommandContext,
+            $ErrorPreference
+        )
+        foreach ($check in $directoryChecks) {
+            $null = $checks.Add($check)
+        }
+        foreach ($check in @($DirectoryData.HostChecks | Where-Object { $null -ne $_ })) {
+            $null = $checks.Add($check)
+        }
+        foreach ($gpo in $GpoData) {
+            if ($gpo.Error) {
+                $identity = if ($gpo.Gpo.Id) {
+                    [string]$gpo.Gpo.Id
+                }
+                else {
+                    $Target
+                }
+                $null = $checks.Add((New-ADAnalyzerCheck `
+                            -RuleId 'GPO.READ' `
+                            -Status Unreadable `
+                            -Severity High `
+                            -Category GroupPolicy `
+                            -Target $identity `
+                            -Message ([string]$gpo.Error)))
+                continue
+            }
+            $versionStatus = 'Unknown'
+            if ($null -ne $gpo.Policy.SysvolVersion -and $null -ne $gpo.Gpo.Version) {
+                $versionStatus = if ([long]$gpo.Policy.SysvolVersion -eq ([long]$gpo.Gpo.Version -band [long]4294967295)) {
+                    'Pass'
+                }
+                else {
+                    'Fail'
+                }
+            }
+            $null = $checks.Add((New-ADAnalyzerCheck `
+                        -RuleId 'GPO.VERSION_CONSISTENCY' `
+                        -Status $versionStatus `
+                        -Severity Medium `
+                        -Category PolicyCoverage `
+                        -Target ([string]$gpo.Gpo.Id + '/Version') `
+                        -Observed $gpo.Policy.SysvolVersion `
+                        -Expected $gpo.Gpo.Version `
+                        -Message 'Directory and SYSVOL versions should agree; missing versions or replication differences limit interpretation'))
+            $policyArguments = @{
+                Gpo = $gpo.Gpo
+                Policy = $gpo.Policy
+                Profile = $configuration
+            }
+            $policyChecks = $this.InvokeChecks(
+                (Get-Command Test-ADAnalyzerGpoPolicy),
+                $policyArguments,
+                $CommandContext,
+                $ErrorPreference
+            )
+            foreach ($check in $policyChecks) {
+                $null = $checks.Add($check)
+            }
+            if ($configuration.Analysis.TemplatePath) {
+                $metadataArguments = @{
+                    RegistrySettings = @(Get-ADAnalyzerEffectiveRegistryRecords $gpo.Policy.RegistrySettings)
+                    TemplatePath = $configuration.Analysis.TemplatePath
+                    Language = $configuration.Analysis.Language
+                }
+                $metadata = $this.InvokeChecks(
+                    (Get-Command Resolve-ADAnalyzerRegistryPolicy),
+                    $metadataArguments,
+                    $CommandContext,
+                    $ErrorPreference
+                )
+                foreach ($record in $metadata) {
+                    $label = Join-ADAnalyzerPolicyIdentity @([string]$gpo.Gpo.Id, $record.Hive, $record.Key, $record.ValueName)
+                    $status = if ($record.MetadataStatus -eq 'Resolved') {
+                        'Pass'
+                    }
+                    else {
+                        'Unknown'
+                    }
+                    $null = $checks.Add((New-ADAnalyzerCheck `
+                                -RuleId 'GPO.TEMPLATE_METADATA' `
+                                -Status $status `
+                                -Category Metadata `
+                                -Target $label `
+                                -Observed $record `
+                                -Expected 'Matching ADMX/ADML metadata' `
+                                -Message 'Metadata enrichment does not establish policy applicability'))
+                }
+            }
+        }
+        $evaluated = @($checks | Set-ADAnalyzerCheckException -Profile $configuration)
+        # Duplicate identities would make snapshot comparisons ambiguous.
+        $duplicates = @($evaluated | Group-Object CheckId | Where-Object Count -gt 1)
+        if ($duplicates.Count) {
+            throw ('Duplicate check identities: ' + (($duplicates | ForEach-Object Name) -join ', '))
+        }
+        $coverage = [ordered]@{}
+        foreach ($status in @('Pass', 'Fail', 'Unknown', 'Unreadable', 'NotApplicable', 'NotConfigured', 'Invalid')) {
+            $coverage[$status] = @($evaluated | Where-Object Status -eq $status).Count
+        }
+        $coverage['Suppressed'] = @($evaluated | Where-Object Suppressed).Count
+        $coverage['Total'] = $evaluated.Count
+        $objects = @(@($DirectoryData.Users) + @($DirectoryData.Computers) + @($DirectoryData.ServiceAccounts) | Where-Object { $null -ne $_ })
+        $errors = @($DirectoryData.Errors | Where-Object { $null -ne $_ }) + @($GpoData | Where-Object Error | ForEach-Object { [pscustomobject]@{
+                    Collection = 'GroupPolicy'
+                    Target = [string]$_.Gpo.Id
+                    Message = [string]$_.Error
+                } })
+        $state = if ($errors.Count -or $coverage.Unreadable -or $coverage.Unknown -or $coverage.Invalid) {
+            'Partial'
+        }
+        else {
+            'Complete'
+        }
+        if (-not $DirectoryData.Domain -and $Target -ne 'offline') {
+            $state = 'Failed'
+        }
+        $result = [pscustomobject][ordered]@{
+            SchemaVersion = 1
+            RunId = [guid]::NewGuid().ToString()
+            Timestamp = [datetime]::UtcNow.ToString('o')
+            Target = $Target
+            State = $state
+            Profile = [pscustomobject]@{
+                Name = $configuration.Name
+                Version = $configuration.Version
+                SchemaVersion = $configuration.SchemaVersion
+            }
+            Configuration = $configuration
+            Objects = $objects
+            Checks = $evaluated
+            Findings = @($evaluated | Where-Object { $_.Status -notin 'Pass', 'NotApplicable' })
+            Coverage = [pscustomobject]$coverage
+            Errors = $errors
+            Data = [pscustomobject]@{
+                Directory = $DirectoryData
+                Policies = @($GpoData | ForEach-Object { [pscustomobject]@{
+                            Gpo = $_.Gpo
+                            Files = $_.Policy.Files
+                            UnparsedFiles = $_.Policy.UnparsedFiles
+                            ReadError = $_.Error
+                        } })
+            }
+        }
+        # No credentials or secret-bearing native records escape the assessment boundary.
+        return (ConvertTo-ADAnalyzerSafeData -InputObject $result)
+    }
+}
+
 function Invoke-ADAnalyzerAssessment {
     <# Evaluate a collected snapshot without opening a directory connection. #>
     [CmdletBinding()]
@@ -8,131 +250,8 @@ function Invoke-ADAnalyzerAssessment {
         [string]$Target = 'offline'
 
     )
-    $configuration = Import-ADAnalyzerProfile -Profile $Profile
-    $checks = [Collections.ArrayList]::new()
-    foreach ($check in @(Test-ADAnalyzerDirectoryPolicy -Data $DirectoryData -Profile $configuration)) {
-        $null = $checks.Add($check)
-    }
-    foreach ($check in @($DirectoryData.HostChecks | Where-Object { $null -ne $_ })) {
-        $null = $checks.Add($check)
-    }
-    foreach ($gpo in $GpoData) {
-        if ($gpo.Error) {
-            $identity = if ($gpo.Gpo.Id) {
-                [string]$gpo.Gpo.Id
-            }
-            else {
-                $Target
-            }
-            $null = $checks.Add((New-ADAnalyzerCheck `
-                        -RuleId 'GPO.READ' `
-                        -Status Unreadable `
-                        -Severity High `
-                        -Category GroupPolicy `
-                        -Target $identity `
-                        -Message ([string]$gpo.Error)))
-            continue
-        }
-        $versionStatus = 'Unknown'
-        if ($null -ne $gpo.Policy.SysvolVersion -and $null -ne $gpo.Gpo.Version) {
-            $versionStatus = if ([long]$gpo.Policy.SysvolVersion -eq ([long]$gpo.Gpo.Version -band [long]4294967295)) {
-                'Pass'
-            }
-            else {
-                'Fail'
-            }
-        }
-        $null = $checks.Add((New-ADAnalyzerCheck `
-                    -RuleId 'GPO.VERSION_CONSISTENCY' `
-                    -Status $versionStatus `
-                    -Severity Medium `
-                    -Category PolicyCoverage `
-                    -Target ([string]$gpo.Gpo.Id + '/Version') `
-                    -Observed $gpo.Policy.SysvolVersion `
-                    -Expected $gpo.Gpo.Version `
-                    -Message 'Directory and SYSVOL versions should agree; missing versions or replication differences limit interpretation'))
-        foreach ($check in @(Test-ADAnalyzerGpoPolicy -Gpo $gpo.Gpo -Policy $gpo.Policy -Profile $configuration)) {
-            $null = $checks.Add($check)
-        }
-        if ($configuration.Analysis.TemplatePath) {
-            foreach ($record in @(Resolve-ADAnalyzerRegistryPolicy `
-                        -RegistrySettings @(Get-ADAnalyzerEffectiveRegistryRecords $gpo.Policy.RegistrySettings) `
-                        -TemplatePath $configuration.Analysis.TemplatePath `
-                        -Language $configuration.Analysis.Language)) {
-                $label = Join-ADAnalyzerPolicyIdentity @([string]$gpo.Gpo.Id, $record.Hive, $record.Key, $record.ValueName)
-                $status = if ($record.MetadataStatus -eq 'Resolved') {
-                    'Pass'
-                }
-                else {
-                    'Unknown'
-                }
-                $null = $checks.Add((New-ADAnalyzerCheck `
-                            -RuleId 'GPO.TEMPLATE_METADATA' `
-                            -Status $status `
-                            -Category Metadata `
-                            -Target $label `
-                            -Observed $record `
-                            -Expected 'Matching ADMX/ADML metadata' `
-                            -Message 'Metadata enrichment does not establish policy applicability'))
-            }
-        }
-    }
-    $evaluated = @($checks | Set-ADAnalyzerCheckException -Profile $configuration)
-    # Duplicate identities would make snapshot comparisons ambiguous.
-    $duplicates = @($evaluated | Group-Object CheckId | Where-Object Count -gt 1)
-    if ($duplicates.Count) {
-        throw ('Duplicate check identities: ' + (($duplicates | ForEach-Object Name) -join ', '))
-    }
-    $coverage = [ordered]@{}
-    foreach ($status in @('Pass', 'Fail', 'Unknown', 'Unreadable', 'NotApplicable', 'NotConfigured', 'Invalid')) {
-        $coverage[$status] = @($evaluated | Where-Object Status -eq $status).Count
-    }
-    $coverage['Suppressed'] = @($evaluated | Where-Object Suppressed).Count
-    $coverage['Total'] = $evaluated.Count
-    $objects = @(@($DirectoryData.Users) + @($DirectoryData.Computers) + @($DirectoryData.ServiceAccounts) | Where-Object { $null -ne $_ })
-    $errors = @($DirectoryData.Errors | Where-Object { $null -ne $_ }) + @($GpoData | Where-Object Error | ForEach-Object { [pscustomobject]@{
-                Collection = 'GroupPolicy'
-                Target = [string]$_.Gpo.Id
-                Message = [string]$_.Error
-            } })
-    $state = if ($errors.Count -or $coverage.Unreadable -or $coverage.Unknown -or $coverage.Invalid) {
-        'Partial'
-    }
-    else {
-        'Complete'
-    }
-    if (-not $DirectoryData.Domain -and $Target -ne 'offline') {
-        $state = 'Failed'
-    }
-    $result = [pscustomobject][ordered]@{
-        SchemaVersion = 1
-        RunId = [guid]::NewGuid().ToString()
-        Timestamp = [datetime]::UtcNow.ToString('o')
-        Target = $Target
-        State = $state
-        Profile = [pscustomobject]@{
-            Name = $configuration.Name
-            Version = $configuration.Version
-            SchemaVersion = $configuration.SchemaVersion
-        }
-        Configuration = $configuration
-        Objects = $objects
-        Checks = $evaluated
-        Findings = @($evaluated | Where-Object { $_.Status -notin 'Pass', 'NotApplicable' })
-        Coverage = [pscustomobject]$coverage
-        Errors = $errors
-        Data = [pscustomobject]@{
-            Directory = $DirectoryData
-            Policies = @($GpoData | ForEach-Object { [pscustomobject]@{
-                        Gpo = $_.Gpo
-                        Files = $_.Policy.Files
-                        UnparsedFiles = $_.Policy.UnparsedFiles
-                        ReadError = $_.Error
-                    } })
-        }
-    }
-    # No credentials or secret-bearing native records escape the assessment boundary.
-    ConvertTo-ADAnalyzerSafeData -InputObject $result
+    $engine = [ADAnalyzerAssessmentEngine]::new($Profile)
+    return $engine.EvaluateForCommand($DirectoryData, $GpoData, $Target, $PSCmdlet, $ErrorActionPreference)
 }
 
 function Get-ADAnalyzerAssessment {

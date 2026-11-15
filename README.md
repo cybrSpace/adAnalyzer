@@ -95,6 +95,23 @@ Credential-exposure and template-metadata check identities preserve their compon
 
 Zero-byte ordinary DWORD, big-endian DWORD, and QWORD records remain in the reader inventory as `KeyOnly` records; they do not establish an effective numeric value or satisfy a value baseline. Valid numeric zero still requires 4, 4, or 8 payload bytes respectively. Empty binary values and deletion directives retain their existing behavior. This follows the documented [zero-field key-creation interpretation](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/policy/registry-policy-file-format) without discarding the original policy record.
 
+## Constructor API
+
+Dot source the portable object entrypoint in a fresh PowerShell process to construct the assessment engine directly:
+
+```powershell
+. .\bin\ADAnalyzer.ps1
+$engine = [ADAnalyzerAssessmentEngine]::new($profile)
+$scan = $engine.Evaluate($directorySnapshot, $policyReports, 'example.com')
+# Defaults: an independent default profile, no policies, target 'offline'.
+$offlineEngine = [ADAnalyzerAssessmentEngine]::new()
+$scan = $offlineEngine.Evaluate($directorySnapshot)
+```
+
+The constructor validates and copies its in-memory profile without importing native modules or connecting to AD. Instance methods own assessment composition, policy/version evidence, suppression, duplicate detection, coverage, state, and safe report projection. Reports retain the existing detached assessment shape; the engine stores no credentials or collected records. A bundled C# configuration holder uses a private field, so serializing an engine does not serialize its profile. The built-in `Add-Type` loads that small source component; no separate build tool or external package is required. Each instance owns its configuration, and evaluating again does not retain earlier results. Direct methods throw on evaluation errors. The existing `Invoke-ADAnalyzerAssessment` command is a thin compatibility adapter with its original parameters and a transient command context for PowerShell error-stream/common-parameter behavior. Other engine components are being converted in separate verified units.
+
+Use this explicit dot-source entrypoint for literal constructor calls. Importing `ADEnvironment.psd1` remains the supported command interface; it does not promise caller visibility of classes defined in its dot-sourced component files. The constructor entrypoint supports portable offline evaluation; live collection still uses the package manifest and its bundled AD PSDrive/provider.
+
 ## Profiles and assessment coverage
 
 `Import-ADAnalyzerProfile` merges a JSON or restricted PSD1 data file with fresh defaults, validates input, and rejects unknown settings. `Get-ADAnalyzerDefaultProfile` shows every supported key. Profiles control account/password/lockout thresholds, account-role evidence, approved SIDs, custom registry expectations, OS lifecycle/build rules, and remediation approvals. `profiles/default.psd1` is inert; `profiles/example.psd1` documents customization. Profile files are data and cannot contain executable PowerShell scripts.

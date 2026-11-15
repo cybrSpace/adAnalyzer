@@ -212,6 +212,24 @@ function New-RegistryIdentityFixture([string]$Name, [switch]$Deleted) {
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('ad-assessment-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -Path $temp -ItemType Directory
 try {
+    foreach ($mode in @('Contract', 'Constructors', 'Isolation', 'Validation', 'Failures', 'States')) {
+        Test-Assessment ('constructor assessment engine: ' + $mode) {
+            $childArguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                (Join-Path $RepositoryRoot 'tests/AssessmentEngineFixture.ps1')
+                '-RepositoryRoot'
+                $RepositoryRoot
+                '-Mode'
+                $mode
+            )
+            $output = @(& (Get-Process -Id $PID).Path @childArguments)
+            Assert-Equal 0 $LASTEXITCODE
+            Assert-True (($output -join ' ') -match ('PASS assessment engine ' + $mode)) 'Assessment engine consumer did not finish'
+        }
+    }
     Test-Assessment 'invalid-only evidence is Partial while evaluated failures remain Complete' {
         $directory = New-AssessmentFixture
         $profile = Get-ADAnalyzerDefaultProfile
