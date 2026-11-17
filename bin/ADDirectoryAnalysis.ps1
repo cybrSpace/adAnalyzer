@@ -339,7 +339,7 @@ function Get-ADAnalyzerAccountType {
             $identities += @($Membership.EffectiveSids)
         }
         foreach ($group in @(Get-ADAnalyzerDirectoryField $classification ($type + 'Groups') @())) {
-            if ($group -in $identities) {
+            if ($group -and $group -in $identities) {
                 $evidence.Add([pscustomobject]@{
                         Type = $type
                         Source = 'Group'

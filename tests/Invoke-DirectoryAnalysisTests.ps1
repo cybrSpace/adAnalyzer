@@ -1190,6 +1190,137 @@ Invoke-DirectoryTest 'classification defaults Unknown and records conflicting ex
     Assert-DirectoryEqual 'Unknown' $type.Type
     Assert-DirectoryTrue $type.Conflicting 'Conflicting rules must not choose a type'
 }
+
+foreach ($accountType in @('User', 'Service')) {
+    foreach ($emptySelector in @($null, '')) {
+        $selectorLabel = if ($null -eq $emptySelector) {
+            'null'
+        }
+        else {
+            'empty'
+        }
+        Invoke-DirectoryTest ($selectorLabel + ' ' + $accountType + ' group selectors cannot classify absent membership') {
+            $rawProfile = Get-ADAnalyzerDefaultProfile
+            $rawProfile.AccountClassification[$accountType + 'Groups'] = @($emptySelector)
+            foreach ($profile in @($rawProfile, (Import-ADAnalyzerProfile -Profile $rawProfile))) {
+                foreach ($object in @(
+                        [pscustomobject]@{},
+                        [pscustomobject]@{
+                            MemberOf = $null
+                        },
+                        [pscustomobject]@{
+                            MemberOf = ''
+                        },
+                        [pscustomobject]@{
+                            MemberOf = @($null, '')
+                        }
+                    )) {
+                    foreach ($membership in @(
+                            $null,
+                            [pscustomobject]@{
+                                EffectiveSids = @()
+                            },
+                            [pscustomobject]@{
+                                EffectiveSids = @($null, '')
+                            }
+                        )) {
+                        $result = Get-ADAnalyzerAccountType -Object $object -Profile $profile -Membership $membership
+                        Assert-DirectoryEqual 'Unknown' $result.Type
+                        Assert-DirectoryEqual 0 $result.Evidence.Count
+                        Assert-DirectoryEqual 0 $result.InvalidRules.Count
+                        Assert-DirectoryEqual $false $result.Conflicting
+                    }
+                }
+            }
+        }
+    }
+}
+Invoke-DirectoryTest 'mixed group selectors preserve valid direct and effective evidence and conflicts' {
+    $profile = Get-ADAnalyzerDefaultProfile
+    $profile.AccountClassification.UserGroups = @($null, '', 'CN=People,DC=example,DC=invalid')
+    $profile.AccountClassification.ServiceGroups = @($null, '', 'S-1-5-21-1-2-3-1200')
+    $object = [pscustomobject]@{
+        MemberOf = @($null, '', 'cn=people,dc=example,dc=invalid')
+    }
+    $membership = [pscustomobject]@{
+        EffectiveSids = @($null, '', 'S-1-5-21-1-2-3-1200')
+    }
+    $result = Get-ADAnalyzerAccountType -Object $object -Profile $profile
+    Assert-DirectoryEqual 'User' $result.Type
+    Assert-DirectoryEqual 1 $result.Evidence.Count
+    Assert-DirectoryEqual 'CN=People,DC=example,DC=invalid' $result.Evidence[0].Value
+    $result = Get-ADAnalyzerAccountType -Object $object -Profile $profile -Membership $membership
+    Assert-DirectoryEqual 'Unknown' $result.Type
+    Assert-DirectoryTrue $result.Conflicting 'Valid opposite group selectors must retain conflict blocking.'
+    Assert-DirectoryEqual 2 $result.Evidence.Count
+    Assert-DirectoryEqual 'User,Service' ($result.Evidence.Type -join ',')
+    Assert-DirectoryEqual 'CN=People,DC=example,DC=invalid,S-1-5-21-1-2-3-1200' ($result.Evidence.Value -join ',')
+}
+Invoke-DirectoryTest 'collector preserves unknown classification for a null selector and unset memberOf' {
+    $originalMemberOf = $script:User.MemberOf
+    try {
+        $script:User.MemberOf = $null
+        $profile = Get-ADAnalyzerDefaultProfile
+        $profile.AccountClassification.UserGroups = $null
+        $data = Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile $profile
+        Assert-DirectoryEqual 'Unknown' $data.Users[0].AccountType
+        Assert-DirectoryEqual 0 $data.Users[0].AccountClassification.Evidence.Count
+        Assert-DirectoryEqual 'Complete' $data.Users[0].Membership.ResolutionStatus
+    }
+    finally {
+        $script:User.MemberOf = $originalMemberOf
+    }
+}
+Invoke-DirectoryTest 'fresh privilege guard blocks absent classification and accepts a real primary group control' {
+    . (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')
+    $object = [pscustomobject]@{
+        ObjectGuid = '11111111-1111-1111-1111-111111111111'
+        SID = ($script:DomainSid + '-1001')
+        DistinguishedName = 'CN=Fixture,DC=example,DC=invalid'
+        ObjectClass = 'User'
+        Enabled = $true
+        WhenChanged = [datetime]'2026-01-01T00:00:00Z'
+        UserAccountControl = 512
+        PrimaryGroupID = 513
+        AdminCount = 0
+        ProtectedFromAccidentalDeletion = $false
+        IsCriticalSystemObject = $false
+        SIDHistory = @()
+        MemberOf = $null
+    }
+    $profile = Get-ADAnalyzerDefaultProfile
+    $profile.AccountClassification.UserGroups = $null
+    $plan = [pscustomobject]@{
+        PrivilegedSids = @()
+        AccountClassification = $profile.AccountClassification
+        Remediation = $profile.Remediation
+    }
+    $action = [pscustomobject]@{
+        ObjectClass = 'User'
+        AccountType = 'User'
+    }
+    $parameters = @{
+        Object = $object
+        Action = $action
+        Plan = $plan
+        Connection = @{
+            Server = 'dc.example.invalid'
+            Credential = $script:Credential
+        }
+    }
+    $message = $null
+    try {
+        Assert-ADAnalyzerOperationPrivilege @parameters
+    }
+    catch {
+        $message = $_.Exception.Message
+    }
+    Assert-DirectoryEqual 'Fresh account classification is unknown or conflicting' $message
+    $plan.AccountClassification.UserGroups = @($script:DomainSid + '-513')
+    $output = @(Assert-ADAnalyzerOperationPrivilege @parameters)
+    Assert-DirectoryEqual 0 $output.Count
+}
+
 Invoke-DirectoryTest 'gMSA type comes from schema class rather than account name' {
     $type = Get-ADAnalyzerAccountType -Object ([pscustomobject]@{
             DirectoryObjectClass = 'msDS-GroupManagedServiceAccount'
