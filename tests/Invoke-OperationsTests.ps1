@@ -1545,18 +1545,32 @@ try {
                 '-Case'
                 $case
             )
-            $output = & $executable @arguments 2>&1
-            if ($LASTEXITCODE -ne 0) {
+            $fixtureErrorPreference = $ErrorActionPreference
+            try {
+                # Collect complete native stderr on 5.1 before enforcing the
+                # same child exit-code and discovery gates below.
+                $ErrorActionPreference = 'Continue'
+                $output = & $executable @arguments 2>&1
+                $fixtureExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $fixtureErrorPreference
+            }
+            if ($fixtureExitCode -ne 0) {
                 foreach ($line in $output) {
                     Write-Host ('Fixture output: ' + [string]$line)
                 }
                 throw 'Fresh secret indicator fixture failed.'
             }
+            foreach ($line in @($output | Where-Object {
+                        [string]$_ -like 'INFO secret indicator*'
+                    })) {
+                Write-Host ([string]$line)
+            }
             $marker = 'PASS secret indicator ' + $case + ' ' + $secretIndicatorCases[$case]
             Assert-True (($output -join ' ') -like ('*' + $marker + '*')) 'Fresh process did not execute all required secret indicator scenarios.'
         }
     }
-
 }
 finally {
     Remove-Item -LiteralPath $script:Temporary -Recurse -Force -WhatIf:$false -Confirm:$false

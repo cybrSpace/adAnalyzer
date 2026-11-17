@@ -1797,11 +1797,22 @@ namespace ADAnalyzer.SecretIndicatorFixture
         }
         'Serialization' {
             $empty = [ADAnalyzerSecretIndicator]::new()
-            Assert-Secret (-not (ConvertTo-Json `
-                        -InputObject $empty `
-                        -Depth 30 `
-                        -Compress).Contains($script:Marker) -and
-                -not [Management.Automation.PSSerializer]::Serialize($empty).Contains($script:Marker)) 'New service serialization retained fixture data.'
+            $emptyJson = ConvertTo-Json -InputObject $empty -Depth 30 -Compress
+            $emptyControl = [ADAnalyzerSecretIndicatorFixtureEmpty]::new()
+            $controlJson = ConvertTo-Json -InputObject $emptyControl -Depth 30 -Compress
+            $emptyXml = [Management.Automation.PSSerializer]::Serialize($empty)
+            Assert-Secret ($emptyJson -ceq $controlJson) 'Service JSON differs from an inert same-engine empty class.'
+            Assert-Secret (
+                -not [string]::IsNullOrWhiteSpace($emptyXml)
+            ) 'A non-null service produced no CLIXML.'
+            Assert-Secret (
+                -not ([string]$emptyJson).Contains($script:Marker) -and
+                -not $emptyXml.Contains($script:Marker)
+            ) 'New service serialization retained fixture data.'
+            Write-Host (
+                'INFO secret indicator empty-class JSON emitted: ' +
+                ($null -ne $emptyJson)
+            )
             $script:ExecutedScenarios++
             $document = New-SecretXml ('<Root Password="' + $script:Marker + '"><Password>' + $script:Marker + '</Password></Root>')
             $password = New-SecretSecure $true
@@ -1847,13 +1858,17 @@ namespace ADAnalyzer.SecretIndicatorFixture
                 $instance = [ADAnalyzerSecretIndicator]::new()
                 $beforeJson = ConvertTo-Json -InputObject $instance -Depth 30 -Compress
                 $beforeXml = [Management.Automation.PSSerializer]::Serialize($instance)
+                Assert-Secret (
+                    $beforeJson -ceq $controlJson -and
+                    -not [string]::IsNullOrWhiteSpace($beforeXml)
+                ) 'New instance serialization differs from the native empty-state contract.'
                 $scenario = New-SecretScenario Serialization $workload.Operation $workload.Value
                 $result = Invoke-SecretScenario $scenario $instance
                 $json = ConvertTo-Json -InputObject $instance -Depth 30 -Compress
                 $xml = [Management.Automation.PSSerializer]::Serialize($instance)
                 Assert-Secret ($json -ceq $beforeJson -and
                     $xml -ceq $beforeXml -and
-                    -not $json.Contains($script:Marker) -and
+                    -not ([string]$json).Contains($script:Marker) -and
                     -not $xml.Contains($script:Marker)) 'Native service serialization captured input or results.'
                 $resultJson = ConvertTo-Json -InputObject $result -Depth 30 -Compress
                 $nullJson = ConvertTo-Json -InputObject $null -Depth 30 -Compress
@@ -1870,9 +1885,13 @@ namespace ADAnalyzer.SecretIndicatorFixture
                         -not [string]::IsNullOrWhiteSpace([string]$resultJson)
                     ) 'A non-null projected result was not serialized.'
                 }
+                $resultXml = [Management.Automation.PSSerializer]::Serialize($result)
+                Assert-Secret (
+                    -not [string]::IsNullOrWhiteSpace($resultXml)
+                ) 'Projected result CLIXML was not emitted.'
                 Assert-Secret (
                     -not ([string]$resultJson).Contains($script:Marker) -and
-                    -not [Management.Automation.PSSerializer]::Serialize($result).Contains($script:Marker)
+                    -not $resultXml.Contains($script:Marker)
                 ) 'A supported projected result retained its own payload.'
                 Assert-Secret (@($instance.PSObject.Properties).Count -eq 0) 'A processing call gained retained instance properties.'
                 $script:ExecutedScenarios++
@@ -2019,6 +2038,14 @@ if ($profile.RegistryRules.Count -ne 1 -or $profile.RegistryRules[0].ValueName -
     }
     Assert-Secret ($script:ExecutedScenarios -eq $expectedCounts[$Case]) 'Required service scenarios were not all executed.'
     Write-Host ('PASS secret indicator ' + $Case + ' ' + $script:ExecutedScenarios)
+}
+catch {
+    Write-Host (
+        'FAIL secret indicator ' + $Case + ' after ' +
+        $script:ExecutedScenarios + ' completed scenarios'
+    )
+    Write-Host $_.ScriptStackTrace
+    throw
 }
 finally {
     foreach ($value in $script:Owned) {
