@@ -340,6 +340,24 @@ foreach ($name in @('Empty', 'Mixed')) {
         47
     }
     Assert-Policy ($expectedRows.Count -eq $expectedCount) ($name + ' golden row count changed.')
+
+    # JSON omits .NET numeric types. These four observations come from the
+    # accepted source's TimeSpan.TotalDays/TotalMinutes, both Double properties.
+    # Restore that known comparison type without changing any golden value.
+    foreach ($row in $expectedRows) {
+        if ($row.RuleId -in @(
+                'PASSWORD.LOCKOUT_DURATION',
+                'PASSWORD.LOCKOUT_RESET',
+                'PASSWORD.MIN_AGE',
+                'PASSWORD.MAX_AGE'
+            )) {
+            Assert-Policy ($row.Observed -is [ValueType] -and
+                $row.Observed -isnot [bool] -and
+                $row.Observed -eq 0) 'Original duration golden is no longer numeric zero.'
+            $row.Observed = [double]$row.Observed
+        }
+    }
+
     $baseline.$name = Get-CanonicalJson $expectedRows
     Assert-Policy ($baseline.$name.StartsWith('[')) 'Golden canonicalization changed the top-level array shape.'
 }
