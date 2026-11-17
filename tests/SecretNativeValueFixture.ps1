@@ -12,6 +12,7 @@ $script:Owned = [Collections.Generic.List[IDisposable]]::new()
 $script:Sink = [Collections.Generic.List[object]]::new()
 $script:Scenarios = 0
 $script:GetterCalls = 0
+$script:OwnedTypeData = [Collections.Generic.List[string]]::new()
 
 function Assert-NativeValue($Condition, [string]$Message) {
     if (-not $Condition) {
@@ -28,8 +29,20 @@ function New-NativeSecure([bool]$Present) {
     return $value
 }
 
-function Add-NativeShadow($Value, [string]$Name, $Shadow) {
-    return , (Add-Member -InputObject $Value -MemberType NoteProperty -Name $Name -Value $Shadow -Force -PassThru)
+function Add-NativeShadow(
+    $Value,
+    [string]$Name,
+    $Shadow,
+    [Management.Automation.PSMemberTypes]$MemberType = 'NoteProperty'
+) {
+    # A private type name avoids overriding Windows PowerShell's protected
+    # System.Array Count alias. Only this disposable test value is affected.
+    $wrapped = [Management.Automation.PSObject]::AsPSObject($Value)
+    $typeName = 'ADAnalyzer.NativePresenceFixture.' + [guid]::NewGuid().ToString('N')
+    $wrapped.PSTypeNames.Insert(0, $typeName)
+    Update-TypeData -TypeName $typeName -MemberType $MemberType -MemberName $Name -Value $Shadow
+    $script:OwnedTypeData.Add($typeName)
+    return , $wrapped
 }
 
 function New-NativeCase([string]$Name, $Value, [bool]$Expected) {
@@ -134,6 +147,7 @@ function Get-NativeState($Value) {
             Type = $Value.GetType().FullName
             Native = $native
             Members = $members
+            TypeNames = @($Value.PSTypeNames)
         }) -Depth 10 -Compress
 }
 
@@ -306,10 +320,10 @@ try {
                 }
             )
             foreach ($sample in $values) {
-                $value = Add-Member -InputObject $sample.Value -MemberType ScriptProperty -Name $sample.Member -Value {
+                $value = Add-NativeShadow $sample.Value $sample.Member {
                     $script:GetterCalls++
                     throw 'Adapted secret metadata getter must not run.'
-                } -Force -PassThru
+                } ScriptProperty
                 $before = Get-NativeState $value
                 $beforeCalls = $script:GetterCalls
                 $rows = @(Test-ADAnalyzerSecretPresence $value)
@@ -437,5 +451,8 @@ catch {
 finally {
     foreach ($value in $script:Owned) {
         $value.Dispose()
+    }
+    foreach ($typeName in $script:OwnedTypeData) {
+        Remove-TypeData -TypeName $typeName -ErrorAction Stop
     }
 }
