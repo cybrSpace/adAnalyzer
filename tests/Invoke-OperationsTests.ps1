@@ -1483,6 +1483,40 @@ try {
         }
     }
 
+    $nativeValueCases = [ordered]@{
+        Ordinary = 20
+        Shadows = 15
+        Records = 15
+        SafeData = 15
+        Export = 15
+        Disposed = 4
+        GetterIsolation = 4
+        ExplicitCollection = 4
+    }
+    foreach ($case in $nativeValueCases.Keys) {
+        Invoke-Test ('Native secret presence: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $arguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                (Join-Path $PSScriptRoot 'SecretNativeValueFixture.ps1')
+                '-Case'
+                $case
+            )
+            $output = & $executable @arguments 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw 'Fresh native secret presence fixture failed.'
+            }
+            $marker = 'PASS native secret presence ' + $case + ' ' + $nativeValueCases[$case]
+            Assert-True (($output -join ' ') -like ('*' + $marker + '*')) 'Fresh process did not execute every native presence scenario.'
+        }
+    }
+
 }
 finally {
     Remove-Item -LiteralPath $script:Temporary -Recurse -Force -WhatIf:$false -Confirm:$false

@@ -84,16 +84,17 @@ function Test-ADAnalyzerSecretPresence {
         return $false
     }
     if ($Value -is [pscredential]) {
-        return $null -ne $Value.Password -and $Value.Password.Length -gt 0
+        $password = $Value.PSBase.Password
+        return $null -ne $password -and $password.PSBase.Length -gt 0
     }
     if ($Value -is [Security.SecureString]) {
-        return $Value.Length -gt 0
+        return $Value.PSBase.Length -gt 0
     }
     if ($Value -is [string]) {
-        return $Value.Length -gt 0
+        return $Value.PSBase.Length -gt 0
     }
     if ($Value -is [Collections.ICollection]) {
-        return $Value.Count -gt 0
+        return [Collections.ICollection].GetProperty('Count').GetValue($Value, $null) -gt 0
     }
     return $true
 }
