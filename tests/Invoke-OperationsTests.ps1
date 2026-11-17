@@ -1571,6 +1571,48 @@ try {
             Assert-True (($output -join ' ') -like ('*' + $marker + '*')) 'Fresh process did not execute all required secret indicator scenarios.'
         }
     }
+
+    $presenceMergeCases = [ordered]@{
+        Order = 32
+        Aliases = 82
+        Types = 44
+        Tagged = 22
+        Nested = 6
+        Getters = 10
+        Controls = 12
+        Exports = 32
+    }
+    foreach ($case in $presenceMergeCases.Keys) {
+        Invoke-Test ('Secret presence merge: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $arguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                (Join-Path $PSScriptRoot 'SecretPresenceMergeFixture.ps1')
+                '-Case'
+                $case
+            )
+            $fixtureErrorPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $output = & $executable @arguments 2>&1
+                $fixtureExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $fixtureErrorPreference
+            }
+            if ($fixtureExitCode -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw 'Fresh secret presence merge fixture failed.'
+            }
+            $marker = 'PASS secret presence merge ' + $case + ' ' + $presenceMergeCases[$case]
+            Assert-True (($output -join ' ') -like ('*' + $marker + '*')) 'Fresh process did not execute every required presence-merge scenario.'
+        }
+    }
 }
 finally {
     Remove-Item -LiteralPath $script:Temporary -Recurse -Force -WhatIf:$false -Confirm:$false

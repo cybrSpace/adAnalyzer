@@ -108,6 +108,7 @@ function ConvertTo-ADAnalyzerSafeData {
             return , $items.ToArray()
         }
         $result = [ordered]@{}
+        $presence = $null
         $properties = if ($InputObject -is [Collections.IDictionary]) {
             @($InputObject.Keys)
         }
@@ -130,7 +131,24 @@ function ConvertTo-ADAnalyzerSafeData {
                 $value = $InputObject.PSObject.Properties[$name].Value
             }
             if (Test-ADAnalyzerSecretName ([string]$name)) {
-                $result[[string]$name + 'Present'] = Test-ADAnalyzerSecretPresence $value
+                $flag = [string]$name + 'Present'
+                # Observe every source value before combining prior evidence.
+                $fieldPresent = Test-ADAnalyzerSecretPresence $value
+                if ($null -eq $presence) {
+                    $presence = [ordered]@{}
+                }
+                if (-not $presence.Contains($flag)) {
+                    $presence[$flag] = @{
+                        HasSource = $false
+                        Present = $false
+                        Name = $flag
+                    }
+                }
+                $indicator = $presence[$flag]
+                $indicator.HasSource = $true
+                $indicator.Present = $indicator.Present -or $fieldPresent
+                $indicator.Name = $flag
+                $result[$flag] = $fieldPresent
             }
             elseif ($taggedSecret -and [string]$name -in @('Value', 'Observed', 'Expected', 'Data', 'Bytes', 'RawData')) {
                 if ($name -ne 'Expected') {
@@ -151,11 +169,51 @@ function ConvertTo-ADAnalyzerSafeData {
                 }
             }
             else {
-                $result[[string]$name] = ConvertTo-ADAnalyzerSafeData -InputObject $value -Depth ($Depth + 1)
+                $propertyName = [string]$name
+                $result[$propertyName] = ConvertTo-ADAnalyzerSafeData -InputObject $value -Depth ($Depth + 1)
+                if ($propertyName.EndsWith('Present', [StringComparison]::OrdinalIgnoreCase)) {
+                    if ($null -eq $presence) {
+                        $presence = [ordered]@{}
+                    }
+                    if (-not $presence.Contains($propertyName)) {
+                        $presence[$propertyName] = @{
+                            HasSource = $false
+                            Present = $false
+                            Name = $propertyName
+                        }
+                    }
+                    $indicator = $presence[$propertyName]
+                    if ($value -is [bool] -and $value) {
+                        $indicator.Present = $true
+                    }
+                    $indicator.Name = $propertyName
+                }
             }
+        }
+        if ($taggedSecret -and $null -ne $presence -and
+            $presence.Contains('SecretPresent') -and $presence['SecretPresent'].HasSource) {
+            # Mixed named records use the same final indicator position when
+            # their raw Secret field becomes SecretPresent on the next pass.
+            $result.Remove('SecretPresent')
+            $presence['SecretPresent'].Name = 'SecretPresent'
         }
         if ($taggedSecret -and $hasPresence) {
             $result['SecretPresent'] = $present
+            if ($null -ne $presence -and $presence.Contains('SecretPresent')) {
+                $presence['SecretPresent'].Name = 'SecretPresent'
+            }
+        }
+        if ($null -ne $presence) {
+            foreach ($indicator in $presence.Values) {
+                if (-not $indicator.HasSource) {
+                    continue
+                }
+                $fieldPresent = $indicator.Present
+                if ($result[$indicator.Name] -is [bool]) {
+                    $fieldPresent = $fieldPresent -or $result[$indicator.Name]
+                }
+                $result[$indicator.Name] = [bool]$fieldPresent
+            }
         }
         return [pscustomobject]$result
     }
