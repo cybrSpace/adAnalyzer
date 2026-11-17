@@ -2317,7 +2317,8 @@ foreach ($case in @(
         'Serialization',
         'Command',
         'DirectoryRoute',
-        'Errors'
+        'Errors',
+        'LogicalTypes'
     )) {
     Invoke-DirectoryTest ('constructor account classifier: ' + $case) {
         $executable = (Get-Process -Id $PID).Path

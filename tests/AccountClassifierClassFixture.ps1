@@ -10,6 +10,7 @@ param(
         'Command',
         'DirectoryRoute',
         'Errors',
+        'LogicalTypes',
         'RecordBaseline')]
     [string]$Case = 'Construction'
 )
@@ -354,7 +355,14 @@ switch ($Case) {
             $scenario = $scenarios[$i]
             Assert-Classifier ($baseline.Results[$i].Name -ceq $scenario.Name) 'Scenario ordering changed.'
             $before = ConvertTo-ClassifierJson @($scenario.Object, $scenario.Profile, $scenario.Membership)
-            $expected = ConvertTo-ClassifierJson $baseline.Results[$i].Result
+            $expectedResult = $baseline.Results[$i].Result
+            # S013 corrects only the decision for differently cased Service evidence.
+            # The original golden file and all raw evidence remain unchanged.
+            if ($scenario.Name -eq 'Coercion') {
+                $expectedResult.Type = 'service'
+                $expectedResult.Conflicting = $false
+            }
+            $expected = ConvertTo-ClassifierJson $expectedResult
             $direct = $classifier.Classify($scenario.Object, $scenario.Profile, $scenario.Membership)
             $compatibility = Get-ADAnalyzerAccountType -Object $scenario.Object -Profile $scenario.Profile -Membership $scenario.Membership
             Assert-Classifier ($expected -ceq (ConvertTo-ClassifierJson $direct)) ('Direct golden mismatch: ' + $scenario.Name)
@@ -378,7 +386,8 @@ switch ($Case) {
                 Assert-Classifier ($row.Type -is [string] -and $row.Source -is [string]) 'Evidence labels changed type.'
             }
             if ($scenario.Name -eq 'Coercion') {
-                Assert-Classifier ($result.Type -ceq 'Unknown' -and $result.Conflicting) 'Case-distinct type conflict changed.'
+                Assert-Classifier ($result.Type -ceq 'service' -and
+                    -not $result.Conflicting) 'S013 corrected same-type casing decision changed.'
                 Assert-Classifier ($result.Evidence[0].Type -ceq 'service' -and
                     $result.Evidence[1].Type -ceq 'Service') 'Configured evidence type spelling changed.'
                 Assert-Classifier ($result.Evidence.Count -eq 3) 'Coercion evidence changed.'
@@ -557,6 +566,188 @@ switch ($Case) {
             Assert-Classifier ($_.Exception.Message -like '*System.String*') 'Direct failure lost its conversion cause.'
         }
         Assert-Classifier $failed 'Direct conversion failure did not propagate.'
+    }
+
+    'LogicalTypes' {
+        $scenarios = [Collections.Generic.List[object]]::new()
+        foreach ($entry in @(
+                @{
+                    RuleTypes = @('service', 'Service')
+                    ExpectedType = 'service'
+                    Conflicting = $false
+                },
+                @{
+                    RuleTypes = @('Service', 'service')
+                    ExpectedType = 'Service'
+                    Conflicting = $false
+                },
+                @{
+                    RuleTypes = @('user', 'User')
+                    ExpectedType = 'user'
+                    Conflicting = $false
+                },
+                @{
+                    RuleTypes = @('User', 'user')
+                    ExpectedType = 'User'
+                    Conflicting = $false
+                },
+                @{
+                    RuleTypes = @('User', 'Service')
+                    ExpectedType = 'Unknown'
+                    Conflicting = $true
+                },
+                @{
+                    RuleTypes = @('Service', 'User')
+                    ExpectedType = 'Unknown'
+                    Conflicting = $true
+                },
+                @{
+                    RuleTypes = @('service')
+                    ExpectedType = 'service'
+                    Conflicting = $false
+                },
+                @{
+                    RuleTypes = @('service', 'SERVICE')
+                    ExpectedType = 'Unknown'
+                    Conflicting = $false
+                    InvalidRegex = $true
+                }
+            )) {
+            $rules = @(
+                foreach ($type in $entry.RuleTypes) {
+                    @{
+                        Attribute = 'Role'
+                        Type = $type
+                        Value = 'ops'
+                    }
+                }
+            )
+            if ($entry.InvalidRegex) {
+                $rules += @{
+                    Attribute = 'Role'
+                    Type = 'Service'
+                    Match = 'Regex'
+                    Value = '['
+                }
+            }
+            $scenarios.Add([pscustomobject]@{
+                    Object = [pscustomobject]@{
+                        Role = 'ops'
+                    }
+                    Classification = @{
+                        AttributeRules = $rules
+                    }
+                    Membership = $null
+                    ExpectedType = $entry.ExpectedType
+                    Conflicting = $entry.Conflicting
+                    EvidenceTypes = $entry.RuleTypes -join ','
+                    Sources = (@($entry.RuleTypes | ForEach-Object { 'Attribute:Role' }) -join ',')
+                    InvalidRules = if ($entry.InvalidRegex) {
+                        'Role:Regex'
+                    }
+                    else {
+                        ''
+                    }
+                })
+        }
+        foreach ($kind in @('Schema', 'OU', 'DirectGroup', 'EffectiveGroup')) {
+            $classification = @{
+                AttributeRules = @(
+                    @{
+                        Attribute = 'Role'
+                        Type = if ($kind -eq 'Schema') {
+                            'service'
+                        }
+                        else {
+                            'user'
+                        }
+                        Value = 'ops'
+                    }
+                )
+            }
+            $object = [pscustomobject]@{
+                DirectoryObjectClass = if ($kind -eq 'Schema') {
+                    'msDS-GroupManagedServiceAccount'
+                }
+                else {
+                    'user'
+                }
+                DistinguishedName = 'CN=Alice,OU=People,DC=example'
+                MemberOf = if ($kind -eq 'DirectGroup') {
+                    @('CN=Tag')
+                }
+                else {
+                    @()
+                }
+                Role = 'ops'
+            }
+            $membership = [pscustomobject]@{
+                EffectiveSids = @('S-1-5-21-1-2-3-1200')
+            }
+            switch ($kind) {
+                'Schema' {
+                    $firstType = 'Service'
+                    $source = 'DirectoryObjectClass'
+                }
+                'OU' {
+                    $firstType = 'User'
+                    $source = 'OU'
+                    $classification.UserOUs = @('OU=People,DC=example')
+                }
+                'DirectGroup' {
+                    $firstType = 'User'
+                    $source = 'Group'
+                    $classification.UserGroups = @('CN=Tag')
+                }
+                'EffectiveGroup' {
+                    $firstType = 'User'
+                    $source = 'Group'
+                    $classification.UserGroups = @('S-1-5-21-1-2-3-1200')
+                }
+            }
+            $scenarios.Add([pscustomobject]@{
+                    Object = $object
+                    Classification = $classification
+                    Membership = $membership
+                    ExpectedType = $firstType
+                    Conflicting = $false
+                    EvidenceTypes = $firstType + ',' + $classification.AttributeRules[0].Type
+                    Sources = $source + ',Attribute:Role'
+                    InvalidRules = ''
+                })
+        }
+        Assert-Classifier ($scenarios.Count -eq 12) 'Logical type scenarios were not all discovered.'
+        $comparisons = 0
+        foreach ($scenario in $scenarios) {
+            $raw = @{
+                AccountClassification = $scenario.Classification
+            }
+            foreach ($profile in @($raw, (Import-ADAnalyzerProfile -Profile $raw))) {
+                $before = ConvertTo-ClassifierJson @($scenario.Object, $profile, $scenario.Membership)
+                $arguments = @{
+                    Object = $scenario.Object
+                    Profile = $profile
+                    Membership = $scenario.Membership
+                }
+                $results = @(
+                    $classifier.Classify($scenario.Object, $profile, $scenario.Membership)
+                    Get-ADAnalyzerAccountType @arguments
+                )
+                Assert-Classifier ($results.Count -eq 2) 'Object or command outcome is missing.'
+                foreach ($result in $results) {
+                    Assert-Classifier ($result.Type -ceq $scenario.ExpectedType) 'Logical type or first spelling changed.'
+                    Assert-Classifier ($result.Conflicting -eq $scenario.Conflicting) 'Logical conflict decision changed.'
+                    Assert-Classifier (($result.Evidence.Type -join ',') -ceq $scenario.EvidenceTypes) 'Raw evidence type spelling or count changed.'
+                    Assert-Classifier (($result.Evidence.Source -join ',') -ceq $scenario.Sources) 'Evidence ordering changed.'
+                    Assert-Classifier (($result.InvalidRules -join ',') -ceq $scenario.InvalidRules) 'Invalid rule evidence changed.'
+                    $comparisons++
+                }
+                Assert-Classifier ($before -ceq (ConvertTo-ClassifierJson @($scenario.Object,
+                            $profile,
+                            $scenario.Membership))) 'Logical type evaluation mutated inputs.'
+            }
+        }
+        Assert-Classifier ($comparisons -eq 48) 'Required raw/imported/object/command combinations were not all executed.'
     }
 
     'Command' {

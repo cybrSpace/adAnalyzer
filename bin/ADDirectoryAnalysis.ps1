@@ -391,7 +391,12 @@ class ADAnalyzerAccountClassifier {
                     })
             }
         }
-        $types = @($evidence.ToArray() | Select-Object -ExpandProperty Type -Unique)
+        $types = [Collections.Generic.List[string]]::new()
+        foreach ($entry in $evidence) {
+            if ($entry.Type -notin $types) {
+                $types.Add($entry.Type)
+            }
+        }
         return [pscustomobject]@{
             Type = if ($types.Count -eq 1 -and -not $invalidRules.Count) {
                 $types[0]
