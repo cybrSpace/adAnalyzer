@@ -139,6 +139,11 @@ $accountClassifier = [ADAnalyzerAccountClassifier]::new()
 $classification = $accountClassifier.Classify($account, $profile, $membership)
 $directoryEvaluator = [ADAnalyzerDirectoryPolicyEvaluator]::new()
 $checks = $directoryEvaluator.Evaluate($directorySnapshot, $profile)
+
+$secretIndicator = [ADAnalyzerSecretIndicator]::new()
+$safeRecord = $secretIndicator.ProjectRecord($settingRecord)
+$safeXml = $secretIndicator.ProjectXml($xmlNode)
+$safeText = $secretIndicator.ProjectText($diagnosticText)
 ```
 
 `ADAnalyzerAccountClassifier` owns schema, OU, group and attribute classification, including conflicting and invalid-rule evidence. Its inert constructor retains no configuration or results; pass a raw profile to `Classify(account, profile)` and optional membership to `Classify(account, profile, membership)`. `Classify(account)` uses no configured selectors. Each call creates fresh result containers; raw attribute evidence retains its existing value types and references. It does not normalize caller profiles or collect directory data. The modern collector reuses one classifier; legacy and remediation callers retain the thin `Get-ADAnalyzerAccountType` adapter.
@@ -154,6 +159,8 @@ The constructor validates and copies its in-memory profile without importing nat
 `ADAnalyzerMembershipGraph` captures a minimal, independent group graph and owns iterative membership resolution. `Resolve(object, domainSid, privilegedSids)` returns the existing membership DTO, including primary groups, ordered transitive SIDs, cycle witnesses, and unresolved evidence. Repeated resolutions reuse the index without retaining earlier results. The constructor retains only copied DN/SID/parent identities in private .NET state, so input credentials and unrelated group properties are not captured or serialized. Modern collection and SIDHistory evaluation reuse one graph per call. The compatibility index builder deliberately retains its original mutable `ByDn`/`BySid` maps and group references; the compatibility resolver honors supplied aliases transiently.
 
 `ADAnalyzerDirectoryPolicyEvaluator` owns directory rule evaluation across domain/coverage, accounts and duplicate SPNs, trusts/ACLs, resultant password policies, and host observations. Its inert constructor retains no data or configuration. `Evaluate(data, profile)` accepts the existing raw/partial profile contract and returns complete ordered checks or throws. `Test-ADAnalyzerDirectoryPolicy` remains the command interface, including streamed checks before a late error, common parameters, and the underlying diagnostic cause.
+
+`ADAnalyzerSecretIndicator` owns secret-name recognition, native value presence, custom-baseline validation, and record, XML and text presence projection. Its no-argument constructor is inert and retains no inputs, credentials, configuration or results. The eight existing secret commands delegate to its methods with their original parameters and PowerShell binding behavior. Methods use explicit arguments; `ProjectRecord($null)` and `ProjectXml($null)` reject missing inputs. Ordinary records retain their original reference. A secret record receives a new top-level object with `Value`, `RawData`, `Data` and `Bytes` removed; its other property values retain their existing references. Use `ConvertTo-ADAnalyzerSafeData` for recursive evidence sanitization. XML results are independent of their sources, and each call owns and disposes its temporary XML readers.
 
 Use this explicit dot-source entrypoint for literal constructor calls. Importing `ADEnvironment.psd1` remains the supported command interface; it does not promise caller visibility of classes defined in its dot-sourced component files. The constructor entrypoint supports portable offline evaluation; live collection still uses the package manifest and its bundled AD PSDrive/provider.
 

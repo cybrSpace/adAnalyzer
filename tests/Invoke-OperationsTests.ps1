@@ -1517,6 +1517,46 @@ try {
         }
     }
 
+    $secretIndicatorCases = [ordered]@{
+        Construction = 6
+        Parity = 110
+        Presence = 44
+        Baselines = 28
+        Records = 21
+        XmlNames = 23
+        Xml = 31
+        Text = 51
+        Metadata = 16
+        Errors = 21
+        Ownership = 10
+        Isolation = 7
+        Serialization = 8
+        Loading = 9
+    }
+    foreach ($case in $secretIndicatorCases.Keys) {
+        Invoke-Test ('Secret indicator object API: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $arguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                (Join-Path $PSScriptRoot 'SecretIndicatorFixture.ps1')
+                '-Case'
+                $case
+            )
+            $output = & $executable @arguments 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw 'Fresh secret indicator fixture failed.'
+            }
+            $marker = 'PASS secret indicator ' + $case + ' ' + $secretIndicatorCases[$case]
+            Assert-True (($output -join ' ') -like ('*' + $marker + '*')) 'Fresh process did not execute all required secret indicator scenarios.'
+        }
+    }
+
 }
 finally {
     Remove-Item -LiteralPath $script:Temporary -Recurse -Force -WhatIf:$false -Confirm:$false
