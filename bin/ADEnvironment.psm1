@@ -2703,7 +2703,9 @@ class GroupPolicyObject : OrderedDictionary {
             if ($value.'gpo.linked.ou' -match 'Domain Controllers') {
                 $right = [string]$value.'property.setting.right'
                 $rights = $policy.AllowedUserRightSids
-                if ([string]::IsNullOrWhiteSpace($right) -or $rights -isnot [Collections.IDictionary] -or -not $rights.Contains($right)) {
+                if ([string]::IsNullOrWhiteSpace($right) -or
+                    $rights -isnot [Collections.IDictionary] -or
+                    -not ([Collections.IDictionary]$rights).Contains($right)) {
                     $list.AddFinding($value, 'Validate - UserRightsAssignment Allowlist Not Configured')
                 }
                 else {

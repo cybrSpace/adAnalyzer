@@ -1445,6 +1445,44 @@ try {
         }
     }
 
+    $dictionaryCases = [ordered]@{
+        Lookup = 72
+        Comparers = 18
+        Projection = 84
+        ExportDefault = 3
+        ExportContinue = 3
+        ExportStop = 3
+        Baseline = 18
+        Membership = 3
+        Rights = 24
+        Legacy = 12
+        HostIdentity = 15
+        Normalization = 4
+    }
+    foreach ($case in $dictionaryCases.Keys) {
+        Invoke-Test ('Dictionary interface: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $arguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                (Join-Path $PSScriptRoot 'GenericDictionaryFixture.ps1')
+                '-Case'
+                $case
+            )
+            $output = & $executable @arguments 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw 'Fresh dictionary interface fixture failed.'
+            }
+            $marker = 'PASS dictionary interface ' + $case + ' ' + $dictionaryCases[$case]
+            Assert-True (($output -join ' ') -like ('*' + $marker + '*')) 'Fresh process did not execute all required dictionary scenarios.'
+        }
+    }
+
 }
 finally {
     Remove-Item -LiteralPath $script:Temporary -Recurse -Force -WhatIf:$false -Confirm:$false

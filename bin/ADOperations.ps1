@@ -15,7 +15,7 @@ function Get-ADAnalyzerOperationValue {
     }
     foreach ($name in $Names) {
         if ($Object -is [Collections.IDictionary]) {
-            if ($Object.Contains($name)) {
+            if (([Collections.IDictionary]$Object).Contains($name)) {
                 return $Object[$name]
             }
         }

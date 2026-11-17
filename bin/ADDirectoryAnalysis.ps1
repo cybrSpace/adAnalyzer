@@ -17,7 +17,7 @@ function Get-ADAnalyzerDirectoryField {
         return $Default
     }
     if ($InputObject -is [System.Collections.IDictionary]) {
-        if ($InputObject.Contains($Name)) {
+        if (([Collections.IDictionary]$InputObject).Contains($Name)) {
             return $InputObject[$Name]
         }
         return $Default

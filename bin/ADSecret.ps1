@@ -41,7 +41,7 @@ function Assert-ADAnalyzerValueBaseline {
             }
             $kind = 'Registry'
             if ($rule -is [Collections.IDictionary]) {
-                if ($rule.Contains('Kind')) {
+                if (([Collections.IDictionary]$rule).Contains('Kind')) {
                     $kind = $rule['Kind']
                 }
             }

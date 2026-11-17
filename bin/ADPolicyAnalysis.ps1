@@ -12,7 +12,7 @@ function Get-ADAnalyzerPolicyValue {
         return $Default
     }
     if ($Object -is [Collections.IDictionary]) {
-        if ($Object.Contains($Name)) {
+        if (([Collections.IDictionary]$Object).Contains($Name)) {
             return $Object[$Name]
         }
     }
@@ -1343,7 +1343,8 @@ class ADAnalyzerGpoPolicyEvaluator {
         $target = $state.Target
         $policySection = Get-ADAnalyzerPolicyValue $Profile Policy @{}
         $approvedValue = @('S-1-5-32-544')
-        if ($policySection -is [Collections.IDictionary] -and $policySection.Contains('ApprovedLocalAdminSids')) {
+        if ($policySection -is [Collections.IDictionary] -and
+            ([Collections.IDictionary]$policySection).Contains('ApprovedLocalAdminSids')) {
             $approvedValue = $policySection['ApprovedLocalAdminSids']
         }
         elseif ($null -ne $policySection -and $null -ne $policySection.PSObject.Properties['ApprovedLocalAdminSids']) {
@@ -1498,7 +1499,8 @@ class ADAnalyzerGpoPolicyEvaluator {
         $rights = Get-ADAnalyzerPolicyProfileValue $Profile AllowedUserRightSids @{}
         foreach ($right in @($Policy.SecuritySettings | Where-Object Kind -eq 'UserRightsAssignment')) {
             $principals = @($right.Value | ForEach-Object { ConvertFrom-ADAnalyzerPolicyPrincipal ([string]$_) })
-            $hasAllowlist = $rights -is [Collections.IDictionary] -and $rights.Contains($right.Name)
+            $hasAllowlist = $rights -is [Collections.IDictionary] -and
+                ([Collections.IDictionary]$rights).Contains($right.Name)
             $expected = $null
             $allowlistValid = $false
             if ($hasAllowlist) {

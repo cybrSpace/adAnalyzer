@@ -497,7 +497,7 @@ function Get-ADAnalyzerHostRuleIdentity {
         [string[]]$Parts = @()
 
     )
-    if (-not $Rule.Contains('Id')) {
+    if (-not ([Collections.IDictionary]$Rule).Contains('Id')) {
         return $Target
     }
     if ($Rule.Id -isnot [string] -or [string]::IsNullOrWhiteSpace($Rule.Id) -or $Rule.Id.IndexOf([char]0) -ge 0) {
