@@ -19,6 +19,22 @@ function Assert-Native($Condition, [string]$Message) {
     }
 }
 
+function Get-NativeGoldenHash([byte[]]$Bytes) {
+    # GetString retains the BOM. Normalize checkout line endings only;
+    # escaped JSON literals, other whitespace and every data byte stay exact.
+    $utf8 = [Text.UTF8Encoding]::new($false, $true)
+    $text = $utf8.GetString($Bytes).Replace("`r`n", "`n")
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString(
+            $hash.ComputeHash($utf8.GetBytes($text))
+        ).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $hash.Dispose()
+    }
+}
+
 function New-NativeDocument([string]$Text) {
     $document = [xml]::new()
     $document.PreserveWhitespace = $true
@@ -236,8 +252,20 @@ try {
                 Assert-Native ($actualJson -ceq $expectedJson) 'Ordinary result, type or cardinality changed.'
                 $script:Scenarios++
             }
-            $oldHash = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'XmlNodeBoundaryBaseline.json') -Algorithm SHA256).Hash
-            Assert-Native ($oldHash -ieq '136cace20568709834b1af9633379f22bc0f88c1951af0634d0770fccb7145f8') 'Original node golden changed.'
+            $oldPath = Join-Path $PSScriptRoot 'XmlNodeBoundaryBaseline.json'
+            $oldBytes = [IO.File]::ReadAllBytes($oldPath)
+            $oldHash = Get-NativeGoldenHash $oldBytes
+            $rawHash = (Get-FileHash -LiteralPath $oldPath -Algorithm SHA256).Hash
+            $oldText = [Text.UTF8Encoding]::new($false, $true).GetString($oldBytes)
+            $crlfCount = [regex]::Matches($oldText, "`r`n").Count
+            $lfCount = [regex]::Matches($oldText, "`n").Count
+            $bareCrCount = [regex]::Matches($oldText, "`r").Count - $crlfCount
+            $diagnostic = 'RawSHA256={0}; CanonicalSHA256={1}; Bytes={2}; CRLF={3}; LF={4}; BareCR={5}.' -f
+            $rawHash, $oldHash, $oldBytes.Length, $crlfCount, $lfCount, $bareCrCount
+            if ($rawHash -ine $oldHash) {
+                Write-Host ('XML golden checkout normalization. ' + $diagnostic)
+            }
+            Assert-Native ($oldHash -ieq '136cace20568709834b1af9633379f22bc0f88c1951af0634d0770fccb7145f8') ('Original node golden changed. ' + $diagnostic)
         }
         { $_ -in @('LocalName', 'Attributes', 'Traversal', 'Payload') } {
             foreach ($source in @(Get-NativeCollisionSources $Case)) {
