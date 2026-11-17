@@ -1408,6 +1408,43 @@ try {
             Assert-True (($output -join ' ') -like ('*' + $marker + '*')) 'Fresh process did not execute every selected scenario.'
         }
     }
+    $consumerCases = [ordered]@{
+        Parity = 24
+        Strings = 12
+        UnsupportedSafe = 11
+        UnsupportedExport = 11
+        ContextSafe = 5
+        ContextExport = 5
+        DirectDefaults = 4
+        NamedDefaults = 4
+        DefaultExport = 8
+        Collisions = 8
+        DtdConsumer = 4
+    }
+    foreach ($case in $consumerCases.Keys) {
+        Invoke-Test ('XML consumer projection: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $arguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                (Join-Path $PSScriptRoot 'XmlConsumerProjectionFixture.ps1')
+                '-Case'
+                $case
+            )
+            $output = & $executable @arguments 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw 'Fresh XML consumer fixture failed.'
+            }
+            $marker = 'PASS XML consumer projection ' + $case + ' ' + $consumerCases[$case]
+            Assert-True (($output -join ' ') -like ('*' + $marker + '*')) 'Fresh process did not execute every selected consumer scenario.'
+        }
+    }
+
 }
 finally {
     Remove-Item -LiteralPath $script:Temporary -Recurse -Force -WhatIf:$false -Confirm:$false
