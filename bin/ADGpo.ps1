@@ -578,7 +578,7 @@ class ADAnalyzerGpoReader {
                             Scope = $scope
                             Kind = $xmlKind
                             Path = $relative
-                            Xml = (ConvertTo-ADAnalyzerSecretIndicatorXml $xml).OuterXml
+                            Xml = (ConvertTo-ADAnalyzerSecretIndicatorXml $xml).PSBase.OuterXml
                         })
                 }
                 $null = $files.Add([pscustomobject]@{
@@ -701,7 +701,7 @@ function ConvertTo-ADAnalyzerProvidedGpoPolicy {
                 Scope = $record.Scope
                 Kind = $record.Kind
                 Path = $record.Path
-                Xml = $safe.OuterXml
+                Xml = $safe.PSBase.OuterXml
             }
         })
     [pscustomobject]@{
@@ -840,7 +840,7 @@ function Add-AnalyzerGpoXmlNode {
     )
     $node = $Document.CreateElement($Name)
     if ($null -ne $Value) {
-        $node.InnerText = [string]$Value
+        $node.PSBase.InnerText = [string]$Value
     }
     $null = $Parent.AppendChild($node)
     return $node
@@ -1016,9 +1016,9 @@ function ConvertTo-AnalyzerGpoXml {
     foreach ($file in $Parsed.Files) {
         $node = Add-AnalyzerGpoXmlNode $doc $inventory 'File'
         $node.SetAttribute('Kind', $file.Kind)
-        $node.InnerText = $file.Path
+        $node.PSBase.InnerText = $file.Path
     }
-    return $doc.OuterXml
+    return $doc.PSBase.OuterXml
 }
 
 function Get-ADAnalyzerGpoReport {

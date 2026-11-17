@@ -95,7 +95,7 @@ function ConvertTo-ADAnalyzerSafeData {
             return [pscustomobject]$pair
         }
         if ($InputObject -is [Xml.XmlNode]) {
-            return Protect-ADAnalyzerSecretText $InputObject.OuterXml
+            return Protect-ADAnalyzerSecretText $InputObject.PSBase.OuterXml
         }
         if ($InputObject -is [Collections.IEnumerable] -and
             $InputObject -isnot [Collections.IDictionary] -and

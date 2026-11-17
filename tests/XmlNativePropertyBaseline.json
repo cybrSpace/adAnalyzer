@@ -1,0 +1,221 @@
+﻿{
+  "Source": "dd4563e95b23cc04294f30f63cd31ee558128c22",
+  "Results": [
+    {
+      "Name": "Document0",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.Xml.XmlDocument",
+          "NodeType": "Document",
+          "Text": "<Root id=\"one\"><Item>café</Item><Empty /><Full></Full></Root>",
+          "InnerText": null
+        }
+      ]
+    },
+    {
+      "Name": "Element0",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.Xml.XmlElement",
+          "NodeType": "Element",
+          "Text": "<Root id=\"one\"><Item>café</Item><Empty /><Full></Full></Root>",
+          "InnerText": "café"
+        }
+      ]
+    },
+    {
+      "Name": "Document1",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.Xml.XmlDocument",
+          "NodeType": "Document",
+          "Text": "<Root cpasswordPresent=\"true\"><PasswordPresent>true</PasswordPresent><Note>keep</Note></Root>",
+          "InnerText": null
+        }
+      ]
+    },
+    {
+      "Name": "Element1",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.Xml.XmlElement",
+          "NodeType": "Element",
+          "Text": "<Root cpasswordPresent=\"true\"><PasswordPresent>true</PasswordPresent><Note>keep</Note></Root>",
+          "InnerText": "truekeep"
+        }
+      ]
+    },
+    {
+      "Name": "Document2",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.Xml.XmlDocument",
+          "NodeType": "Document",
+          "Text": "<Root><Properties name=\"DefaultPassword\" SecretPresent=\"true\" /><Setting SecretPresent=\"false\"><Name>Password</Name></Setting></Root>",
+          "InnerText": null
+        }
+      ]
+    },
+    {
+      "Name": "Element2",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.Xml.XmlElement",
+          "NodeType": "Element",
+          "Text": "<Root><Properties name=\"DefaultPassword\" SecretPresent=\"true\" /><Setting SecretPresent=\"false\"><Name>Password</Name></Setting></Root>",
+          "InnerText": "Password"
+        }
+      ]
+    },
+    {
+      "Name": "Document3",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.Xml.XmlDocument",
+          "NodeType": "Document",
+          "Text": "<PasswordPresent>true</PasswordPresent>",
+          "InnerText": null
+        }
+      ]
+    },
+    {
+      "Name": "Element3",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.Xml.XmlElement",
+          "NodeType": "Element",
+          "Text": "<PasswordPresent>true</PasswordPresent>",
+          "InnerText": "true"
+        }
+      ]
+    },
+    {
+      "Name": "Document4",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.Xml.XmlDocument",
+          "NodeType": "Document",
+          "Text": "<?xml version=\"1.0\" encoding=\"utf-16\" standalone=\"yes\"?><!-- before --><?fixture data?><p:Root xmlns:p=\"urn:fixture\"><PasswordPresent>false</PasswordPresent><p:Note><![CDATA[keep raw]]></p:Note></p:Root><!-- after -->",
+          "InnerText": null
+        }
+      ]
+    },
+    {
+      "Name": "Element4",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.Xml.XmlElement",
+          "NodeType": "Element",
+          "Text": "<p:Root xmlns:p=\"urn:fixture\"><PasswordPresent>false</PasswordPresent><p:Note><![CDATA[keep raw]]></p:Note></p:Root>",
+          "InnerText": "falsekeep raw"
+        }
+      ]
+    },
+    {
+      "Name": "Document5",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.Xml.XmlDocument",
+          "NodeType": "Document",
+          "Text": "<Root xml:space=\"preserve\">\r\n café \r\n<Item passwordPresent=\"false\" /></Root>",
+          "InnerText": null
+        }
+      ]
+    },
+    {
+      "Name": "Element5",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.Xml.XmlElement",
+          "NodeType": "Element",
+          "Text": "<Root xml:space=\"preserve\">\r\n café \r\n<Item passwordPresent=\"false\" /></Root>",
+          "InnerText": "\r\n café \r\n"
+        }
+      ]
+    },
+    {
+      "Name": "Text0",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "NodeType": null,
+          "Text": "<Root PasswordPresent=\"true\"><Note>keep</Note></Root>",
+          "InnerText": null
+        }
+      ]
+    },
+    {
+      "Name": "Text1",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "NodeType": null,
+          "Text": "<PasswordPresent>true</PasswordPresent><Note>keep</Note>",
+          "InnerText": null
+        }
+      ]
+    },
+    {
+      "Name": "Text2",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "NodeType": null,
+          "Text": "prefix passwordPresent=\"true\" suffix",
+          "InnerText": null
+        }
+      ]
+    },
+    {
+      "Name": "Text3",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "NodeType": null,
+          "Text": "broken <Root passwordPresent=\"true\"",
+          "InnerText": null
+        }
+      ]
+    },
+    {
+      "Name": "Text4",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "NodeType": null,
+          "Text": "Password age >90",
+          "InnerText": null
+        }
+      ]
+    },
+    {
+      "Name": "Text5",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "NodeType": null,
+          "Text": "<Root><!-- <!DOCTYPE Root> --><![CDATA[ordinary]]></Root>",
+          "InnerText": null
+        }
+      ]
+    }
+  ]
+}

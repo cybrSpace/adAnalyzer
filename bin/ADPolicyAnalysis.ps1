@@ -46,9 +46,9 @@ function Get-ADAnalyzerXmlAttribute {
 
     )
     if ($Node) {
-        foreach ($attribute in @($Node.Attributes)) {
-            if ($attribute.LocalName -ieq $Name) {
-                return $attribute.Value
+        foreach ($attribute in @($Node.PSBase.Attributes)) {
+            if ($attribute.PSBase.LocalName -ieq $Name) {
+                return $attribute.PSBase.Value
             }
         }
     }
@@ -60,28 +60,28 @@ function Get-ADAnalyzerPresencePolicyXml {
     if (-not $Node) {
         return $null
     }
-    return (ConvertTo-ADAnalyzerSecretIndicatorXml $Node).OuterXml
+    return (ConvertTo-ADAnalyzerSecretIndicatorXml $Node).PSBase.OuterXml
 }
 
 function Get-ADAnalyzerPolicyXmlPath {
     param([Xml.XmlNode]$Node)
     $parts = @()
-    while ($Node -and $Node.NodeType -eq [Xml.XmlNodeType]::Element) {
+    while ($Node -and $Node.PSBase.NodeType -eq [Xml.XmlNodeType]::Element) {
         $uid = Get-ADAnalyzerXmlAttribute $Node uid
         if ($uid) {
-            $parts = @($Node.LocalName + '#' + $uid) + $parts
+            $parts = @($Node.PSBase.LocalName + '#' + $uid) + $parts
             break
         }
         $position = 1
-        $sibling = $Node.PreviousSibling
+        $sibling = $Node.PSBase.PreviousSibling
         while ($sibling) {
-            if ($sibling.NodeType -eq [Xml.XmlNodeType]::Element -and $sibling.LocalName -eq $Node.LocalName) {
+            if ($sibling.PSBase.NodeType -eq [Xml.XmlNodeType]::Element -and $sibling.PSBase.LocalName -eq $Node.PSBase.LocalName) {
                 $position++
             }
-            $sibling = $sibling.PreviousSibling
+            $sibling = $sibling.PSBase.PreviousSibling
         }
-        $parts = @($Node.LocalName + '[' + $position + ']') + $parts
-        $Node = $Node.ParentNode
+        $parts = @($Node.PSBase.LocalName + '[' + $position + ']') + $parts
+        $Node = $Node.PSBase.ParentNode
     }
     return $parts -join '/'
 }
@@ -373,11 +373,11 @@ function ConvertFrom-ADAnalyzerLocalUsersGroups {
         if (-not $record.Valid) {
             continue
         }
-        if ($record.Document.DocumentElement.LocalName -ine 'Groups') {
+        if ($record.Document.PSBase.DocumentElement.PSBase.LocalName -ine 'Groups') {
             continue
         }
-        foreach ($item in @($record.Document.DocumentElement.ChildNodes | Where-Object { $_.NodeType -eq [Xml.XmlNodeType]::Element -and
-                    $_.LocalName -in 'Group',
+        foreach ($item in @($record.Document.PSBase.DocumentElement.PSBase.ChildNodes | Where-Object { $_.PSBase.NodeType -eq [Xml.XmlNodeType]::Element -and
+                    $_.PSBase.LocalName -in 'Group',
                     'User' })) {
             $properties = $item.SelectSingleNode('./*[local-name()="Properties"]')
             $members = @()
@@ -405,10 +405,10 @@ function ConvertFrom-ADAnalyzerLocalUsersGroups {
             $filters = $item.SelectSingleNode('./*[local-name()="Filters"]')
             $disabled = Get-ADAnalyzerXmlAttribute $item disabled '0'
             $targetSid = Get-ADAnalyzerXmlAttribute $properties groupSid
-            if ($item.LocalName -eq 'User') {
+            if ($item.PSBase.LocalName -eq 'User') {
                 $targetSid = Get-ADAnalyzerXmlAttribute $properties userSid (Get-ADAnalyzerXmlAttribute $properties sid)
             }
-            $targetName = Get-ADAnalyzerXmlAttribute $properties $(if ($item.LocalName -eq 'Group') {
+            $targetName = Get-ADAnalyzerXmlAttribute $properties $(if ($item.PSBase.LocalName -eq 'Group') {
                     'groupName'
                 }
                 else {
@@ -418,7 +418,7 @@ function ConvertFrom-ADAnalyzerLocalUsersGroups {
             [pscustomobject]@{
                 Scope = $record.File.Scope
                 Source = $record.File.Path
-                Kind = $item.LocalName
+                Kind = $item.PSBase.LocalName
                 Uid = (Get-ADAnalyzerXmlAttribute $item uid)
                 ItemPath = (Get-ADAnalyzerPolicyXmlPath $item)
                 Name = $targetName
@@ -427,7 +427,7 @@ function ConvertFrom-ADAnalyzerLocalUsersGroups {
                 Disabled = ($disabled -in '1', 'true')
                 AccountDisabled = (Get-ADAnalyzerXmlAttribute $properties disabled)
                 PasswordNeverExpires = (Get-ADAnalyzerXmlAttribute $properties neverExpires)
-                Targeted = ($null -ne $filters -and $filters.HasChildNodes)
+                Targeted = ($null -ne $filters -and $filters.PSBase.HasChildNodes)
                 Filters = (Get-ADAnalyzerPresencePolicyXml $filters)
                 DeleteAllUsers = (Get-ADAnalyzerXmlAttribute $properties deleteAllUsers '0') -in '1', 'true'
                 DeleteAllGroups = (Get-ADAnalyzerXmlAttribute $properties deleteAllGroups '0') -in '1', 'true'
@@ -864,23 +864,23 @@ class ADAnalyzerGpoPolicyEvaluator {
                 continue
             }
             $credentialOwners = [Collections.Generic.HashSet[Xml.XmlElement]]::new()
-            foreach ($attribute in @($xmlRecord.Document.SelectNodes('//@*') | Where-Object { ($_.LocalName -ieq 'cpassword' -and
-                            -not [string]::IsNullOrEmpty($_.Value)) -or
-                        ($_.LocalName -ieq 'cpasswordPresent' -and
-                        $_.Value -ieq 'true') })) {
-                if (-not $credentialOwners.Add($attribute.OwnerElement)) {
+            foreach ($attribute in @($xmlRecord.Document.SelectNodes('//@*') | Where-Object { ($_.PSBase.LocalName -ieq 'cpassword' -and
+                            -not [string]::IsNullOrEmpty($_.PSBase.Value)) -or
+                        ($_.PSBase.LocalName -ieq 'cpasswordPresent' -and
+                        $_.PSBase.Value -ieq 'true') })) {
+                if (-not $credentialOwners.Add($attribute.PSBase.OwnerElement)) {
                     continue
                 }
                 $secretCount++
-                $item = $attribute.OwnerElement.ParentNode
+                $item = $attribute.PSBase.OwnerElement.PSBase.ParentNode
                 $safe = [ordered]@{
                     Path = $xmlRecord.File.Path
                     ItemUid = (Get-ADAnalyzerXmlAttribute $item uid)
                     ItemName = (Get-ADAnalyzerXmlAttribute $item name)
-                    Account = (Get-ADAnalyzerXmlAttribute $attribute.OwnerElement userName)
+                    Account = (Get-ADAnalyzerXmlAttribute $attribute.PSBase.OwnerElement userName)
                     SecretPresent = $true
                 }
-                $attributePath = (Get-ADAnalyzerPolicyXmlPath $attribute.OwnerElement) + '/@cpassword'
+                $attributePath = (Get-ADAnalyzerPolicyXmlPath $attribute.PSBase.OwnerElement) + '/@cpassword'
                 $safe['Attribute'] = 'cpassword'
                 $safe['ItemPath'] = $attributePath
                 $xmlSecretChecks.Add(@{
@@ -1822,7 +1822,7 @@ function Get-ADAnalyzerAdmxValue {
             Deleted = $false
         }
     }
-    switch ($value.LocalName) {
+    switch ($value.PSBase.LocalName) {
         'decimal' {
             $n = ConvertTo-ADAnalyzerPolicyNumber (Get-ADAnalyzerXmlAttribute $value value)
             return [pscustomobject]@{
@@ -1842,7 +1842,7 @@ function Get-ADAnalyzerAdmxValue {
         'string' {
             return [pscustomobject]@{
                 Valid = $true
-                Value = $value.InnerText
+                Value = $value.PSBase.InnerText
                 Deleted = $false
             }
         }
@@ -1886,7 +1886,7 @@ function Resolve-ADAnalyzerRegistryPolicy {
                 if (Test-Path -LiteralPath $resourcePath -PathType Leaf) {
                     $adml = Read-AnalyzerPolicyXml $resourcePath
                     foreach ($resource in @($adml.SelectNodes('//*[local-name()="stringTable"]/*[local-name()="string"]'))) {
-                        $resources[(Get-ADAnalyzerXmlAttribute $resource id)] = $resource.InnerText
+                        $resources[(Get-ADAnalyzerXmlAttribute $resource id)] = $resource.PSBase.InnerText
                     }
                 }
                 else {
@@ -1931,7 +1931,7 @@ function Resolve-ADAnalyzerRegistryPolicy {
                         $elementName = Get-ADAnalyzerXmlAttribute $element valueName
                         $definitions += [pscustomobject]@{
                             Common = $common
-                            Kind = $element.LocalName
+                            Kind = $element.PSBase.LocalName
                             Key = $elementKey
                             ValueName = $elementName
                             ElementId = (Get-ADAnalyzerXmlAttribute $element id)

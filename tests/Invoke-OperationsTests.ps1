@@ -1375,6 +1375,39 @@ try {
             Assert-True (($output -join ' ') -like ('*PASS XML node boundary ' + $case + '*')) 'Fresh process did not execute selected case.'
         }
     }
+    $nativeCases = [ordered]@{
+        Parity = 18
+        LocalName = 4
+        Attributes = 6
+        Traversal = 12
+        Payload = 10
+        Presence = 10
+        DataMembers = 2
+        Serialization = 8
+        SafeData = 8
+        Export = 8
+        Policy = 9
+        Admx = 1
+        Provided = 2
+        Reader = 2
+        Standalone = 1
+    }
+    foreach ($case in $nativeCases.Keys) {
+        Invoke-Test ('XML native properties: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $output = & $executable -NoLogo -NoProfile -NonInteractive -File (
+                Join-Path $PSScriptRoot 'XmlNativePropertyFixture.ps1'
+            ) -Case $case 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw 'Fresh native-property fixture failed.'
+            }
+            $marker = 'PASS XML native properties ' + $case + ' ' + $nativeCases[$case]
+            Assert-True (($output -join ' ') -like ('*' + $marker + '*')) 'Fresh process did not execute every selected scenario.'
+        }
+    }
 }
 finally {
     Remove-Item -LiteralPath $script:Temporary -Recurse -Force -WhatIf:$false -Confirm:$false

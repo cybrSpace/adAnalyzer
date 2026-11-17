@@ -134,14 +134,14 @@ function Get-ADAnalyzerXmlSecretName {
         return ''
     }
     $labels = @('Name', 'ValueName', 'Attribute', 'AttributeName', 'Property', 'PropertyName', 'SettingName')
-    foreach ($attribute in @($Node.Attributes)) {
-        if ($attribute.LocalName -in $labels -and (Test-ADAnalyzerSecretName $attribute.Value)) {
-            return $attribute.Value
+    foreach ($attribute in @($Node.PSBase.Attributes)) {
+        if ($attribute.PSBase.LocalName -in $labels -and (Test-ADAnalyzerSecretName $attribute.PSBase.Value)) {
+            return $attribute.PSBase.Value
         }
     }
     foreach ($child in @($Node.SelectNodes('./*'))) {
-        if ($child.LocalName -in $labels -and (Test-ADAnalyzerSecretName $child.InnerText)) {
-            return $child.InnerText
+        if ($child.PSBase.LocalName -in $labels -and (Test-ADAnalyzerSecretName $child.PSBase.InnerText)) {
+            return $child.PSBase.InnerText
         }
     }
     return ''
@@ -180,14 +180,14 @@ function ConvertTo-ADAnalyzerSecretIndicatorXml {
         $copy
     }
     else {
-        $copy.OwnerDocument
+        $copy.PSBase.OwnerDocument
     }
-    foreach ($attribute in @($copy.SelectNodes('.//@*') | Where-Object { Test-ADAnalyzerSecretName $_.LocalName })) {
-        $owner = $attribute.OwnerElement
-        $name = $attribute.LocalName + 'Present'
-        $present = Test-ADAnalyzerSecretPresence $attribute.Value
+    foreach ($attribute in @($copy.SelectNodes('.//@*') | Where-Object { Test-ADAnalyzerSecretName $_.PSBase.LocalName })) {
+        $owner = $attribute.PSBase.OwnerElement
+        $name = $attribute.PSBase.LocalName + 'Present'
+        $present = Test-ADAnalyzerSecretPresence $attribute.PSBase.Value
         $present = $present -or $owner.GetAttribute($name) -ieq 'true'
-        $null = $owner.Attributes.Remove($attribute)
+        $null = $owner.PSBase.Attributes.Remove($attribute)
         $owner.SetAttribute($name, ([string]$present).ToLowerInvariant())
     }
     # GPP registry and other named-value records use generic payload fields,
@@ -201,55 +201,55 @@ function ConvertTo-ADAnalyzerSecretIndicatorXml {
         $present = $false
         $hasPayload = $false
         $hasFlag = $false
-        foreach ($attribute in @($record.Attributes)) {
-            if ($attribute.LocalName -ieq 'SecretPresent') {
-                $present = $present -or $attribute.Value -ieq 'true'
+        foreach ($attribute in @($record.PSBase.Attributes)) {
+            if ($attribute.PSBase.LocalName -ieq 'SecretPresent') {
+                $present = $present -or $attribute.PSBase.Value -ieq 'true'
                 $hasFlag = $true
-                $null = $record.Attributes.Remove($attribute)
+                $null = $record.PSBase.Attributes.Remove($attribute)
             }
-            elseif ($attribute.LocalName -in $payloadNames) {
+            elseif ($attribute.PSBase.LocalName -in $payloadNames) {
                 $hasPayload = $true
-                if ($attribute.LocalName -ine 'Expected') {
-                    $present = $present -or (Test-ADAnalyzerSecretPresence $attribute.Value)
+                if ($attribute.PSBase.LocalName -ine 'Expected') {
+                    $present = $present -or (Test-ADAnalyzerSecretPresence $attribute.PSBase.Value)
                 }
-                $null = $record.Attributes.Remove($attribute)
+                $null = $record.PSBase.Attributes.Remove($attribute)
             }
-            elseif ($attribute.LocalName -like '*Present' -and $attribute.Value -ieq 'true') {
+            elseif ($attribute.PSBase.LocalName -like '*Present' -and $attribute.PSBase.Value -ieq 'true') {
                 $present = $true
             }
         }
-        foreach ($child in @($record.ChildNodes)) {
-            if ($child.NodeType -eq [Xml.XmlNodeType]::Element) {
-                if ($child.LocalName -ieq 'SecretPresent') {
-                    $present = $present -or $child.InnerText -ieq 'true'
+        foreach ($child in @($record.PSBase.ChildNodes)) {
+            if ($child.PSBase.NodeType -eq [Xml.XmlNodeType]::Element) {
+                if ($child.PSBase.LocalName -ieq 'SecretPresent') {
+                    $present = $present -or $child.PSBase.InnerText -ieq 'true'
                     $hasFlag = $true
                     $null = $record.RemoveChild($child)
                 }
-                elseif ($child.LocalName -in $payloadNames) {
+                elseif ($child.PSBase.LocalName -in $payloadNames) {
                     $hasPayload = $true
-                    if ($child.LocalName -ine 'Expected') {
-                        $present = $present -or (Test-ADAnalyzerSecretPresence $child.InnerText)
+                    if ($child.PSBase.LocalName -ine 'Expected') {
+                        $present = $present -or (Test-ADAnalyzerSecretPresence $child.PSBase.InnerText)
                     }
                     $null = $record.RemoveChild($child)
                 }
             }
-            elseif ($child.NodeType -in @([Xml.XmlNodeType]::Text, [Xml.XmlNodeType]::CDATA)) {
+            elseif ($child.PSBase.NodeType -in @([Xml.XmlNodeType]::Text, [Xml.XmlNodeType]::CDATA)) {
                 $hasPayload = $true
-                $present = $present -or (Test-ADAnalyzerSecretPresence $child.Value)
+                $present = $present -or (Test-ADAnalyzerSecretPresence $child.PSBase.Value)
                 $null = $record.RemoveChild($child)
             }
         }
         # A wrapper can share its nested item's display name. Do not invent a
         # second empty credential record for a wrapper with no own payload.
-        $nested = @($record.SelectNodes('./*') | Where-Object { $_.LocalName -notin $labelNames })
+        $nested = @($record.SelectNodes('./*') | Where-Object { $_.PSBase.LocalName -notin $labelNames })
         if ($hasPayload -or $hasFlag -or -not $nested.Count) {
             $record.SetAttribute('SecretPresent', ([string]$present).ToLowerInvariant())
-            if (-not $record.HasChildNodes) {
-                $record.IsEmpty = $true
+            if (-not $record.PSBase.HasChildNodes) {
+                $record.PSBase.IsEmpty = $true
             }
         }
     }
-    foreach ($element in @($copy.SelectNodes('descendant-or-self::*') | Where-Object { Test-ADAnalyzerSecretName $_.LocalName })) {
+    foreach ($element in @($copy.SelectNodes('descendant-or-self::*') | Where-Object { Test-ADAnalyzerSecretName $_.PSBase.LocalName })) {
         $present = if ($element.HasAttribute('SecretPresent')) {
             $element.GetAttribute('SecretPresent') -ieq 'true'
         }
@@ -257,18 +257,18 @@ function ConvertTo-ADAnalyzerSecretIndicatorXml {
             Test-ADAnalyzerSecretPresence $element.GetAttribute('value')
         }
         else {
-            Test-ADAnalyzerSecretPresence $element.InnerText
+            Test-ADAnalyzerSecretPresence $element.PSBase.InnerText
         }
-        if (@($element.SelectNodes('descendant-or-self::*/@*') | Where-Object { $_.LocalName -like '*Present' -and
-                    $_.Value -eq 'true' }).Count -or
-            @($element.SelectNodes('.//*') | Where-Object { $_.LocalName -like '*Present' -and
-                    $_.InnerText -eq 'true' }).Count) {
+        if (@($element.SelectNodes('descendant-or-self::*/@*') | Where-Object { $_.PSBase.LocalName -like '*Present' -and
+                    $_.PSBase.Value -eq 'true' }).Count -or
+            @($element.SelectNodes('.//*') | Where-Object { $_.PSBase.LocalName -like '*Present' -and
+                    $_.PSBase.InnerText -eq 'true' }).Count) {
             $present = $true
         }
-        $flag = $document.CreateElement($element.LocalName + 'Present')
-        $flag.InnerText = ([string]$present).ToLowerInvariant()
-        if ($element.ParentNode) {
-            $null = $element.ParentNode.ReplaceChild($flag, $element)
+        $flag = $document.CreateElement($element.PSBase.LocalName + 'Present')
+        $flag.PSBase.InnerText = ([string]$present).ToLowerInvariant()
+        if ($element.PSBase.ParentNode) {
+            $null = $element.PSBase.ParentNode.ReplaceChild($flag, $element)
         }
         else {
             $copy = $flag
@@ -323,10 +323,10 @@ function ConvertTo-ADAnalyzerSecretIndicatorText {
                     return $Text
                 }
                 if (-not $fragment) {
-                    return $safe.OuterXml
+                    return $safe.PSBase.OuterXml
                 }
-                if (@($safe.DocumentElement.SelectNodes('./*')).Count) {
-                    $Text = $safe.DocumentElement.InnerXml
+                if (@($safe.PSBase.DocumentElement.SelectNodes('./*')).Count) {
+                    $Text = $safe.PSBase.DocumentElement.PSBase.InnerXml
                 }
                 # Plain text must not be XML-escaped, and quoted assignments
                 # around a fragment still need the direct-secret projection.

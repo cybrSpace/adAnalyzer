@@ -96,7 +96,7 @@ function Get-ADAnalyzerGpoXml {
         }
         $stringReader.Dispose()
     }
-    if ($document.DocumentElement.LocalName -ne 'GPO') {
+    if ($document.PSBase.DocumentElement.PSBase.LocalName -ne 'GPO') {
         throw 'The report is not package GPO XML.'
     }
     $identity = [guid]::Empty
@@ -113,21 +113,21 @@ function Get-ADAnalyzerGpoXml {
         if ($null -eq $value -or [string]::IsNullOrEmpty([string]$value)) {
             continue
         }
-        $node = $document.DocumentElement.SelectSingleNode('./' + $field)
+        $node = $document.PSBase.DocumentElement.SelectSingleNode('./' + $field)
         if ($null -eq $node) {
             $node = $document.CreateElement($field)
-            $null = $document.DocumentElement.AppendChild($node)
+            $null = $document.PSBase.DocumentElement.AppendChild($node)
         }
-        $node.InnerText = [string]$value
+        $node.PSBase.InnerText = [string]$value
     }
     $safe = ConvertTo-ADAnalyzerSecretIndicatorXml $document
-    if ($safe.FirstChild -is [Xml.XmlDeclaration]) {
-        $safe.FirstChild.Encoding = 'utf-8'
+    if ($safe.PSBase.FirstChild -is [Xml.XmlDeclaration]) {
+        $safe.PSBase.FirstChild.PSBase.Encoding = 'utf-8'
     }
     else {
         $null = $safe.PrependChild($safe.CreateXmlDeclaration('1.0', 'utf-8', $null))
     }
-    $xml = $safe.OuterXml
+    $xml = $safe.PSBase.OuterXml
     if ($OutputPath -and $PSCmdlet.ShouldProcess($OutputPath, 'Save package GPO XML')) {
         $null = Write-ADAnalyzerFile -Path $OutputPath -Content $xml
     }
