@@ -1889,10 +1889,15 @@ namespace ADAnalyzer.SecretIndicatorFixture
                 Assert-Secret (
                     -not [string]::IsNullOrWhiteSpace($resultXml)
                 ) 'Projected result CLIXML was not emitted.'
+                if ($null -ne $resultJson) {
+                    Assert-Secret (
+                        $resultJson -is [string] -and
+                        -not $resultJson.Contains($script:Marker)
+                    ) 'A supported projected result retained JSON payload.'
+                }
                 Assert-Secret (
-                    -not ([string]$resultJson).Contains($script:Marker) -and
                     -not $resultXml.Contains($script:Marker)
-                ) 'A supported projected result retained its own payload.'
+                ) 'A supported projected result retained CLIXML payload.'
                 Assert-Secret (@($instance.PSObject.Properties).Count -eq 0) 'A processing call gained retained instance properties.'
                 $script:ExecutedScenarios++
             }
