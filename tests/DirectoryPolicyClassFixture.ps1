@@ -72,8 +72,21 @@ function Assert-CanonicalEqual([string]$Expected, [string]$Actual, [string]$Mess
     $start = [math]::Max(0, $offset - 80)
     $expectedContext = $Expected.Substring($start, [math]::Min(250, $Expected.Length - $start))
     $actualContext = $Actual.Substring($start, [math]::Min(250, $Actual.Length - $start))
-    throw ($Message + ' First JSON difference at ' + $offset +
-        '; expected: ' + $expectedContext + '; actual: ' + $actualContext)
+    $expectedCode = if ($offset -lt $Expected.Length) {
+        [int][char]$Expected[$offset]
+    }
+    else {
+        -1
+    }
+    $actualCode = if ($offset -lt $Actual.Length) {
+        [int][char]$Actual[$offset]
+    }
+    else {
+        -1
+    }
+    throw ($Message + ' JSON offset=' + $offset + ', expectedChar=' + $expectedCode +
+        ', actualChar=' + $actualCode + '; expected: ' + $expectedContext +
+        '; actual: ' + $actualContext)
 }
 
 function New-PolicyContext([switch]$Mixed) {
@@ -306,6 +319,19 @@ if ($Case -eq 'RecordBaseline') {
 Assert-Policy ([bool]('ADAnalyzerDirectoryPolicyEvaluator' -as [type])) 'The constructor-based directory policy evaluator is missing.'
 $baseline = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'DirectoryPolicyClassBaseline.json') -Raw | ConvertFrom-Json
 
+# Compare the original golden values using this engine's JSON writer. Windows
+# PowerShell 5.1 writes Double zero as 0; Core writes 0.0. Concrete types are
+# asserted independently below. Preserve ISO strings when the parser supports it.
+foreach ($name in @('Empty', 'Mixed')) {
+    $parseArguments = @{
+        InputObject = $baseline.$name
+    }
+    if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) {
+        $parseArguments.DateKind = 'String'
+    }
+    $baseline.$name = Get-CanonicalJson (ConvertFrom-Json @parseArguments)
+}
+
 switch ($Case) {
     'Construction' {
         $evaluator = [ADAnalyzerDirectoryPolicyEvaluator]::new()
@@ -357,6 +383,17 @@ switch ($Case) {
         Assert-Policy ($flag.Evidence.UserAccountControl -is [long]) 'Int64 account-control metadata changed width.'
         $minimum = @($checks | Where-Object RuleId -eq PASSWORD.MIN_LENGTH)[0]
         Assert-Policy ($minimum.Observed -is [long] -and $minimum.Observed -eq 0) 'Int64 password-policy zero changed.'
+        foreach ($rule in @(
+                'PASSWORD.LOCKOUT_DURATION',
+                'PASSWORD.LOCKOUT_RESET',
+                'PASSWORD.MIN_AGE',
+                'PASSWORD.MAX_AGE'
+            )) {
+            $duration = @($checks | Where-Object RuleId -eq $rule)
+            Assert-Policy ($duration.Count -eq 1) ($rule + ' check count changed.')
+            Assert-Policy ($duration[0].Observed -is [double] -and
+                $duration[0].Observed -eq 0) ($rule + ' is no longer Double zero.')
+        }
         $history = @($checks | Where-Object RuleId -eq SIDHISTORY.PRIVILEGED)[0]
         Assert-Policy ($history.Evidence.Privileged -is [string[]]) 'Privileged history array type changed.'
         Assert-Policy ($history.Status -eq 'Fail') 'Privileged historical group lost its failure status.'

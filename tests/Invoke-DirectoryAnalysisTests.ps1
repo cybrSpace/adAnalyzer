@@ -2167,6 +2167,9 @@ foreach ($case in @(
             Join-Path $PSScriptRoot 'DirectoryPolicyClassFixture.ps1'
         ) -Case $case 2>&1
         if ($LASTEXITCODE -ne 0) {
+            foreach ($line in $output) {
+                Write-Host ('Fixture output: ' + [string]$line)
+            }
             throw ($output -join [Environment]::NewLine)
         }
         Assert-DirectoryTrue (($output -join ' ') -like ('*PASS directory policy class ' + $case + '*')) 'Fresh process did not execute the selected case.'
