@@ -199,7 +199,14 @@ switch ($Case) {
     }
 
     'NoExpansion' {
-        Add-Type -TypeDefinition @'
+        $compilerParameters = @{}
+        if ($PSVersionTable.PSEdition -eq 'Desktop') {
+            $compilerParameters.ReferencedAssemblies = @(
+                [Xml.XmlResolver].Assembly.Location
+                [Net.ICredentials].Assembly.Location
+            )
+        }
+        Add-Type @compilerParameters -TypeDefinition @'
 namespace ADAnalyzer.DtdFixture {
     public sealed class Resolver : System.Xml.XmlResolver {
         public static int Calls;
