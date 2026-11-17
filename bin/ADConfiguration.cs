@@ -23,4 +23,25 @@ namespace ADAnalyzer
             return this.profile;
         }
     }
+
+    // Reusable internal state without properties that serializers enumerate.
+    public sealed class InternalState
+    {
+        private readonly object value;
+
+        public InternalState(object value)
+        {
+            if (value == null)
+            {
+                throw new ArgumentNullException("value");
+            }
+
+            this.value = value;
+        }
+
+        public object GetValue()
+        {
+            return this.value;
+        }
+    }
 }

@@ -2125,6 +2125,30 @@ Invoke-DirectoryTest 'generic AD objects with raw objectSid retain stable group 
     Assert-DirectoryEqual $false ([bool]$group.PSObject.Properties['SID'])
     Assert-DirectoryEqual 0 $membership.Unresolved.Count
 }
+
+foreach ($case in @(
+        'Construction',
+        'Ordered',
+        'Cycles',
+        'Aliases',
+        'Duplicates',
+        'Snapshot',
+        'Serialization',
+        'Isolation',
+        'LongChain',
+        'DirectoryRoute'
+    )) {
+    Invoke-DirectoryTest ('constructor membership graph: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $output = & $executable -NoLogo -NoProfile -NonInteractive -File (
+            Join-Path $PSScriptRoot 'MembershipGraphFixture.ps1'
+        ) -Case $case 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw ($output -join [Environment]::NewLine)
+        }
+        Assert-DirectoryTrue (($output -join ' ') -like ('*PASS membership graph ' + $case + '*')) 'Fresh process did not execute the selected case.'
+    }
+}
 Write-Host ("{0} directory tests passed; {1} failed" -f $script:Passed, $script:Failed)
 if ($script:Failed) {
     exit 1
