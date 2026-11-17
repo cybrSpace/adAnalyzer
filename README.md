@@ -116,6 +116,8 @@ Dot source the portable object entrypoint in a fresh PowerShell process to const
 
 ```powershell
 . .\bin\ADAnalyzer.ps1
+$configuration = [ADAnalyzerProfile]::new($overrides)
+$profile = $configuration.ToHashtable()
 $engine = [ADAnalyzerAssessmentEngine]::new($profile)
 $scan = $engine.Evaluate($directorySnapshot, $policyReports, 'example.com')
 # Defaults: an independent default profile, no policies, target 'offline'.
@@ -130,6 +132,8 @@ $membership = $membershipGraph.Resolve($account, $domainSid, $privilegedSids)
 $directoryEvaluator = [ADAnalyzerDirectoryPolicyEvaluator]::new()
 $checks = $directoryEvaluator.Evaluate($directorySnapshot, $profile)
 ```
+
+`ADAnalyzerProfile` owns fresh defaults, copying, merging, validation, and explicit JSON/PSD1 loading. `[ADAnalyzerProfile]::new()` and `::new(overrides)` construct independent normalized configuration without file reads or native-module imports. `[ADAnalyzerProfile]::Load(path)` reads a file explicitly and returns a profile instance; `ToHashtable()` returns a detached configuration snapshot for existing APIs. `DefaultSnapshot()` returns fresh raw defaults. Raw default policy thresholds retain their `Int32` contract, while normalization retains the established `Int64` policy values. Native JSON/CLIXML serialization of the profile object omits its private configuration state. Existing default/import commands delegate to these methods; the legacy merge adapter retains its in-place, no-output contract.
 
 The constructor validates and copies its in-memory profile without importing native modules or connecting to AD. Instance methods own assessment composition, policy/version evidence, suppression, duplicate detection, coverage, state, and safe report projection. Reports retain the existing detached assessment shape; the engine stores no credentials or collected records. A bundled C# configuration holder uses a private field, so serializing an engine does not serialize its profile. The built-in `Add-Type` loads that small source component; no separate build tool or external package is required. Each instance owns its configuration, and evaluating again does not retain earlier results. Direct methods throw on evaluation errors. The existing `Invoke-ADAnalyzerAssessment` command is a thin compatibility adapter with its original parameters and a transient command context for PowerShell error-stream/common-parameter behavior. Other engine components are being converted in separate verified units.
 

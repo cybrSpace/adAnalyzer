@@ -1113,6 +1113,33 @@ try {
 finally {
     Remove-Item -LiteralPath $temp -Recurse -Force -WhatIf:$false -Confirm:$false
 }
+
+foreach ($case in @(
+        'Construction',
+        'Parity',
+        'Types',
+        'Merge',
+        'Files',
+        'Validation',
+        'Isolation',
+        'Serialization',
+        'Ownership',
+        'ProfileOnly'
+    )) {
+    Test-Assessment ('constructor profile API: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $output = & $executable -NoLogo -NoProfile -NonInteractive -File (
+            Join-Path $PSScriptRoot 'ProfileClassFixture.ps1'
+        ) -Case $case 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            foreach ($line in $output) {
+                Write-Host ('Fixture output: ' + [string]$line)
+            }
+            throw ($output -join [Environment]::NewLine)
+        }
+        Assert-True (($output -join ' ') -like ('*PASS profile class ' + $case + '*')) 'Fresh process did not execute the selected profile case.'
+    }
+}
 Write-Host ("{0} assessment-integration tests passed; {1} failed" -f $script:Passed, $script:Failed)
 if ($script:Failed) {
     exit 1

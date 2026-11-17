@@ -1,6 +1,11 @@
 # Shared configuration and result contracts. No external modules are required.
 . (Join-Path $PSScriptRoot 'ADSecret.ps1')
 
+# Configuration capsules expose no automatically serialized profile properties.
+if (-not ('ADAnalyzer.ConfigurationState' -as [type])) {
+    Add-Type -Path (Join-Path $PSScriptRoot 'ADConfiguration.cs') -ErrorAction Stop
+}
+
 function ConvertTo-ADAnalyzerHashtable {
     param([AllowNull()]$InputObject)
     if ($null -eq $InputObject) {
@@ -38,90 +43,378 @@ function ConvertTo-ADAnalyzerHashtable {
     return $InputObject
 }
 
+class ADAnalyzerProfile {
+    hidden [object]$Settings
+
+    ADAnalyzerProfile() {
+        $this.Initialize($null)
+    }
+
+    ADAnalyzerProfile([object]$Profile) {
+        $this.Initialize($Profile)
+    }
+
+    hidden [void] Initialize([object]$Profile) {
+        $result = [ADAnalyzerProfile]::DefaultSnapshot()
+        if ($null -ne $Profile) {
+            $overrides = ConvertTo-ADAnalyzerHashtable $Profile
+            if ($overrides -isnot [hashtable]) {
+                throw 'Profile must be a dictionary'
+            }
+            [ADAnalyzerProfile]::MergeInto($result, $overrides, '')
+        }
+
+        $this.ValidateCommon($result)
+        $this.ValidateRules($result)
+        $this.ValidateHostRules($result)
+        $this.Settings = [Activator]::CreateInstance(
+            ('ADAnalyzer.ConfigurationState' -as [type]),
+            [object[]]@($result)
+        )
+    }
+
+    [hashtable] ToHashtable() {
+        return (ConvertTo-ADAnalyzerHashtable $this.Settings.GetProfile())
+    }
+
+    static [hashtable] DefaultSnapshot() {
+        # Return a fresh graph on every call; a scan must not change another scan's rules.
+        return @{
+            SchemaVersion = 1
+            Name = 'AD Tactical Hardening'
+            Version = '1.0.0'
+            Targets = @{
+                Domain = ''
+                Server = ''
+                SearchBase = ''
+            }
+            Analysis = @{
+                IncludeAcl = $false
+                IncludeHostChecks = $false
+                IncludeGpo = $true
+                AssumeGpoApplicable = $false
+                HostTimeoutSeconds = 30
+                TemplatePath = ''
+                Language = 'en-US'
+                DirectoryConnection = 'PSDrive'
+            }
+            Policy = @{
+                MinimumPasswordLength = 12
+                MinimumPasswordAgeDays = 1
+                MaximumPasswordAgeDays = 90
+                UserPasswordAgeDays = 90
+                ServicePasswordAgeDays = 365
+                AllowPasswordNeverExpires = $false
+                PasswordHistorySize = 10
+                PasswordComplexity = $true
+                AllowReversibleEncryption = $false
+                LockoutThreshold = 6
+                LockoutDurationMinutes = 30
+                ResetLockoutMinutes = 30
+                UserInactivityDays = 60
+                ComputerInactivityDays = 60
+                MachineAccountQuota = 0
+                MinimumLmCompatibilityLevel = 5
+                RequireLdapClientSigning = $true
+                RequireLdapServerSigning = $true
+                AllowedAnonymousPipes = @('LSARPC', 'NETLOGON', 'SAMR')
+                ApprovedLocalAdminSids = @('S-1-5-32-544')
+                AllowedUserRightSids = @{}
+                PrivilegedSids = @()
+                ApprovedDelegationTargets = @()
+                ApprovedReplicationSids = @()
+                IncludeAdministrativeReplicationRoles = $true
+                ApprovedLapsReaderSids = @()
+                ApprovedGmsaReaderSids = @()
+                SupportedOperatingSystems = @()
+                RequireLaps = $true
+                RequireGmsaForServiceAccounts = $false
+            }
+            AccountClassification = @{
+                UserOUs = @()
+                ServiceOUs = @()
+                UserGroups = @()
+                ServiceGroups = @()
+                AttributeRules = @()
+            }
+            Host = @{
+                Services = @()
+                RegistryRules = @()
+                AuditRules = @()
+                CertificateEndpoints = @()
+            }
+            Remediation = @{
+                AllowDisable = $false
+                ApprovedObjectGuids = @()
+                ExcludedObjectGuids = @()
+                ExcludedOUs = @()
+                IncludeServiceAccounts = $false
+                IncludePrivilegedAccounts = $false
+                MaximumActions = 10
+            }
+            RegistryRules = @()
+            ExpectedGpoSettings = @()
+            ApprovedDelegationTargets = @()
+            ApprovedReplicationSids = @()
+            Exceptions = @()
+            DependencyHashes = @{}
+        }
+    }
+
+    hidden static [void] MergeInto(
+        [hashtable]$Defaults,
+        [hashtable]$Overrides,
+        [string]$Prefix
+    ) {
+        foreach ($key in $Overrides.Keys) {
+            if (-not $Defaults.ContainsKey($key)) {
+                throw "Unknown profile setting: $Prefix$key"
+            }
+            if ($Defaults[$key] -is [hashtable]) {
+                if ($Overrides[$key] -isnot [hashtable]) {
+                    throw "Profile setting $Prefix$key must be a dictionary"
+                }
+                if ($key -in 'AllowedUserRightSids', 'DependencyHashes') {
+                    $Defaults[$key] = $Overrides[$key]
+                }
+                else {
+                    [ADAnalyzerProfile]::MergeInto($Defaults[$key], $Overrides[$key], ($Prefix + $key + '.'))
+                }
+            }
+            else {
+                $Defaults[$key] = $Overrides[$key]
+            }
+        }
+    }
+
+    static [ADAnalyzerProfile] Load([string]$Path) {
+        $loaded = $null
+        switch ([IO.Path]::GetExtension($Path).ToLowerInvariant()) {
+            '.psd1' {
+                $loaded = Import-PowerShellDataFile -LiteralPath $Path -ErrorAction Stop
+            }
+            '.json' {
+                $loaded = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop |
+                    ConvertFrom-Json -ErrorAction Stop
+            }
+            default {
+                throw 'Profiles must be .json or restricted .psd1 data files'
+            }
+        }
+        return [ADAnalyzerProfile]::new($loaded)
+    }
+
+    hidden [void] ValidateCommon([hashtable]$result) {
+        Assert-ADAnalyzerValueBaseline -Profile $result
+        if (($result.SchemaVersion -isnot [int] -and $result.SchemaVersion -isnot [long]) -or $result.SchemaVersion -ne 1) {
+            throw 'Unsupported profile SchemaVersion'
+        }
+        if ([string]::IsNullOrWhiteSpace($result.Name) -or [string]::IsNullOrWhiteSpace($result.Version)) {
+            throw 'Profile Name and Version are required'
+        }
+        foreach ($name in @('MinimumPasswordLength',
+                'MinimumPasswordAgeDays',
+                'MaximumPasswordAgeDays',
+                'UserPasswordAgeDays',
+                'ServicePasswordAgeDays',
+                'PasswordHistorySize',
+                'LockoutThreshold',
+                'LockoutDurationMinutes',
+                'ResetLockoutMinutes',
+                'UserInactivityDays',
+                'ComputerInactivityDays',
+                'MachineAccountQuota',
+                'MinimumLmCompatibilityLevel')) {
+            $number = 0L
+            if (-not [long]::TryParse([string]$result.Policy[$name], [ref]$number) -or $number -lt 0) {
+                throw "Policy.$name must be a nonnegative integer"
+            }
+            $result.Policy[$name] = $number
+        }
+        foreach ($section in @('Analysis', 'Policy', 'Remediation')) {
+            $default = [ADAnalyzerProfile]::DefaultSnapshot()
+            foreach ($key in $default[$section].Keys) {
+                if ($default[$section][$key] -is [bool] -and $result[$section][$key] -isnot [bool]) {
+                    throw "$section.$key must be a boolean"
+                }
+            }
+        }
+        if ($result.Policy.LockoutThreshold -gt 65535 -or $result.Policy.MinimumLmCompatibilityLevel -gt 5) {
+            throw 'Invalid lockout/LM policy range'
+        }
+        if ($result.Policy.LockoutThreshold -gt 0 -and $result.Policy.LockoutDurationMinutes -lt $result.Policy.ResetLockoutMinutes) {
+            throw 'Lockout duration must be at least the reset interval'
+        }
+        $timeout = 0
+        if (-not [int]::TryParse([string]$result.Analysis.HostTimeoutSeconds, [ref]$timeout) -or $timeout -lt 1 -or $timeout -gt 300) {
+            throw 'Analysis.HostTimeoutSeconds must be an integer 1..300'
+        }
+        $result.Analysis.HostTimeoutSeconds = $timeout
+        if ($result.Analysis.DirectoryConnection -isnot [string] -or $result.Analysis.DirectoryConnection -notin 'PSDrive', 'Direct') {
+            throw 'Analysis.DirectoryConnection must be PSDrive or Direct'
+        }
+        $result.Analysis.DirectoryConnection = if ($result.Analysis.DirectoryConnection -ieq 'PSDrive') {
+            'PSDrive'
+        }
+        else {
+            'Direct'
+        }
+        if ($result.Remediation.MaximumActions -isnot [int] -and $result.Remediation.MaximumActions -isnot [long]) {
+            throw 'Remediation.MaximumActions must be an integer'
+        }
+        if ($result.Remediation.MaximumActions -lt 1 -or $result.Remediation.MaximumActions -gt 1000) {
+            throw 'Remediation.MaximumActions must be 1..1000'
+        }
+    }
+
+    hidden [void] ValidateRules([hashtable]$result) {
+        foreach ($exception in @($result.Exceptions)) {
+            foreach ($key in @('RuleId', 'Target', 'Owner', 'Reason', 'Expires')) {
+                if (-not $exception.ContainsKey($key) -or [string]::IsNullOrWhiteSpace([string]$exception[$key])) {
+                    throw "Exception requires $key"
+                }
+            }
+            $date = [datetimeoffset]::MinValue
+            if (-not [datetimeoffset]::TryParse([string]$exception.Expires, [ref]$date)) {
+                throw 'Exception Expires must be an ISO date/time'
+            }
+            $exception.Expires = $date.ToUniversalTime().ToString('o')
+        }
+        foreach ($rule in @($result.RegistryRules) + @($result.ExpectedGpoSettings)) {
+            if ($rule -isnot [Collections.IDictionary]) {
+                throw 'Custom rules must be dictionaries'
+            }
+            if ($rule.Contains('Operator') -and $rule.Operator -notin @('Equals', 'NotEquals', 'In', 'NotIn', 'Minimum', 'Maximum')) {
+                throw 'Unsupported custom-rule operator'
+            }
+            if ($rule.Contains('Severity') -and $rule.Severity -notin @('Critical', 'High', 'Medium', 'Low', 'Information')) {
+                throw 'Unsupported custom-rule severity'
+            }
+            if ($rule.Contains('Scope') -and $rule.Scope -notin @('Computer', 'User')) {
+                throw 'Custom-rule Scope must be Computer or User'
+            }
+            if ($rule.Contains('Aggregate') -and $rule.Aggregate -isnot [bool]) {
+                throw 'Custom-rule Aggregate must be a boolean'
+            }
+        }
+        foreach ($rule in $result.AccountClassification.AttributeRules) {
+            if (-not $rule.Attribute -or
+                $rule.Type -notin @('User',
+                    'Service') -or
+                ($rule.Match -and
+                $rule.Match -notin @('Equals',
+                    'Regex'))) {
+                throw 'Invalid account classification attribute rule'
+            }
+        }
+        foreach ($value in @($result.Remediation.ApprovedObjectGuids) + @($result.Remediation.ExcludedObjectGuids)) {
+            $id = [guid]::Empty
+            if (-not [guid]::TryParse([string]$value, [ref]$id)) {
+                throw 'Remediation object identities must be GUIDs'
+            }
+        }
+    }
+
+    hidden [void] ValidateHostRules([hashtable]$result) {
+        $hostServiceIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($rule in @($result.Host.Services)) {
+            if ($rule -isnot [Collections.IDictionary] -or
+                $rule.Name -isnot [string] -or
+                [string]::IsNullOrWhiteSpace($rule.Name) -or
+                $rule.State -isnot [string] -or
+                [string]::IsNullOrWhiteSpace($rule.State)) {
+                throw 'Host service rules require nonempty string Name and State'
+            }
+            if ($rule.Name.IndexOf([char]0) -ge 0) {
+                throw 'Host service Name cannot contain NUL characters'
+            }
+            if ($rule.Contains('StartMode') -and $null -ne $rule.StartMode -and $rule.StartMode -isnot [string]) {
+                throw 'Host service StartMode must be a string or null'
+            }
+            if (-not $hostServiceIds.Add((Get-ADAnalyzerHostRuleIdentity -Rule $rule -Target $rule.Name -Parts @($rule.Name)))) {
+                throw 'Duplicate host service rule identity; use distinct Id values for separate expectations'
+            }
+        }
+        $hostRegistryIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($rule in @($result.Host.RegistryRules)) {
+            if ($rule -isnot [Collections.IDictionary] -or
+                $rule.Key -isnot [string] -or
+                [string]::IsNullOrWhiteSpace($rule.Key) -or
+                $rule.ValueName -isnot [string]) {
+                throw 'Host registry rules require a nonempty string Key and a string ValueName'
+            }
+            if ($rule.Key.IndexOf([char]0) -ge 0 -or $rule.ValueName.IndexOf([char]0) -ge 0) {
+                throw 'Host registry identities cannot contain NUL characters'
+            }
+            if ($rule.Contains('Type')) {
+                $registryType = 0
+                if (-not [int]::TryParse([string]$rule.Type, [ref]$registryType) -or $registryType -notin 1, 2, 3, 4, 7, 11) {
+                    throw 'Host registry Type must be 1, 2, 3, 4, 7, or 11'
+                }
+                $rule.Type = $registryType
+            }
+            if ($rule.Contains('Operator') -and $rule.Operator -notin @('Equals', 'NotEquals', 'In', 'NotIn', 'Minimum', 'Maximum')) {
+                throw 'Unsupported host registry operator'
+            }
+            if (-not $hostRegistryIds.Add((Get-ADAnalyzerHostRuleIdentity `
+                            -Rule $rule `
+                            -Target ($rule.Key + '/' + $rule.ValueName) `
+                            -Parts @($rule.Key,
+                            $rule.ValueName)))) {
+                throw 'Duplicate host registry rule identity; use distinct Id values for separate expectations'
+            }
+        }
+        $hostAuditIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($rule in @($result.Host.AuditRules)) {
+            $id = [guid]::Empty
+            if (-not [guid]::TryParse([string]$rule.SubcategoryGuid, [ref]$id) -or [int]$rule.Flags -notin 1, 2, 3) {
+                throw 'Host audit rules require SubcategoryGuid and Flags 1, 2, or 3'
+            }
+            if (-not $hostAuditIds.Add($id.ToString('D'))) {
+                throw 'Duplicate host audit subcategory identity; combine required flags in one rule'
+            }
+        }
+        foreach ($hash in $result.DependencyHashes.Values) {
+            if ([string]$hash -notmatch '^[a-fA-F0-9]{64}$') {
+                throw 'DependencyHashes values must be SHA256 hex strings'
+            }
+        }
+        $hostCertificateIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($endpoint in @($result.Host.CertificateEndpoints)) {
+            if ($endpoint.HostName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+                throw 'Certificate endpoint HostName must be a DNS/NetBIOS name or IPv4 address'
+            }
+            if ($endpoint.Contains('Port') -and ([int]$endpoint.Port -lt 1 -or [int]$endpoint.Port -gt 65535)) {
+                throw 'Certificate endpoint Port must be 1..65535'
+            }
+            if ($endpoint.Contains('MinimumRemainingDays') -and [int]$endpoint.MinimumRemainingDays -lt 0) {
+                throw 'Certificate minimum remaining days must be nonnegative'
+            }
+            $hostName = [string]$endpoint.HostName
+            $port = if ($endpoint.Port) {
+                [int]$endpoint.Port
+            }
+            else {
+                443
+            }
+            $serverName = if ($endpoint.ServerName) {
+                [string]$endpoint.ServerName
+            }
+            else {
+                $hostName
+            }
+            if (-not $hostCertificateIds.Add(('{0}:{1}/{2}' -f $hostName, $port, $serverName))) {
+                throw 'Duplicate host certificate endpoint identity; use one rule per host, port, and server name'
+            }
+        }
+    }
+}
+
 function Get-ADAnalyzerDefaultProfile {
     [CmdletBinding()]
     param()
-    # Return a fresh graph on every call; a scan must not change another scan's rules.
-    @{
-        SchemaVersion = 1
-        Name = 'AD Tactical Hardening'
-        Version = '1.0.0'
-        Targets = @{
-            Domain = ''
-            Server = ''
-            SearchBase = ''
-        }
-        Analysis = @{
-            IncludeAcl = $false
-            IncludeHostChecks = $false
-            IncludeGpo = $true
-            AssumeGpoApplicable = $false
-            HostTimeoutSeconds = 30
-            TemplatePath = ''
-            Language = 'en-US'
-            DirectoryConnection = 'PSDrive'
-        }
-        Policy = @{
-            MinimumPasswordLength = 12
-            MinimumPasswordAgeDays = 1
-            MaximumPasswordAgeDays = 90
-            UserPasswordAgeDays = 90
-            ServicePasswordAgeDays = 365
-            AllowPasswordNeverExpires = $false
-            PasswordHistorySize = 10
-            PasswordComplexity = $true
-            AllowReversibleEncryption = $false
-            LockoutThreshold = 6
-            LockoutDurationMinutes = 30
-            ResetLockoutMinutes = 30
-            UserInactivityDays = 60
-            ComputerInactivityDays = 60
-            MachineAccountQuota = 0
-            MinimumLmCompatibilityLevel = 5
-            RequireLdapClientSigning = $true
-            RequireLdapServerSigning = $true
-            AllowedAnonymousPipes = @('LSARPC', 'NETLOGON', 'SAMR')
-            ApprovedLocalAdminSids = @('S-1-5-32-544')
-            AllowedUserRightSids = @{}
-            PrivilegedSids = @()
-            ApprovedDelegationTargets = @()
-            ApprovedReplicationSids = @()
-            IncludeAdministrativeReplicationRoles = $true
-            ApprovedLapsReaderSids = @()
-            ApprovedGmsaReaderSids = @()
-            SupportedOperatingSystems = @()
-            RequireLaps = $true
-            RequireGmsaForServiceAccounts = $false
-        }
-        AccountClassification = @{
-            UserOUs = @()
-            ServiceOUs = @()
-            UserGroups = @()
-            ServiceGroups = @()
-            AttributeRules = @()
-        }
-        Host = @{
-            Services = @()
-            RegistryRules = @()
-            AuditRules = @()
-            CertificateEndpoints = @()
-        }
-        Remediation = @{
-            AllowDisable = $false
-            ApprovedObjectGuids = @()
-            ExcludedObjectGuids = @()
-            ExcludedOUs = @()
-            IncludeServiceAccounts = $false
-            IncludePrivilegedAccounts = $false
-            MaximumActions = 10
-        }
-        RegistryRules = @()
-        ExpectedGpoSettings = @()
-        ApprovedDelegationTargets = @()
-        ApprovedReplicationSids = @()
-        Exceptions = @()
-        DependencyHashes = @{}
-    }
+
+    [ADAnalyzerProfile]::DefaultSnapshot()
 }
 
 function Get-ADAnalyzerLegacyProfile {
@@ -194,25 +487,7 @@ function Merge-ADAnalyzerProfile {
         [string]$Prefix = ''
 
     )
-    foreach ($key in $Overrides.Keys) {
-        if (-not $Defaults.ContainsKey($key)) {
-            throw "Unknown profile setting: $Prefix$key"
-        }
-        if ($Defaults[$key] -is [hashtable]) {
-            if ($Overrides[$key] -isnot [hashtable]) {
-                throw "Profile setting $Prefix$key must be a dictionary"
-            }
-            if ($key -in 'AllowedUserRightSids', 'DependencyHashes') {
-                $Defaults[$key] = $Overrides[$key]
-            }
-            else {
-                Merge-ADAnalyzerProfile $Defaults[$key] $Overrides[$key] ($Prefix + $key + '.')
-            }
-        }
-        else {
-            $Defaults[$key] = $Overrides[$key]
-        }
-    }
+    [ADAnalyzerProfile]::MergeInto($Defaults, $Overrides, $Prefix)
 }
 
 function Get-ADAnalyzerHostRuleIdentity {
@@ -243,224 +518,13 @@ function Import-ADAnalyzerProfile {
         [Parameter(ParameterSetName = 'Object')][AllowNull()]$Profile
 
     )
-    $result = Get-ADAnalyzerDefaultProfile
-    if ($PSCmdlet.ParameterSetName -eq 'Path') {
-        switch ([IO.Path]::GetExtension($Path).ToLowerInvariant()) {
-            '.psd1' {
-                $Profile = Import-PowerShellDataFile -LiteralPath $Path -ErrorAction Stop
-            }
-            '.json' {
-                $Profile = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-            }
-            default {
-                throw 'Profiles must be .json or restricted .psd1 data files'
-            }
-        }
-    }
-    if ($null -ne $Profile) {
-        $overrides = ConvertTo-ADAnalyzerHashtable $Profile
-        if ($overrides -isnot [hashtable]) {
-            throw 'Profile must be a dictionary'
-        }
-        Merge-ADAnalyzerProfile $result $overrides
-    }
-    Assert-ADAnalyzerValueBaseline -Profile $result
-    if (($result.SchemaVersion -isnot [int] -and $result.SchemaVersion -isnot [long]) -or $result.SchemaVersion -ne 1) {
-        throw 'Unsupported profile SchemaVersion'
-    }
-    if ([string]::IsNullOrWhiteSpace($result.Name) -or [string]::IsNullOrWhiteSpace($result.Version)) {
-        throw 'Profile Name and Version are required'
-    }
-    foreach ($name in @('MinimumPasswordLength',
-            'MinimumPasswordAgeDays',
-            'MaximumPasswordAgeDays',
-            'UserPasswordAgeDays',
-            'ServicePasswordAgeDays',
-            'PasswordHistorySize',
-            'LockoutThreshold',
-            'LockoutDurationMinutes',
-            'ResetLockoutMinutes',
-            'UserInactivityDays',
-            'ComputerInactivityDays',
-            'MachineAccountQuota',
-            'MinimumLmCompatibilityLevel')) {
-        $number = 0L
-        if (-not [long]::TryParse([string]$result.Policy[$name], [ref]$number) -or $number -lt 0) {
-            throw "Policy.$name must be a nonnegative integer"
-        }
-        $result.Policy[$name] = $number
-    }
-    foreach ($section in @('Analysis', 'Policy', 'Remediation')) {
-        $default = Get-ADAnalyzerDefaultProfile
-        foreach ($key in $default[$section].Keys) {
-            if ($default[$section][$key] -is [bool] -and $result[$section][$key] -isnot [bool]) {
-                throw "$section.$key must be a boolean"
-            }
-        }
-    }
-    if ($result.Policy.LockoutThreshold -gt 65535 -or $result.Policy.MinimumLmCompatibilityLevel -gt 5) {
-        throw 'Invalid lockout/LM policy range'
-    }
-    if ($result.Policy.LockoutThreshold -gt 0 -and $result.Policy.LockoutDurationMinutes -lt $result.Policy.ResetLockoutMinutes) {
-        throw 'Lockout duration must be at least the reset interval'
-    }
-    $timeout = 0
-    if (-not [int]::TryParse([string]$result.Analysis.HostTimeoutSeconds, [ref]$timeout) -or $timeout -lt 1 -or $timeout -gt 300) {
-        throw 'Analysis.HostTimeoutSeconds must be an integer 1..300'
-    }
-    $result.Analysis.HostTimeoutSeconds = $timeout
-    if ($result.Analysis.DirectoryConnection -isnot [string] -or $result.Analysis.DirectoryConnection -notin 'PSDrive', 'Direct') {
-        throw 'Analysis.DirectoryConnection must be PSDrive or Direct'
-    }
-    $result.Analysis.DirectoryConnection = if ($result.Analysis.DirectoryConnection -ieq 'PSDrive') {
-        'PSDrive'
+    $configuration = if ($PSCmdlet.ParameterSetName -eq 'Path') {
+        [ADAnalyzerProfile]::Load($Path)
     }
     else {
-        'Direct'
+        [ADAnalyzerProfile]::new($Profile)
     }
-    if ($result.Remediation.MaximumActions -isnot [int] -and $result.Remediation.MaximumActions -isnot [long]) {
-        throw 'Remediation.MaximumActions must be an integer'
-    }
-    if ($result.Remediation.MaximumActions -lt 1 -or $result.Remediation.MaximumActions -gt 1000) {
-        throw 'Remediation.MaximumActions must be 1..1000'
-    }
-    foreach ($exception in @($result.Exceptions)) {
-        foreach ($key in @('RuleId', 'Target', 'Owner', 'Reason', 'Expires')) {
-            if (-not $exception.ContainsKey($key) -or [string]::IsNullOrWhiteSpace([string]$exception[$key])) {
-                throw "Exception requires $key"
-            }
-        }
-        $date = [datetimeoffset]::MinValue
-        if (-not [datetimeoffset]::TryParse([string]$exception.Expires, [ref]$date)) {
-            throw 'Exception Expires must be an ISO date/time'
-        }
-        $exception.Expires = $date.ToUniversalTime().ToString('o')
-    }
-    foreach ($rule in @($result.RegistryRules) + @($result.ExpectedGpoSettings)) {
-        if ($rule -isnot [Collections.IDictionary]) {
-            throw 'Custom rules must be dictionaries'
-        }
-        if ($rule.Contains('Operator') -and $rule.Operator -notin @('Equals', 'NotEquals', 'In', 'NotIn', 'Minimum', 'Maximum')) {
-            throw 'Unsupported custom-rule operator'
-        }
-        if ($rule.Contains('Severity') -and $rule.Severity -notin @('Critical', 'High', 'Medium', 'Low', 'Information')) {
-            throw 'Unsupported custom-rule severity'
-        }
-        if ($rule.Contains('Scope') -and $rule.Scope -notin @('Computer', 'User')) {
-            throw 'Custom-rule Scope must be Computer or User'
-        }
-        if ($rule.Contains('Aggregate') -and $rule.Aggregate -isnot [bool]) {
-            throw 'Custom-rule Aggregate must be a boolean'
-        }
-    }
-    foreach ($rule in $result.AccountClassification.AttributeRules) {
-        if (-not $rule.Attribute -or
-            $rule.Type -notin @('User',
-                'Service') -or
-            ($rule.Match -and
-            $rule.Match -notin @('Equals',
-                'Regex'))) {
-            throw 'Invalid account classification attribute rule'
-        }
-    }
-    foreach ($value in @($result.Remediation.ApprovedObjectGuids) + @($result.Remediation.ExcludedObjectGuids)) {
-        $id = [guid]::Empty
-        if (-not [guid]::TryParse([string]$value, [ref]$id)) {
-            throw 'Remediation object identities must be GUIDs'
-        }
-    }
-    $hostServiceIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($rule in @($result.Host.Services)) {
-        if ($rule -isnot [Collections.IDictionary] -or
-            $rule.Name -isnot [string] -or
-            [string]::IsNullOrWhiteSpace($rule.Name) -or
-            $rule.State -isnot [string] -or
-            [string]::IsNullOrWhiteSpace($rule.State)) {
-            throw 'Host service rules require nonempty string Name and State'
-        }
-        if ($rule.Name.IndexOf([char]0) -ge 0) {
-            throw 'Host service Name cannot contain NUL characters'
-        }
-        if ($rule.Contains('StartMode') -and $null -ne $rule.StartMode -and $rule.StartMode -isnot [string]) {
-            throw 'Host service StartMode must be a string or null'
-        }
-        if (-not $hostServiceIds.Add((Get-ADAnalyzerHostRuleIdentity -Rule $rule -Target $rule.Name -Parts @($rule.Name)))) {
-            throw 'Duplicate host service rule identity; use distinct Id values for separate expectations'
-        }
-    }
-    $hostRegistryIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($rule in @($result.Host.RegistryRules)) {
-        if ($rule -isnot [Collections.IDictionary] -or
-            $rule.Key -isnot [string] -or
-            [string]::IsNullOrWhiteSpace($rule.Key) -or
-            $rule.ValueName -isnot [string]) {
-            throw 'Host registry rules require a nonempty string Key and a string ValueName'
-        }
-        if ($rule.Key.IndexOf([char]0) -ge 0 -or $rule.ValueName.IndexOf([char]0) -ge 0) {
-            throw 'Host registry identities cannot contain NUL characters'
-        }
-        if ($rule.Contains('Type')) {
-            $registryType = 0
-            if (-not [int]::TryParse([string]$rule.Type, [ref]$registryType) -or $registryType -notin 1, 2, 3, 4, 7, 11) {
-                throw 'Host registry Type must be 1, 2, 3, 4, 7, or 11'
-            }
-            $rule.Type = $registryType
-        }
-        if ($rule.Contains('Operator') -and $rule.Operator -notin @('Equals', 'NotEquals', 'In', 'NotIn', 'Minimum', 'Maximum')) {
-            throw 'Unsupported host registry operator'
-        }
-        if (-not $hostRegistryIds.Add((Get-ADAnalyzerHostRuleIdentity `
-                        -Rule $rule `
-                        -Target ($rule.Key + '/' + $rule.ValueName) `
-                        -Parts @($rule.Key,
-                        $rule.ValueName)))) {
-            throw 'Duplicate host registry rule identity; use distinct Id values for separate expectations'
-        }
-    }
-    $hostAuditIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($rule in @($result.Host.AuditRules)) {
-        $id = [guid]::Empty
-        if (-not [guid]::TryParse([string]$rule.SubcategoryGuid, [ref]$id) -or [int]$rule.Flags -notin 1, 2, 3) {
-            throw 'Host audit rules require SubcategoryGuid and Flags 1, 2, or 3'
-        }
-        if (-not $hostAuditIds.Add($id.ToString('D'))) {
-            throw 'Duplicate host audit subcategory identity; combine required flags in one rule'
-        }
-    }
-    foreach ($hash in $result.DependencyHashes.Values) {
-        if ([string]$hash -notmatch '^[a-fA-F0-9]{64}$') {
-            throw 'DependencyHashes values must be SHA256 hex strings'
-        }
-    }
-    $hostCertificateIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($endpoint in @($result.Host.CertificateEndpoints)) {
-        if ($endpoint.HostName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
-            throw 'Certificate endpoint HostName must be a DNS/NetBIOS name or IPv4 address'
-        }
-        if ($endpoint.Contains('Port') -and ([int]$endpoint.Port -lt 1 -or [int]$endpoint.Port -gt 65535)) {
-            throw 'Certificate endpoint Port must be 1..65535'
-        }
-        if ($endpoint.Contains('MinimumRemainingDays') -and [int]$endpoint.MinimumRemainingDays -lt 0) {
-            throw 'Certificate minimum remaining days must be nonnegative'
-        }
-        $hostName = [string]$endpoint.HostName
-        $port = if ($endpoint.Port) {
-            [int]$endpoint.Port
-        }
-        else {
-            443
-        }
-        $serverName = if ($endpoint.ServerName) {
-            [string]$endpoint.ServerName
-        }
-        else {
-            $hostName
-        }
-        if (-not $hostCertificateIds.Add(('{0}:{1}/{2}' -f $hostName, $port, $serverName))) {
-            throw 'Duplicate host certificate endpoint identity; use one rule per host, port, and server name'
-        }
-    }
-    return $result
+    $configuration.ToHashtable()
 }
 
 function New-ADAnalyzerCheck {
