@@ -30,9 +30,11 @@ function ConvertTo-Canonical($Value) {
     if ($null -eq $Value -or $Value -is [string] -or $Value -is [ValueType]) {
         return $Value
     }
-    if ($Value -is [Collections.IEnumerable] -and
-        $Value -isnot [Collections.IDictionary] -and
-        $Value -isnot [pscustomobject]) {
+    if ($Value -is [array] -or
+        $Value -is [Collections.IList] -or
+        ($Value -is [Collections.IEnumerable] -and
+            $Value -isnot [Collections.IDictionary] -and
+            $Value -isnot [pscustomobject])) {
         return , @(
             foreach ($item in $Value) {
                 ConvertTo-Canonical $item
@@ -329,7 +331,17 @@ foreach ($name in @('Empty', 'Mixed')) {
     if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) {
         $parseArguments.DateKind = 'String'
     }
-    $baseline.$name = Get-CanonicalJson (ConvertFrom-Json @parseArguments)
+    $expectedRows = ConvertFrom-Json @parseArguments
+    Assert-Policy ($expectedRows -is [array] -or $expectedRows -is [Collections.IList]) 'Golden check list is no longer an array.'
+    $expectedCount = if ($name -eq 'Empty') {
+        13
+    }
+    else {
+        47
+    }
+    Assert-Policy ($expectedRows.Count -eq $expectedCount) ($name + ' golden row count changed.')
+    $baseline.$name = Get-CanonicalJson $expectedRows
+    Assert-Policy ($baseline.$name.StartsWith('[')) 'Golden canonicalization changed the top-level array shape.'
 }
 
 switch ($Case) {
