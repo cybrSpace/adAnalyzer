@@ -2149,6 +2149,29 @@ foreach ($case in @(
         Assert-DirectoryTrue (($output -join ' ') -like ('*PASS membership graph ' + $case + '*')) 'Fresh process did not execute the selected case.'
     }
 }
+
+foreach ($case in @(
+        'Construction',
+        'Parity',
+        'PartialProfile',
+        'Types',
+        'Isolation',
+        'Secrets',
+        'Errors',
+        'Streaming',
+        'Order'
+    )) {
+    Invoke-DirectoryTest ('constructor directory policy: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $output = & $executable -NoLogo -NoProfile -NonInteractive -File (
+            Join-Path $PSScriptRoot 'DirectoryPolicyClassFixture.ps1'
+        ) -Case $case 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw ($output -join [Environment]::NewLine)
+        }
+        Assert-DirectoryTrue (($output -join ' ') -like ('*PASS directory policy class ' + $case + '*')) 'Fresh process did not execute the selected case.'
+    }
+}
 Write-Host ("{0} directory tests passed; {1} failed" -f $script:Passed, $script:Failed)
 if ($script:Failed) {
     exit 1

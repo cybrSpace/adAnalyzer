@@ -1688,6 +1688,1081 @@ function Test-ADAnalyzerOperatingSystemProfile {
     }
 }
 
+class ADAnalyzerDirectoryPolicyEvaluator {
+    ADAnalyzerDirectoryPolicyEvaluator() {
+    }
+
+    [object[]] Evaluate([object]$Data, [hashtable]$Profile) {
+        return $this.EvaluateCore($Data, $Profile, $null, 'Stop')
+    }
+
+    hidden [object[]] EvaluateForCommand(
+        [object]$Data,
+        [hashtable]$Profile,
+        [Management.Automation.PSCmdlet]$CommandContext,
+        [Management.Automation.ActionPreference]$ErrorPreference
+    ) {
+        return $this.EvaluateCore($Data, $Profile, $CommandContext, $ErrorPreference)
+    }
+
+    hidden [object[]] EvaluateCore(
+        [object]$Data,
+        [hashtable]$Profile,
+        [Management.Automation.PSCmdlet]$CommandContext,
+        [Management.Automation.ActionPreference]$ErrorPreference
+    ) {
+        if ($null -eq $Data) {
+            throw [ArgumentNullException]::new('Data')
+        }
+        if ($null -eq $Profile) {
+            throw [ArgumentNullException]::new('Profile')
+        }
+
+        $policy = Get-ADAnalyzerDirectoryField $Profile 'Policy' @{}
+        $domain = Get-ADAnalyzerDirectoryField $Data 'Domain'
+        $domainTarget = Get-ADAnalyzerDirectoryTarget $domain
+        $coverage = Get-ADAnalyzerDirectoryField $Data 'Coverage' @{}
+        $evaluation = @{
+            Data = $Data
+            Profile = $Profile
+            Policy = $policy
+            Domain = $domain
+            DomainTarget = $domainTarget
+            Coverage = $coverage
+            Checks = [Collections.Generic.List[object]]::new()
+            CommandContext = $CommandContext
+            ErrorPreference = $ErrorPreference
+        }
+
+        $this.EvaluateDomain($evaluation)
+        $this.EvaluateAccounts($evaluation)
+        $this.EvaluateTrustsAndAcl($evaluation)
+        $this.EvaluatePasswordPolicies($evaluation)
+        $this.EvaluateHostEvidence($evaluation)
+        return $evaluation.Checks.ToArray()
+    }
+
+    hidden [void] Emit([hashtable]$Evaluation, [Collections.IDictionary]$Specification) {
+        $arguments = @{
+            Applicability = 'Unknown'
+        }
+        foreach ($name in $Specification.Keys) {
+            $arguments[$name] = $Specification[$name]
+        }
+
+        # Preserve the string coercions/defaults of the compatibility check helper.
+        foreach ($name in @('RuleId', 'Status', 'Severity', 'Category', 'Target', 'Message', 'Applicability')) {
+            $arguments[$name] = [string]$arguments[$name]
+        }
+        if ($null -eq $arguments.Object) {
+            $arguments.Remove('Object')
+        }
+
+        $ErrorActionPreference = if ($null -ne $Evaluation.CommandContext -and
+            $Evaluation.ErrorPreference -ne 'Stop') {
+            'Continue'
+        }
+        else {
+            'Stop'
+        }
+        if ($Evaluation.ErrorPreference -eq 'Ignore') {
+            # Windows PowerShell 5.1 accepts Ignore as a parameter, not a preference.
+            $arguments.ErrorAction = 'Ignore'
+        }
+
+        foreach ($item in @(New-ADAnalyzerCheck @arguments 2>&1)) {
+            if ($item -is [Management.Automation.ErrorRecord]) {
+                if ($null -eq $Evaluation.CommandContext) {
+                    throw $item
+                }
+                $Evaluation.CommandContext.WriteError($item)
+            }
+            elseif ($null -ne $Evaluation.CommandContext) {
+                $Evaluation.CommandContext.WriteObject($item)
+            }
+            else {
+                $Evaluation.Checks.Add($item)
+            }
+        }
+    }
+
+    hidden [void] EvaluateDomain([hashtable]$Evaluation) {
+        $Data = $Evaluation.Data
+        $Profile = $Evaluation.Profile
+        $policy = $Evaluation.Policy
+        $domain = $Evaluation.Domain
+        $domainTarget = $Evaluation.DomainTarget
+        $coverage = $Evaluation.Coverage
+
+        foreach ($key in @('Domain',
+                'Users',
+                'Groups',
+                'Computers',
+                'Trusts',
+                'DefaultPasswordPolicy',
+                'FineGrainedPasswordPolicies',
+                'ResultantPasswordPolicies',
+                'ServiceAccounts',
+                'Acl',
+                'Hosts')) {
+            $state = [string](Get-ADAnalyzerDirectoryField $coverage $key 'Unreadable')
+            if ($state -ne 'Collected') {
+                $status = if ($state -eq 'NotConfigured') {
+                    'NotConfigured'
+                }
+                elseif ($state -eq 'Unreadable') {
+                    'Unreadable'
+                }
+                else {
+                    'Unknown'
+                }
+                $this.Emit($Evaluation, @{
+                    RuleId = ('COLLECTION.' + $key.ToUpperInvariant())
+                    Status = $status
+                    Severity = 'Information'
+                    Category = 'Coverage'
+                    Target = $domainTarget
+                    Observed = $state
+                    Expected = 'Collected'
+                    Evidence = @()
+                    Message = ('Collection coverage: ' + $key)
+                    Object = $null
+                })
+            }
+        }
+        $quota = Get-ADAnalyzerDirectoryField $domain 'MachineAccountQuota'
+        $expectedQuota = Get-ADAnalyzerDirectoryField $policy 'MachineAccountQuota' 0
+        $status = if ($null -eq $quota) {
+            'Unknown'
+        }
+        elseif ([long]$quota -gt [long]$expectedQuota) {
+            'Fail'
+        }
+        else {
+            'Pass'
+        }
+        $this.Emit($Evaluation, @{
+            RuleId = 'DOMAIN.MACHINE_ACCOUNT_QUOTA'
+            Status = $status
+            Severity = 'High'
+            Category = 'Domain'
+            Target = $domainTarget
+            Observed = $quota
+            Expected = $expectedQuota
+            Evidence = @()
+            Message = 'Configured quota; join rights may also be delegated through directory ACLs.'
+            Object = $null
+            Applicability = 'Configured'
+        })
+        $recycle = @(Get-ADAnalyzerDirectoryField $domain 'OptionalFeatures' @() | Where-Object { [string](Get-ADAnalyzerDirectoryField $_ 'FeatureGUID') -eq '766ddcd8-acd0-445e-f3b9-a7f9b6744f2a' })
+        $recycleStatus = if ((Get-ADAnalyzerDirectoryField $coverage 'OptionalFeatures') -ne 'Collected') {
+            'Unknown'
+        }
+        elseif (-not $recycle.Count) {
+            'Unknown'
+        }
+        elseif (@(Get-ADAnalyzerDirectoryField $recycle[0] 'EnabledScopes' @()).Count) {
+            'Pass'
+        }
+        else {
+            'Fail'
+        }
+        $this.Emit($Evaluation, @{
+            RuleId = 'DOMAIN.RECYCLE_BIN'
+            Status = $recycleStatus
+            Severity = 'Medium'
+            Category = 'Domain'
+            Target = $domainTarget
+            Observed = @($recycle | ForEach-Object { Get-ADAnalyzerDirectoryField $_ 'EnabledScopes' })
+            Expected = 'Recycle Bin optional feature enabled'
+            Evidence = @()
+            Message = 'This check observes optional-feature configuration and does not enable it.'
+            Object = $null
+            Applicability = 'Configured'
+        })
+    }
+
+    hidden [void] EvaluateAccounts([hashtable]$Evaluation) {
+        $Data = $Evaluation.Data
+        $Profile = $Evaluation.Profile
+        $policy = $Evaluation.Policy
+        $domain = $Evaluation.Domain
+        $domainTarget = $Evaluation.DomainTarget
+        $coverage = $Evaluation.Coverage
+
+        $allObjects = @(Get-ADAnalyzerDirectoryField $Data 'Objects' @())
+        if (-not $allObjects.Count) {
+            $allObjects = @(Get-ADAnalyzerDirectoryField $Data 'Users' @()) + @(Get-ADAnalyzerDirectoryField $Data 'Computers' @()) + @(Get-ADAnalyzerDirectoryField $Data 'ServiceAccounts' @())
+        }
+        $groups = @(Get-ADAnalyzerDirectoryField $Data 'Groups' @())
+        $sidLookup = @{}
+        $spns = @{}
+        $membershipGraph = [ADAnalyzerMembershipGraph]::new($groups)
+        foreach ($object in $allObjects + $groups) {
+            $sid = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $object 'SID')
+            if ($sid) {
+                $sidLookup[$sid] = $object
+            }
+        }
+        foreach ($object in $allObjects) {
+            $target = Get-ADAnalyzerDirectoryTarget $object
+            $kind = [string](Get-ADAnalyzerDirectoryField $object 'ObjectClass')
+            $classification = [string](Get-ADAnalyzerDirectoryField $object 'AccountType' 'Unknown')
+            if ($kind -in @('User', 'ServiceAccount')) {
+                $classificationEvidence = Get-ADAnalyzerDirectoryField $object 'AccountClassification'
+                $classificationStatus = if (@(Get-ADAnalyzerDirectoryField $classificationEvidence 'InvalidRules' @()).Count) {
+                    'Invalid'
+                }
+                elseif ($classification -eq 'Unknown') {
+                    'Unknown'
+                }
+                else {
+                    'Pass'
+                }
+                $this.Emit($Evaluation, @{
+                    RuleId = 'ACCOUNT.CLASSIFICATION'
+                    Status = $classificationStatus
+                    Severity = 'Information'
+                    Category = 'Account'
+                    Target = $target
+                    Observed = $classification
+                    Expected = 'Explicit User or Service classification'
+                    Evidence = $classificationEvidence
+                    Message = 'No username-based classification is used.'
+                    Object = $object
+                })
+            }
+            if ($kind -in @('User', 'Computer')) {
+                $inactiveKey = if ($kind -eq 'Computer') {
+                    'ComputerInactivityDays'
+                }
+                else {
+                    'UserInactivityDays'
+                }
+                $inactiveDays = Get-ADAnalyzerDirectoryField $policy $inactiveKey 60
+                $last = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $object 'LastLogonDate')
+                $created = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $object 'WhenCreated')
+                $age = if ($last) {
+                    [math]::Floor(([datetime]::UtcNow - $last).TotalDays)
+                }
+                elseif ($created) {
+                    [math]::Floor(([datetime]::UtcNow - $created).TotalDays)
+                }
+                else {
+                    $null
+                }
+                $enabled = Get-ADAnalyzerDirectoryField $object 'Enabled'
+                $status = if ($null -eq $enabled -or $null -eq $age) {
+                    'Unknown'
+                }
+                elseif (-not $enabled) {
+                    'NotApplicable'
+                }
+                elseif ($age -ge $inactiveDays) {
+                    'Fail'
+                }
+                else {
+                    'Pass'
+                }
+                $rule = if ($kind -eq 'Computer') {
+                    'COMPUTER.INACTIVE'
+                }
+                else {
+                    'ACCOUNT.INACTIVE'
+                }
+                $this.Emit($Evaluation, @{
+                    RuleId = $rule
+                    Status = $status
+                    Severity = 'Medium'
+                    Category = 'Account'
+                    Target = $target
+                    Observed = $age
+                    Expected = $inactiveDays
+                    Evidence = @{
+                                LastLogonDate = $last
+                                WhenCreated = $created
+                                Signal = 'Replicated LastLogonDate, or creation age when no logon is recorded'
+                                Approximate = $true
+                            }
+                    Message = 'Inactivity is a signal, not authorization to disable this object.'
+                    Object = $object
+                    Applicability = 'Applicable'
+                })
+            }
+            if ($kind -eq 'User') {
+                $passwordDate = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $object 'PasswordLastSet')
+                $maxAge = if ($classification -eq 'User') {
+                    Get-ADAnalyzerDirectoryField $policy 'UserPasswordAgeDays'
+                }
+                elseif ($classification -eq 'Service') {
+                    Get-ADAnalyzerDirectoryField $policy 'ServicePasswordAgeDays'
+                }
+                else {
+                    $null
+                }
+                $passwordAge = if ($passwordDate) {
+                    [math]::Floor(([datetime]::UtcNow - $passwordDate).TotalDays)
+                }
+                else {
+                    $null
+                }
+                $status = if ($null -eq $maxAge -or $classification -eq 'Unknown' -or $null -eq $passwordAge) {
+                    'Unknown'
+                }
+                elseif ($maxAge -eq 0) {
+                    'NotConfigured'
+                }
+                elseif ($passwordAge -gt $maxAge) {
+                    'Fail'
+                }
+                else {
+                    'Pass'
+                }
+                $this.Emit($Evaluation, @{
+                    RuleId = 'ACCOUNT.PASSWORD_AGE'
+                    Status = $status
+                    Severity = 'Medium'
+                    Category = 'Account'
+                    Target = $target
+                    Observed = $passwordAge
+                    Expected = $maxAge
+                    Evidence = @{
+                                AccountType = $classification
+                                PasswordStrengthEvaluated = $false
+                            }
+                    Message = 'Account age policy is profile-controlled and is not a password-strength test.'
+                    Object = $object
+                    Applicability = 'Configured'
+                })
+                $never = Get-ADAnalyzerDirectoryField $object 'PasswordNeverExpires'
+                $allowed = Get-ADAnalyzerDirectoryField $policy 'AllowPasswordNeverExpires'
+                $status = if ($null -eq $never -or $null -eq $allowed) {
+                    'Unknown'
+                }
+                elseif ($never -and -not $allowed) {
+                    'Fail'
+                }
+                else {
+                    'Pass'
+                }
+                $this.Emit($Evaluation, @{
+                    RuleId = 'ACCOUNT.PASSWORD_NEVER_EXPIRES'
+                    Status = $status
+                    Severity = 'Medium'
+                    Category = 'Account'
+                    Target = $target
+                    Observed = $never
+                    Expected = $allowed
+                    Evidence = @()
+                    Message = 'Exceptions and account purpose require explicit profile decisions.'
+                    Object = $object
+                    Applicability = 'Configured'
+                })
+            }
+            $uac = Get-ADAnalyzerDirectoryField $object 'UserAccountControl'
+            $unconstrained = Get-ADAnalyzerDirectoryField $object 'TrustedForDelegation'
+            if ($null -ne $uac) {
+                $unconstrained = ([long]$uac -band 524288) -ne 0
+            }
+            $protocol = if ($null -ne $uac) {
+                ([long]$uac -band 16777216) -ne 0
+            }
+            else {
+                $null
+            }
+            $targets = @(Get-ADAnalyzerDirectoryField $object 'AllowedToDelegateTo' @())
+            $approved = @(@(Get-ADAnalyzerDirectoryField $Profile 'ApprovedDelegationTargets' @()) + @(Get-ADAnalyzerDirectoryField $policy 'ApprovedDelegationTargets' @()) | Select-Object `
+                    -Unique)
+            $unapproved = @($targets | Where-Object { $_ -notin $approved })
+            $rbcd = @(Get-ADAnalyzerDirectoryField $object 'ResourceBasedDelegation' @() | Where-Object { $_.AccessControlType -eq 'Allow' })
+            $unapprovedRbcd = @($rbcd | Where-Object { $_.IdentitySid -notin $approved })
+            $delegationStatus = if ($unconstrained -or $protocol -or $unapproved.Count -or $unapprovedRbcd.Count) {
+                'Fail'
+            }
+            elseif ($null -eq $unconstrained -and $null -eq $protocol) {
+                'Unknown'
+            }
+            elseif ((Get-ADAnalyzerDirectoryField $object 'DelegationSchemaStatus') -ne 'Collected') {
+                'Unknown'
+            }
+            else {
+                'Pass'
+            }
+            $this.Emit($Evaluation, @{
+                RuleId = 'DELEGATION.EXPOSURE'
+                Status = $delegationStatus
+                Severity = 'High'
+                Category = 'Delegation'
+                Target = $target
+                Observed = @{
+                        Unconstrained = $unconstrained
+                        ProtocolTransition = $protocol
+                        ConstrainedTargets = $targets
+                        ResourceBasedPrincipals = $rbcd
+                    }
+                Expected = $approved
+                Evidence = @{
+                        EffectiveAccessCalculated = $false
+                    }
+                Message = 'Review delegation configuration; ACEs do not constitute a complete effective-access calculation.'
+                Object = $object
+                Applicability = 'Configured'
+            })
+            if ($null -ne $uac) {
+                foreach ($flag in @(@{
+                            Rule = 'ACCOUNT.PASSWORD_NOT_REQUIRED'
+                            Mask = 32
+                        }, @{
+                            Rule = 'KERBEROS.PREAUTH_NOT_REQUIRED'
+                            Mask = 4194304
+                        }, @{
+                            Rule = 'KERBEROS.DES_ONLY'
+                            Mask = 2097152
+                        }, @{
+                            Rule = 'ACCOUNT.REVERSIBLE_ENCRYPTION'
+                            Mask = 128
+                        })) {
+                    $set = ([long]$uac -band $flag.Mask) -ne 0
+                    $allowed = $flag.Rule -eq 'ACCOUNT.REVERSIBLE_ENCRYPTION' -and
+                    (Get-ADAnalyzerDirectoryField $policy 'AllowReversibleEncryption' $false)
+                    $this.Emit($Evaluation, @{
+                        RuleId = $flag.Rule
+                        Status = $(if ($set -and -not $allowed) {
+                                            'Fail'
+                                        }
+                                        else {
+                                            'Pass'
+                                        })
+                        Severity = 'High'
+                        Category = 'Account'
+                        Target = $target
+                        Observed = $set
+                        Expected = $allowed
+                        Evidence = @{
+                                        UserAccountControl = $uac
+                                    }
+                        Message = 'Configured account-control flag.'
+                        Object = $object
+                        Applicability = 'Configured'
+                    })
+                }
+            }
+            $enc = Get-ADAnalyzerDirectoryField $object 'SupportedEncryptionTypes'
+            $encStatus = if ($null -eq $enc -or [long]$enc -eq 0) {
+                'Unknown'
+            }
+            elseif (([long]$enc -band 24) -eq 0) {
+                'Fail'
+            }
+            else {
+                'Pass'
+            }
+            $this.Emit($Evaluation, @{
+                RuleId = 'KERBEROS.ENCRYPTION_METADATA'
+                Status = $encStatus
+                Severity = 'Medium'
+                Category = 'Kerberos'
+                Target = $target
+                Observed = $enc
+                Expected = 'AES flags in explicit supported-encryption metadata'
+                Evidence = @{
+                        PasswordStrengthEvaluated = $false
+                    }
+                Message = 'Missing or zero metadata can inherit domain behavior and does not prove weak keys.'
+                Object = $object
+                Applicability = 'Configured'
+            })
+            foreach ($spn in @(Get-ADAnalyzerDirectoryField $object 'ServicePrincipalNames' @())) {
+                if (-not $spn) {
+                    continue
+                }
+                $key = ([string]$spn).ToLowerInvariant()
+                if (-not $spns.ContainsKey($key)) {
+                    $spns[$key] = [System.Collections.Generic.List[object]]::new()
+                }
+                $spns[$key].Add($object)
+            }
+            $history = @(Get-ADAnalyzerDirectoryField $object 'SIDHistory' @())
+            if ($history.Count) {
+                $privileged = @(Get-ADAnalyzerDirectoryField $domain 'PrivilegedSids' @())
+                $knownPrivileged = [System.Collections.Generic.List[string]]::new()
+                $unresolved = [System.Collections.Generic.List[string]]::new()
+                foreach ($sid in $history) {
+                    if ($sid -in $privileged) {
+                        $knownPrivileged.Add([string]$sid)
+                    }
+                    elseif ($sidLookup.ContainsKey([string]$sid)) {
+                        $historical = $sidLookup[[string]$sid]
+                        $membership = $membershipGraph.Resolve($historical, $domain.SID, $privileged)
+                        if ($membership.IsPrivileged -or (Get-ADAnalyzerDirectoryField $historical 'Privileged' $false)) {
+                            $knownPrivileged.Add([string]$sid)
+                        }
+                        elseif ($membership.ResolutionStatus -ne 'Complete') {
+                            $unresolved.Add([string]$sid)
+                        }
+                    }
+                    else {
+                        $unresolved.Add([string]$sid)
+                    }
+                }
+                $status = if ($knownPrivileged.Count) {
+                    'Fail'
+                }
+                elseif ($unresolved.Count) {
+                    'Unknown'
+                }
+                else {
+                    'Pass'
+                }
+                $this.Emit($Evaluation, @{
+                    RuleId = 'SIDHISTORY.PRIVILEGED'
+                    Status = $status
+                    Severity = 'High'
+                    Category = 'Identity'
+                    Target = $target
+                    Observed = $history
+                    Expected = 'No privileged historical SIDs'
+                    Evidence = @{
+                                Privileged = $knownPrivileged.ToArray()
+                                Unresolved = $unresolved.ToArray()
+                            }
+                    Message = 'Unresolved historical SIDs are not declared invalid.'
+                    Object = $object
+                    Applicability = 'Configured'
+                })
+            }
+            if ($kind -eq 'Computer') {
+                $schema = @(Get-ADAnalyzerDirectoryField $domain 'FeatureSchema' @())
+                $lapsKnown = 'msLAPS-PasswordExpirationTime' -in $schema -or 'ms-Mcs-AdmPwdExpirationTime' -in $schema
+                $expiry = Get-ADAnalyzerDirectoryField $object 'LapsExpiration'
+                if ($null -eq $expiry) {
+                    $expiry = Get-ADAnalyzerDirectoryField $object 'LegacyLapsExpiration'
+                }
+                $require = Get-ADAnalyzerDirectoryField $policy 'RequireLaps'
+                $status = if ($null -eq $require) {
+                    'NotConfigured'
+                }
+                elseif (-not $require -or (Get-ADAnalyzerDirectoryField $object 'IsDomainController' $false)) {
+                    'NotApplicable'
+                }
+                elseif (-not $lapsKnown -or $null -eq $expiry) {
+                    'Unknown'
+                }
+                elseif ([datetime]$expiry -lt [datetime]::UtcNow) {
+                    'Fail'
+                }
+                else {
+                    'Pass'
+                }
+                $this.Emit($Evaluation, @{
+                    RuleId = 'LAPS.ROTATION_METADATA'
+                    Status = $status
+                    Severity = 'Medium'
+                    Category = 'LAPS'
+                    Target = $target
+                    Observed = $expiry
+                    Expected = 'Present, unexpired LAPS rotation metadata'
+                    Evidence = @{
+                                SecretValuesRead = $false
+                                SchemaAvailable = $lapsKnown
+                                DomainControllerRequiresSeparateDsrmAssessment = $object.IsDomainController
+                            }
+                    Message = 'Metadata is not proof of effective retrieval permissions or successful rotation.'
+                    Object = $object
+                    Applicability = 'Configured'
+                })
+                $osResult = Test-ADAnalyzerOperatingSystemProfile `
+                    -Object $object `
+                    -Entries @(Get-ADAnalyzerDirectoryField $policy 'SupportedOperatingSystems' @())
+                $this.Emit($Evaluation, @{
+                    RuleId = 'COMPUTER.OS_POLICY'
+                    Status = $osResult.Status
+                    Severity = 'Medium'
+                    Category = 'Host'
+                    Target = $target
+                    Observed = $osResult.Observed
+                    Expected = $osResult.Expected
+                    Evidence = $osResult.Evidence
+                    Message = 'Support requires explicit version/build/lifecycle metadata and ESU evidence when required.'
+                    Object = $object
+                    Applicability = 'Configured'
+                })
+            }
+            if ($classification -eq 'Service') {
+                $required = Get-ADAnalyzerDirectoryField $policy 'RequireGmsaForServiceAccounts' $false
+                $managed = $object.DirectoryObjectClass -in @('msDS-GroupManagedServiceAccount', 'msDS-ManagedServiceAccount')
+                $this.Emit($Evaluation, @{
+                    RuleId = 'SERVICE_ACCOUNT.MANAGED_IDENTITY'
+                    Status = $(if (-not $required) {
+                                    'NotApplicable'
+                                }
+                                elseif ($managed) {
+                                    'Pass'
+                                }
+                                else {
+                                    'Fail'
+                                })
+                    Severity = 'Medium'
+                    Category = 'ServiceAccount'
+                    Target = $target
+                    Observed = $object.DirectoryObjectClass
+                    Expected = 'Managed service account when required by profile'
+                    Evidence = @{
+                                RetrievalPrincipals = Get-ADAnalyzerDirectoryField $object 'PrincipalsAllowedToRetrieveManagedPassword'
+                                IntervalDays = Get-ADAnalyzerDirectoryField $object 'ManagedPasswordIntervalInDays'
+                                SecretValuesRead = $false
+                            }
+                    Message = 'Managed-account configuration metadata; managed password values are never read.'
+                    Object = $object
+                    Applicability = 'Configured'
+                })
+                if ($managed) {
+                    $principals = @(Get-ADAnalyzerDirectoryField $object 'PrincipalsAllowedToRetrieveManagedPassword' @() | ForEach-Object { ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $_ 'SID' $_) })
+                    $approvedReaders = @(Get-ADAnalyzerDirectoryField $policy 'ApprovedGmsaReaderSids' @())
+                    $unresolvedReaders = @($principals | Where-Object { $_ -notmatch '^S-\d-' })
+                    $readerStatus = if (-not $approvedReaders.Count) {
+                        'NotConfigured'
+                    }
+                    elseif (-not $principals.Count -or $unresolvedReaders.Count) {
+                        'Unknown'
+                    }
+                    elseif (@($principals | Where-Object { $_ -notin $approvedReaders }).Count) {
+                        'Fail'
+                    }
+                    else {
+                        'Pass'
+                    }
+                    $this.Emit($Evaluation, @{
+                        RuleId = 'GMSA.RETRIEVAL_PRINCIPALS'
+                        Status = $readerStatus
+                        Severity = 'High'
+                        Category = 'ServiceAccount'
+                        Target = $target
+                        Observed = $principals
+                        Expected = $approvedReaders
+                        Evidence = @{
+                                        Unresolved = $unresolvedReaders
+                                        EffectiveAccessCalculated = $false
+                                        SecretValuesRead = $false
+                                    }
+                        Message = 'Configured retrieval-principal metadata; nested tokens and deny precedence are not an effective-access calculation.'
+                        Object = $object
+                        Applicability = 'Configured'
+                    })
+                }
+            }
+        }
+        foreach ($key in $spns.Keys) {
+            $owners = @($spns[$key] | ForEach-Object { Get-ADAnalyzerDirectoryTarget $_ } | Select-Object -Unique)
+            if ($owners.Count -gt 1) {
+                $this.Emit($Evaluation, @{
+                    RuleId = 'SPN.DUPLICATE'
+                    Status = 'Fail'
+                    Severity = 'High'
+                    Category = 'Kerberos'
+                    Target = $key
+                    Observed = $owners
+                    Expected = 'One owner per SPN in the collected scope'
+                    Evidence = @{
+                                Scope = $Data.Server
+                            }
+                    Message = 'Duplicate SPN owners require review, without inferring password strength.'
+                    Object = $null
+                    Applicability = 'Configured'
+                })
+            }
+        }
+    }
+
+    hidden [void] EvaluateTrustsAndAcl([hashtable]$Evaluation) {
+        $Data = $Evaluation.Data
+        $Profile = $Evaluation.Profile
+        $policy = $Evaluation.Policy
+        $domain = $Evaluation.Domain
+        $domainTarget = $Evaluation.DomainTarget
+        $coverage = $Evaluation.Coverage
+
+        foreach ($trust in @(Get-ADAnalyzerDirectoryField $Data 'Trusts' @())) {
+            $intraForest = Get-ADAnalyzerDirectoryField $trust 'IntraForest'
+            $forestTrust = Get-ADAnalyzerDirectoryField $trust 'ForestTransitive'
+            $filtering = if ($forestTrust) {
+                Get-ADAnalyzerDirectoryField $trust 'SIDFilteringForestAware'
+            }
+            else {
+                Get-ADAnalyzerDirectoryField $trust 'SIDFilteringQuarantined'
+            }
+            $status = if ($intraForest -eq $true) {
+                'NotApplicable'
+            }
+            elseif ($null -eq $intraForest -or $null -eq $forestTrust -or $null -eq $filtering) {
+                'Unknown'
+            }
+            elseif ([bool]$filtering) {
+                'Pass'
+            }
+            else {
+                'Fail'
+            }
+            $this.Emit($Evaluation, @{
+                RuleId = 'TRUST.SID_FILTERING'
+                Status = $status
+                Severity = 'High'
+                Category = 'Trust'
+                Target = ([string](Get-ADAnalyzerDirectoryField $trust 'Target' (Get-ADAnalyzerDirectoryField $trust 'Name')))
+                Observed = $filtering
+                Expected = $true
+                Evidence = @{
+                        IntraForest = $intraForest
+                        Direction = Get-ADAnalyzerDirectoryField $trust 'Direction'
+                        Type = Get-ADAnalyzerDirectoryField $trust 'TrustType'
+                        SelectiveAuthentication = Get-ADAnalyzerDirectoryField $trust 'SelectiveAuthentication'
+                        TGTDelegation = Get-ADAnalyzerDirectoryField $trust 'TGTDelegation'
+                    }
+                Message = 'Boundary SID filtering is not applied to normal intra-forest parent/child trusts.'
+                Object = $null
+                Applicability = 'Configured'
+            })
+        }
+        $acl = Get-ADAnalyzerDirectoryField $Data 'Acl'
+        $approvedReplication = @(@(Get-ADAnalyzerDirectoryField $Profile 'ApprovedReplicationSids' @()) + @(Get-ADAnalyzerDirectoryField $policy 'ApprovedReplicationSids' @()) | Select-Object `
+                -Unique)
+        if ($domain.SID) {
+            $approvedReplication += ($domain.SID + '-516')
+        }
+        $approvedReplication += 'S-1-5-9'
+        if (Get-ADAnalyzerDirectoryField $policy 'IncludeAdministrativeReplicationRoles' $true) {
+            $approvedReplication += @('S-1-5-18', 'S-1-5-32-544')
+            if ($domain.SID) {
+                $approvedReplication += ($domain.SID + '-512')
+            }
+            if ($domain.RootDomainSID) {
+                $approvedReplication += ($domain.RootDomainSID + '-519')
+            }
+        }
+        $replication = @{}
+        $seenAces = @{}
+        foreach ($ace in @(Get-ADAnalyzerDirectoryField $acl 'Entries' @())) {
+            if ($ace.AccessControlType -ne 'Allow' -or -not $ace.IdentitySid) {
+                continue
+            }
+            $aceKey = (@($ace.Target,
+                    $ace.IdentitySid,
+                    $ace.ObjectType,
+                    $ace.Rights,
+                    $ace.InheritedObjectType,
+                    [string]$ace.IsInherited,
+                    [string]$ace.PropagationFlags,
+                    [string]$ace.InheritanceType) -join '|')
+            if ($seenAces.ContainsKey($aceKey)) {
+                continue
+            }
+            $seenAces[$aceKey] = $true
+            if ($ace.TargetType -eq 'DomainRoot' -and [string]$ace.PropagationFlags -notmatch 'InheritOnly') {
+                if (-not $replication.ContainsKey($ace.IdentitySid)) {
+                    $replication[$ace.IdentitySid] = @{
+                        Changes = $false
+                        All = $false
+                        Evidence = [System.Collections.Generic.List[object]]::new()
+                    }
+                }
+                $grant = $replication[$ace.IdentitySid]
+                $allRights = $ace.Rights -match 'GenericAll' -or
+                ($ace.Rights -match 'ExtendedRight' -and
+                (!$ace.ObjectType -or
+                $ace.ObjectType -eq ([guid]::Empty).ToString()))
+                if ($allRights -or ($ace.Rights -match 'ExtendedRight' -and $ace.ObjectType -eq '1131f6aa-9c07-11d1-f79f-00c04fc2dcd2')) {
+                    $grant.Changes = $true
+                }
+                if ($allRights -or ($ace.Rights -match 'ExtendedRight' -and $ace.ObjectType -eq '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2')) {
+                    $grant.All = $true
+                }
+                $grant.Evidence.Add($ace)
+            }
+            if ($ace.Rights -match 'GenericAll|WriteDacl|WriteOwner' -and $ace.IdentitySid -notin @($domain.PrivilegedSids)) {
+                $this.Emit($Evaluation, @{
+                    RuleId = 'ACL.DELEGATED_CONTROL'
+                    Status = 'Fail'
+                    Severity = 'High'
+                    Category = 'ACL'
+                    Target = $aceKey
+                    Observed = $ace
+                    Expected = @{
+                                ApprovedPrivilegedSids = $domain.PrivilegedSids
+                            }
+                    Evidence = @{
+                                EffectiveAccessCalculated = $false
+                            }
+                    Message = 'Potential broad delegated control; ACE order, deny rules and token semantics still require review.'
+                    Object = $null
+                    Applicability = 'Configured'
+                })
+            }
+            if ($ace.ObjectTypeName -in @('msLAPS-Password',
+                    'msLAPS-EncryptedPassword',
+                    'msLAPS-EncryptedPasswordHistory',
+                    'msLAPS-EncryptedDSRMPassword',
+                    'ms-Mcs-AdmPwd') -and
+                $ace.Rights -match 'ReadProperty|ExtendedRight|GenericRead|GenericAll') {
+                $approvedReaders = @(Get-ADAnalyzerDirectoryField $policy 'ApprovedLapsReaderSids' @())
+                $readerStatus = if (-not $approvedReaders.Count) {
+                    'NotConfigured'
+                }
+                elseif ($ace.IdentitySid -in $approvedReaders) {
+                    'Pass'
+                }
+                else {
+                    'Fail'
+                }
+                $this.Emit($Evaluation, @{
+                    RuleId = 'LAPS.ATTRIBUTE_READ_ACL'
+                    Status = $readerStatus
+                    Severity = 'High'
+                    Category = 'ACL'
+                    Target = $aceKey
+                    Observed = $ace
+                    Expected = $approvedReaders
+                    Evidence = @{
+                                EffectiveAccessCalculated = $false
+                                ConfidentialAttributeAccessCalculated = $false
+                                DecryptionPermissionsCalculated = $false
+                            }
+                    Message = 'An allow ACE references LAPS data; this does not establish plaintext retrieval or effective access.'
+                    Object = $null
+                    Applicability = 'Configured'
+                })
+            }
+        }
+        foreach ($sid in $replication.Keys) {
+            $grant = $replication[$sid]
+            if ($grant.Changes -and $grant.All) {
+                $this.Emit($Evaluation, @{
+                    RuleId = 'ACL.REPLICATION_RIGHTS'
+                    Status = $(if ($sid -in $approvedReplication) {
+                                    'Pass'
+                                }
+                                else {
+                                    'Fail'
+                                })
+                    Severity = 'Critical'
+                    Category = 'ACL'
+                    Target = ($domainTarget + '|SID=' + $sid)
+                    Observed = $sid
+                    Expected = $approvedReplication
+                    Evidence = @{
+                                Aces = $grant.Evidence.ToArray()
+                                EffectiveAccessCalculated = $false
+                            }
+                    Message = 'Direct allow ACEs expose replication capabilities; this is not complete effective access.'
+                    Object = $null
+                    Applicability = 'Configured'
+                })
+            }
+        }
+    }
+
+    hidden [void] EvaluatePasswordPolicies([hashtable]$Evaluation) {
+        $Data = $Evaluation.Data
+        $Profile = $Evaluation.Profile
+        $policy = $Evaluation.Policy
+        $domain = $Evaluation.Domain
+        $domainTarget = $Evaluation.DomainTarget
+        $coverage = $Evaluation.Coverage
+
+        $effective = Get-ADAnalyzerDirectoryField (Get-ADAnalyzerDirectoryField $Data 'PasswordPolicies') 'Resultant' @()
+        foreach ($entry in @($effective)) {
+            $password = $entry.Policy
+            foreach ($spec in @(
+                    @{
+                        Rule = 'PASSWORD.MIN_LENGTH'
+                        Field = 'MinPasswordLength'
+                        Profile = 'MinimumPasswordLength'
+                        Mode = 'Minimum'
+                    },
+                    @{
+                        Rule = 'PASSWORD.LOCKOUT_THRESHOLD'
+                        Field = 'LockoutThreshold'
+                        Profile = 'LockoutThreshold'
+                        Mode = 'MaximumNonzero'
+                    },
+                    @{
+                        Rule = 'PASSWORD.HISTORY'
+                        Field = 'PasswordHistoryCount'
+                        Profile = 'PasswordHistorySize'
+                        Mode = 'Minimum'
+                    },
+                    @{
+                        Rule = 'PASSWORD.COMPLEXITY'
+                        Field = 'ComplexityEnabled'
+                        Profile = 'PasswordComplexity'
+                        Mode = 'Equal'
+                    },
+                    @{
+                        Rule = 'PASSWORD.REVERSIBLE_ENCRYPTION'
+                        Field = 'ReversibleEncryptionEnabled'
+                        Profile = 'AllowReversibleEncryption'
+                        Mode = 'Allow'
+                    }
+                )) {
+                $expected = Get-ADAnalyzerDirectoryField $policy $spec.Profile
+                $actual = Get-ADAnalyzerDirectoryField $password $spec.Field
+                $status = if ($null -eq $expected -or ($spec.Mode -eq 'MaximumNonzero' -and $expected -eq 0)) {
+                    'NotConfigured'
+                }
+                elseif ($entry.Status -ne 'Collected' -or $null -eq $actual) {
+                    'Unknown'
+                }
+                elseif ($spec.Mode -eq 'Minimum' -and $actual -lt $expected) {
+                    'Fail'
+                }
+                elseif ($spec.Mode -eq 'MaximumNonzero' -and ($actual -eq 0 -or $actual -gt $expected)) {
+                    'Fail'
+                }
+                elseif ($spec.Mode -eq 'Equal' -and $actual -ne $expected) {
+                    'Fail'
+                }
+                elseif ($spec.Mode -eq 'Allow' -and $actual -and -not $expected) {
+                    'Fail'
+                }
+                else {
+                    'Pass'
+                }
+                $this.Emit($Evaluation, @{
+                    RuleId = $spec.Rule
+                    Status = $status
+                    Severity = 'Medium'
+                    Category = 'PasswordPolicy'
+                    Target = $entry.Target
+                    Observed = $actual
+                    Expected = $expected
+                    Evidence = @{
+                                PolicySource = $entry.Source
+                                PolicyDN = Get-ADAnalyzerDirectoryField $password 'DistinguishedName'
+                            }
+                    Message = 'Effective/default policy metadata; actual password content is not inspected.'
+                    Object = $null
+                    Applicability = 'Applicable'
+                })
+            }
+            foreach ($spec in @(
+                    @{
+                        Rule = 'PASSWORD.LOCKOUT_DURATION'
+                        Field = 'LockoutDuration'
+                        Profile = 'LockoutDurationMinutes'
+                        Unit = 'Minutes'
+                        Zero = 'Unlimited'
+                    },
+                    @{
+                        Rule = 'PASSWORD.LOCKOUT_RESET'
+                        Field = 'LockoutObservationWindow'
+                        Profile = 'ResetLockoutMinutes'
+                        Unit = 'Minutes'
+                        Zero = 'Normal'
+                    },
+                    @{
+                        Rule = 'PASSWORD.MIN_AGE'
+                        Field = 'MinPasswordAge'
+                        Profile = 'MinimumPasswordAgeDays'
+                        Unit = 'Days'
+                        Zero = 'Normal'
+                    },
+                    @{
+                        Rule = 'PASSWORD.MAX_AGE'
+                        Field = 'MaxPasswordAge'
+                        Profile = 'MaximumPasswordAgeDays'
+                        Unit = 'Days'
+                        Zero = 'Never'
+                    }
+                )) {
+                $expected = Get-ADAnalyzerDirectoryField $policy $spec.Profile
+                $raw = Get-ADAnalyzerDirectoryField $password $spec.Field
+                $actual = $null
+                if ($null -ne $raw) {
+                    try {
+                        $span = [timespan]$raw
+                        $actual = if ($spec.Unit -eq 'Days') {
+                            $span.TotalDays
+                        }
+                        else {
+                            $span.TotalMinutes
+                        }
+                    }
+                    catch {
+                    }
+                }
+                $allowNever = Get-ADAnalyzerDirectoryField $policy 'AllowPasswordNeverExpires' $false
+                $status = if ($null -eq $expected) {
+                    'NotConfigured'
+                }
+                elseif ($entry.Status -ne 'Collected' -or $null -eq $actual) {
+                    'Unknown'
+                }
+                elseif ($spec.Zero -eq 'Unlimited' -and $actual -eq 0) {
+                    'Pass'
+                }
+                elseif ($spec.Zero -eq 'Never' -and $actual -eq 0 -and $allowNever) {
+                    'Pass'
+                }
+                elseif ($spec.Zero -eq 'Never' -and $expected -eq 0) {
+                    'NotConfigured'
+                }
+                elseif ($spec.Zero -eq 'Never' -and ($actual -eq 0 -or $actual -gt $expected)) {
+                    'Fail'
+                }
+                elseif ($spec.Zero -ne 'Never' -and $actual -lt $expected) {
+                    'Fail'
+                }
+                else {
+                    'Pass'
+                }
+                $this.Emit($Evaluation, @{
+                    RuleId = $spec.Rule
+                    Status = $status
+                    Severity = 'Medium'
+                    Category = 'PasswordPolicy'
+                    Target = $entry.Target
+                    Observed = $actual
+                    Expected = $expected
+                    Evidence = @{
+                                PolicySource = $entry.Source
+                                ZeroSemantics = $spec.Zero
+                                AllowPasswordNeverExpires = $allowNever
+                            }
+                    Message = 'Durations use explicit zero-value semantics.'
+                    Object = $null
+                    Applicability = 'Applicable'
+                })
+            }
+        }
+    }
+
+    hidden [void] EvaluateHostEvidence([hashtable]$Evaluation) {
+        $Data = $Evaluation.Data
+        $Profile = $Evaluation.Profile
+        $policy = $Evaluation.Policy
+        $domain = $Evaluation.Domain
+        $domainTarget = $Evaluation.DomainTarget
+        $coverage = $Evaluation.Coverage
+
+        foreach ($hostRecord in @(Get-ADAnalyzerDirectoryField $Data 'Hosts' @())) {
+            $this.Emit($Evaluation, @{
+                RuleId = 'HOST.OBSERVATIONS'
+                Status = 'Unknown'
+                Severity = 'Information'
+                Category = 'Host'
+                Target = $hostRecord.ComputerName
+                Observed = $hostRecord
+                Expected = 'Explicit host baseline and effective-state validation'
+                Evidence = @{
+                        ObservedOnly = $true
+                    }
+                Message = 'CIM and registry observations are not implied effective compliance.'
+                Object = $null
+                Applicability = 'Unknown'
+            })
+        }
+    }
+}
+
 function Test-ADAnalyzerDirectoryPolicy {
     [CmdletBinding()]
     param(
@@ -1695,660 +2770,13 @@ function Test-ADAnalyzerDirectoryPolicy {
         [Parameter(Mandatory = $true)][hashtable]$Profile
 
     )
-    $policy = Get-ADAnalyzerDirectoryField $Profile 'Policy' @{}
-    $domain = Get-ADAnalyzerDirectoryField $Data 'Domain'
-    $domainTarget = Get-ADAnalyzerDirectoryTarget $domain
-    $coverage = Get-ADAnalyzerDirectoryField $Data 'Coverage' @{}
-    foreach ($key in @('Domain',
-            'Users',
-            'Groups',
-            'Computers',
-            'Trusts',
-            'DefaultPasswordPolicy',
-            'FineGrainedPasswordPolicies',
-            'ResultantPasswordPolicies',
-            'ServiceAccounts',
-            'Acl',
-            'Hosts')) {
-        $state = [string](Get-ADAnalyzerDirectoryField $coverage $key 'Unreadable')
-        if ($state -ne 'Collected') {
-            $status = if ($state -eq 'NotConfigured') {
-                'NotConfigured'
-            }
-            elseif ($state -eq 'Unreadable') {
-                'Unreadable'
-            }
-            else {
-                'Unknown'
-            }
-            Add-ADAnalyzerDirectoryCheck ('COLLECTION.' + $key.ToUpperInvariant()) $status Information Coverage $domainTarget $state 'Collected' @() ('Collection coverage: ' + $key) $null
-        }
-    }
-    $quota = Get-ADAnalyzerDirectoryField $domain 'MachineAccountQuota'
-    $expectedQuota = Get-ADAnalyzerDirectoryField $policy 'MachineAccountQuota' 0
-    $status = if ($null -eq $quota) {
-        'Unknown'
-    }
-    elseif ([long]$quota -gt [long]$expectedQuota) {
-        'Fail'
+    $evaluator = [ADAnalyzerDirectoryPolicyEvaluator]::new()
+    $preference = if ($PSBoundParameters.ContainsKey('ErrorAction')) {
+        $PSBoundParameters.ErrorAction
     }
     else {
-        'Pass'
+        $ErrorActionPreference
     }
-    Add-ADAnalyzerDirectoryCheck 'DOMAIN.MACHINE_ACCOUNT_QUOTA' $status High Domain $domainTarget $quota $expectedQuota @() 'Configured quota; join rights may also be delegated through directory ACLs.' $null Configured
-    $recycle = @(Get-ADAnalyzerDirectoryField $domain 'OptionalFeatures' @() | Where-Object { [string](Get-ADAnalyzerDirectoryField $_ 'FeatureGUID') -eq '766ddcd8-acd0-445e-f3b9-a7f9b6744f2a' })
-    $recycleStatus = if ((Get-ADAnalyzerDirectoryField $coverage 'OptionalFeatures') -ne 'Collected') {
-        'Unknown'
-    }
-    elseif (-not $recycle.Count) {
-        'Unknown'
-    }
-    elseif (@(Get-ADAnalyzerDirectoryField $recycle[0] 'EnabledScopes' @()).Count) {
-        'Pass'
-    }
-    else {
-        'Fail'
-    }
-    Add-ADAnalyzerDirectoryCheck 'DOMAIN.RECYCLE_BIN' $recycleStatus Medium Domain $domainTarget @($recycle | ForEach-Object { Get-ADAnalyzerDirectoryField $_ 'EnabledScopes' }) 'Recycle Bin optional feature enabled' @() 'This check observes optional-feature configuration and does not enable it.' $null Configured
-    $allObjects = @(Get-ADAnalyzerDirectoryField $Data 'Objects' @())
-    if (-not $allObjects.Count) {
-        $allObjects = @(Get-ADAnalyzerDirectoryField $Data 'Users' @()) + @(Get-ADAnalyzerDirectoryField $Data 'Computers' @()) + @(Get-ADAnalyzerDirectoryField $Data 'ServiceAccounts' @())
-    }
-    $groups = @(Get-ADAnalyzerDirectoryField $Data 'Groups' @())
-    $sidLookup = @{}
-    $spns = @{}
-    $membershipGraph = [ADAnalyzerMembershipGraph]::new($groups)
-    foreach ($object in $allObjects + $groups) {
-        $sid = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $object 'SID')
-        if ($sid) {
-            $sidLookup[$sid] = $object
-        }
-    }
-    foreach ($object in $allObjects) {
-        $target = Get-ADAnalyzerDirectoryTarget $object
-        $kind = [string](Get-ADAnalyzerDirectoryField $object 'ObjectClass')
-        $classification = [string](Get-ADAnalyzerDirectoryField $object 'AccountType' 'Unknown')
-        if ($kind -in @('User', 'ServiceAccount')) {
-            $classificationEvidence = Get-ADAnalyzerDirectoryField $object 'AccountClassification'
-            $classificationStatus = if (@(Get-ADAnalyzerDirectoryField $classificationEvidence 'InvalidRules' @()).Count) {
-                'Invalid'
-            }
-            elseif ($classification -eq 'Unknown') {
-                'Unknown'
-            }
-            else {
-                'Pass'
-            }
-            Add-ADAnalyzerDirectoryCheck 'ACCOUNT.CLASSIFICATION' $classificationStatus Information Account $target $classification 'Explicit User or Service classification' $classificationEvidence 'No username-based classification is used.' $object
-        }
-        if ($kind -in @('User', 'Computer')) {
-            $inactiveKey = if ($kind -eq 'Computer') {
-                'ComputerInactivityDays'
-            }
-            else {
-                'UserInactivityDays'
-            }
-            $inactiveDays = Get-ADAnalyzerDirectoryField $policy $inactiveKey 60
-            $last = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $object 'LastLogonDate')
-            $created = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $object 'WhenCreated')
-            $age = if ($last) {
-                [math]::Floor(([datetime]::UtcNow - $last).TotalDays)
-            }
-            elseif ($created) {
-                [math]::Floor(([datetime]::UtcNow - $created).TotalDays)
-            }
-            else {
-                $null
-            }
-            $enabled = Get-ADAnalyzerDirectoryField $object 'Enabled'
-            $status = if ($null -eq $enabled -or $null -eq $age) {
-                'Unknown'
-            }
-            elseif (-not $enabled) {
-                'NotApplicable'
-            }
-            elseif ($age -ge $inactiveDays) {
-                'Fail'
-            }
-            else {
-                'Pass'
-            }
-            $rule = if ($kind -eq 'Computer') {
-                'COMPUTER.INACTIVE'
-            }
-            else {
-                'ACCOUNT.INACTIVE'
-            }
-            Add-ADAnalyzerDirectoryCheck $rule $status Medium Account $target $age $inactiveDays @{
-                LastLogonDate = $last
-                WhenCreated = $created
-                Signal = 'Replicated LastLogonDate, or creation age when no logon is recorded'
-                Approximate = $true
-            } 'Inactivity is a signal, not authorization to disable this object.' $object Applicable
-        }
-        if ($kind -eq 'User') {
-            $passwordDate = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $object 'PasswordLastSet')
-            $maxAge = if ($classification -eq 'User') {
-                Get-ADAnalyzerDirectoryField $policy 'UserPasswordAgeDays'
-            }
-            elseif ($classification -eq 'Service') {
-                Get-ADAnalyzerDirectoryField $policy 'ServicePasswordAgeDays'
-            }
-            else {
-                $null
-            }
-            $passwordAge = if ($passwordDate) {
-                [math]::Floor(([datetime]::UtcNow - $passwordDate).TotalDays)
-            }
-            else {
-                $null
-            }
-            $status = if ($null -eq $maxAge -or $classification -eq 'Unknown' -or $null -eq $passwordAge) {
-                'Unknown'
-            }
-            elseif ($maxAge -eq 0) {
-                'NotConfigured'
-            }
-            elseif ($passwordAge -gt $maxAge) {
-                'Fail'
-            }
-            else {
-                'Pass'
-            }
-            Add-ADAnalyzerDirectoryCheck 'ACCOUNT.PASSWORD_AGE' $status Medium Account $target $passwordAge $maxAge @{
-                AccountType = $classification
-                PasswordStrengthEvaluated = $false
-            } 'Account age policy is profile-controlled and is not a password-strength test.' $object Configured
-            $never = Get-ADAnalyzerDirectoryField $object 'PasswordNeverExpires'
-            $allowed = Get-ADAnalyzerDirectoryField $policy 'AllowPasswordNeverExpires'
-            $status = if ($null -eq $never -or $null -eq $allowed) {
-                'Unknown'
-            }
-            elseif ($never -and -not $allowed) {
-                'Fail'
-            }
-            else {
-                'Pass'
-            }
-            Add-ADAnalyzerDirectoryCheck 'ACCOUNT.PASSWORD_NEVER_EXPIRES' $status Medium Account $target $never $allowed @() 'Exceptions and account purpose require explicit profile decisions.' $object Configured
-        }
-        $uac = Get-ADAnalyzerDirectoryField $object 'UserAccountControl'
-        $unconstrained = Get-ADAnalyzerDirectoryField $object 'TrustedForDelegation'
-        if ($null -ne $uac) {
-            $unconstrained = ([long]$uac -band 524288) -ne 0
-        }
-        $protocol = if ($null -ne $uac) {
-            ([long]$uac -band 16777216) -ne 0
-        }
-        else {
-            $null
-        }
-        $targets = @(Get-ADAnalyzerDirectoryField $object 'AllowedToDelegateTo' @())
-        $approved = @(@(Get-ADAnalyzerDirectoryField $Profile 'ApprovedDelegationTargets' @()) + @(Get-ADAnalyzerDirectoryField $policy 'ApprovedDelegationTargets' @()) | Select-Object `
-                -Unique)
-        $unapproved = @($targets | Where-Object { $_ -notin $approved })
-        $rbcd = @(Get-ADAnalyzerDirectoryField $object 'ResourceBasedDelegation' @() | Where-Object { $_.AccessControlType -eq 'Allow' })
-        $unapprovedRbcd = @($rbcd | Where-Object { $_.IdentitySid -notin $approved })
-        $delegationStatus = if ($unconstrained -or $protocol -or $unapproved.Count -or $unapprovedRbcd.Count) {
-            'Fail'
-        }
-        elseif ($null -eq $unconstrained -and $null -eq $protocol) {
-            'Unknown'
-        }
-        elseif ((Get-ADAnalyzerDirectoryField $object 'DelegationSchemaStatus') -ne 'Collected') {
-            'Unknown'
-        }
-        else {
-            'Pass'
-        }
-        Add-ADAnalyzerDirectoryCheck 'DELEGATION.EXPOSURE' $delegationStatus High Delegation $target @{
-            Unconstrained = $unconstrained
-            ProtocolTransition = $protocol
-            ConstrainedTargets = $targets
-            ResourceBasedPrincipals = $rbcd
-        } $approved @{
-            EffectiveAccessCalculated = $false
-        } 'Review delegation configuration; ACEs do not constitute a complete effective-access calculation.' $object Configured
-        if ($null -ne $uac) {
-            foreach ($flag in @(@{
-                        Rule = 'ACCOUNT.PASSWORD_NOT_REQUIRED'
-                        Mask = 32
-                    }, @{
-                        Rule = 'KERBEROS.PREAUTH_NOT_REQUIRED'
-                        Mask = 4194304
-                    }, @{
-                        Rule = 'KERBEROS.DES_ONLY'
-                        Mask = 2097152
-                    }, @{
-                        Rule = 'ACCOUNT.REVERSIBLE_ENCRYPTION'
-                        Mask = 128
-                    })) {
-                $set = ([long]$uac -band $flag.Mask) -ne 0
-                $allowed = $flag.Rule -eq 'ACCOUNT.REVERSIBLE_ENCRYPTION' -and
-                (Get-ADAnalyzerDirectoryField $policy 'AllowReversibleEncryption' $false)
-                Add-ADAnalyzerDirectoryCheck $flag.Rule $(if ($set -and -not $allowed) {
-                        'Fail'
-                    }
-                    else {
-                        'Pass'
-                    }) High Account $target $set $allowed @{
-                    UserAccountControl = $uac
-                } 'Configured account-control flag.' $object Configured
-            }
-        }
-        $enc = Get-ADAnalyzerDirectoryField $object 'SupportedEncryptionTypes'
-        $encStatus = if ($null -eq $enc -or [long]$enc -eq 0) {
-            'Unknown'
-        }
-        elseif (([long]$enc -band 24) -eq 0) {
-            'Fail'
-        }
-        else {
-            'Pass'
-        }
-        Add-ADAnalyzerDirectoryCheck 'KERBEROS.ENCRYPTION_METADATA' $encStatus Medium Kerberos $target $enc 'AES flags in explicit supported-encryption metadata' @{
-            PasswordStrengthEvaluated = $false
-        } 'Missing or zero metadata can inherit domain behavior and does not prove weak keys.' $object Configured
-        foreach ($spn in @(Get-ADAnalyzerDirectoryField $object 'ServicePrincipalNames' @())) {
-            if (-not $spn) {
-                continue
-            }
-            $key = ([string]$spn).ToLowerInvariant()
-            if (-not $spns.ContainsKey($key)) {
-                $spns[$key] = [System.Collections.Generic.List[object]]::new()
-            }
-            $spns[$key].Add($object)
-        }
-        $history = @(Get-ADAnalyzerDirectoryField $object 'SIDHistory' @())
-        if ($history.Count) {
-            $privileged = @(Get-ADAnalyzerDirectoryField $domain 'PrivilegedSids' @())
-            $knownPrivileged = [System.Collections.Generic.List[string]]::new()
-            $unresolved = [System.Collections.Generic.List[string]]::new()
-            foreach ($sid in $history) {
-                if ($sid -in $privileged) {
-                    $knownPrivileged.Add([string]$sid)
-                }
-                elseif ($sidLookup.ContainsKey([string]$sid)) {
-                    $historical = $sidLookup[[string]$sid]
-                    $membership = $membershipGraph.Resolve($historical, $domain.SID, $privileged)
-                    if ($membership.IsPrivileged -or (Get-ADAnalyzerDirectoryField $historical 'Privileged' $false)) {
-                        $knownPrivileged.Add([string]$sid)
-                    }
-                    elseif ($membership.ResolutionStatus -ne 'Complete') {
-                        $unresolved.Add([string]$sid)
-                    }
-                }
-                else {
-                    $unresolved.Add([string]$sid)
-                }
-            }
-            $status = if ($knownPrivileged.Count) {
-                'Fail'
-            }
-            elseif ($unresolved.Count) {
-                'Unknown'
-            }
-            else {
-                'Pass'
-            }
-            Add-ADAnalyzerDirectoryCheck 'SIDHISTORY.PRIVILEGED' $status High Identity $target $history 'No privileged historical SIDs' @{
-                Privileged = $knownPrivileged.ToArray()
-                Unresolved = $unresolved.ToArray()
-            } 'Unresolved historical SIDs are not declared invalid.' $object Configured
-        }
-        if ($kind -eq 'Computer') {
-            $schema = @(Get-ADAnalyzerDirectoryField $domain 'FeatureSchema' @())
-            $lapsKnown = 'msLAPS-PasswordExpirationTime' -in $schema -or 'ms-Mcs-AdmPwdExpirationTime' -in $schema
-            $expiry = Get-ADAnalyzerDirectoryField $object 'LapsExpiration'
-            if ($null -eq $expiry) {
-                $expiry = Get-ADAnalyzerDirectoryField $object 'LegacyLapsExpiration'
-            }
-            $require = Get-ADAnalyzerDirectoryField $policy 'RequireLaps'
-            $status = if ($null -eq $require) {
-                'NotConfigured'
-            }
-            elseif (-not $require -or (Get-ADAnalyzerDirectoryField $object 'IsDomainController' $false)) {
-                'NotApplicable'
-            }
-            elseif (-not $lapsKnown -or $null -eq $expiry) {
-                'Unknown'
-            }
-            elseif ([datetime]$expiry -lt [datetime]::UtcNow) {
-                'Fail'
-            }
-            else {
-                'Pass'
-            }
-            Add-ADAnalyzerDirectoryCheck 'LAPS.ROTATION_METADATA' $status Medium LAPS $target $expiry 'Present, unexpired LAPS rotation metadata' @{
-                SecretValuesRead = $false
-                SchemaAvailable = $lapsKnown
-                DomainControllerRequiresSeparateDsrmAssessment = $object.IsDomainController
-            } 'Metadata is not proof of effective retrieval permissions or successful rotation.' $object Configured
-            $osResult = Test-ADAnalyzerOperatingSystemProfile `
-                -Object $object `
-                -Entries @(Get-ADAnalyzerDirectoryField $policy 'SupportedOperatingSystems' @())
-            Add-ADAnalyzerDirectoryCheck 'COMPUTER.OS_POLICY' $osResult.Status Medium Host $target $osResult.Observed $osResult.Expected $osResult.Evidence 'Support requires explicit version/build/lifecycle metadata and ESU evidence when required.' $object Configured
-        }
-        if ($classification -eq 'Service') {
-            $required = Get-ADAnalyzerDirectoryField $policy 'RequireGmsaForServiceAccounts' $false
-            $managed = $object.DirectoryObjectClass -in @('msDS-GroupManagedServiceAccount', 'msDS-ManagedServiceAccount')
-            Add-ADAnalyzerDirectoryCheck 'SERVICE_ACCOUNT.MANAGED_IDENTITY' $(if (-not $required) {
-                    'NotApplicable'
-                }
-                elseif ($managed) {
-                    'Pass'
-                }
-                else {
-                    'Fail'
-                }) Medium ServiceAccount $target $object.DirectoryObjectClass 'Managed service account when required by profile' @{
-                RetrievalPrincipals = Get-ADAnalyzerDirectoryField $object 'PrincipalsAllowedToRetrieveManagedPassword'
-                IntervalDays = Get-ADAnalyzerDirectoryField $object 'ManagedPasswordIntervalInDays'
-                SecretValuesRead = $false
-            } 'Managed-account configuration metadata; managed password values are never read.' $object Configured
-            if ($managed) {
-                $principals = @(Get-ADAnalyzerDirectoryField $object 'PrincipalsAllowedToRetrieveManagedPassword' @() | ForEach-Object { ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $_ 'SID' $_) })
-                $approvedReaders = @(Get-ADAnalyzerDirectoryField $policy 'ApprovedGmsaReaderSids' @())
-                $unresolvedReaders = @($principals | Where-Object { $_ -notmatch '^S-\d-' })
-                $readerStatus = if (-not $approvedReaders.Count) {
-                    'NotConfigured'
-                }
-                elseif (-not $principals.Count -or $unresolvedReaders.Count) {
-                    'Unknown'
-                }
-                elseif (@($principals | Where-Object { $_ -notin $approvedReaders }).Count) {
-                    'Fail'
-                }
-                else {
-                    'Pass'
-                }
-                Add-ADAnalyzerDirectoryCheck 'GMSA.RETRIEVAL_PRINCIPALS' $readerStatus High ServiceAccount $target $principals $approvedReaders @{
-                    Unresolved = $unresolvedReaders
-                    EffectiveAccessCalculated = $false
-                    SecretValuesRead = $false
-                } 'Configured retrieval-principal metadata; nested tokens and deny precedence are not an effective-access calculation.' $object Configured
-            }
-        }
-    }
-    foreach ($key in $spns.Keys) {
-        $owners = @($spns[$key] | ForEach-Object { Get-ADAnalyzerDirectoryTarget $_ } | Select-Object -Unique)
-        if ($owners.Count -gt 1) {
-            Add-ADAnalyzerDirectoryCheck 'SPN.DUPLICATE' Fail High Kerberos $key $owners 'One owner per SPN in the collected scope' @{
-                Scope = $Data.Server
-            } 'Duplicate SPN owners require review, without inferring password strength.' $null Configured
-        }
-    }
-    foreach ($trust in @(Get-ADAnalyzerDirectoryField $Data 'Trusts' @())) {
-        $intraForest = Get-ADAnalyzerDirectoryField $trust 'IntraForest'
-        $forestTrust = Get-ADAnalyzerDirectoryField $trust 'ForestTransitive'
-        $filtering = if ($forestTrust) {
-            Get-ADAnalyzerDirectoryField $trust 'SIDFilteringForestAware'
-        }
-        else {
-            Get-ADAnalyzerDirectoryField $trust 'SIDFilteringQuarantined'
-        }
-        $status = if ($intraForest -eq $true) {
-            'NotApplicable'
-        }
-        elseif ($null -eq $intraForest -or $null -eq $forestTrust -or $null -eq $filtering) {
-            'Unknown'
-        }
-        elseif ([bool]$filtering) {
-            'Pass'
-        }
-        else {
-            'Fail'
-        }
-        Add-ADAnalyzerDirectoryCheck 'TRUST.SID_FILTERING' $status High Trust ([string](Get-ADAnalyzerDirectoryField $trust 'Target' (Get-ADAnalyzerDirectoryField $trust 'Name'))) $filtering $true @{
-            IntraForest = $intraForest
-            Direction = Get-ADAnalyzerDirectoryField $trust 'Direction'
-            Type = Get-ADAnalyzerDirectoryField $trust 'TrustType'
-            SelectiveAuthentication = Get-ADAnalyzerDirectoryField $trust 'SelectiveAuthentication'
-            TGTDelegation = Get-ADAnalyzerDirectoryField $trust 'TGTDelegation'
-        } 'Boundary SID filtering is not applied to normal intra-forest parent/child trusts.' $null Configured
-    }
-    $acl = Get-ADAnalyzerDirectoryField $Data 'Acl'
-    $approvedReplication = @(@(Get-ADAnalyzerDirectoryField $Profile 'ApprovedReplicationSids' @()) + @(Get-ADAnalyzerDirectoryField $policy 'ApprovedReplicationSids' @()) | Select-Object `
-            -Unique)
-    if ($domain.SID) {
-        $approvedReplication += ($domain.SID + '-516')
-    }
-    $approvedReplication += 'S-1-5-9'
-    if (Get-ADAnalyzerDirectoryField $policy 'IncludeAdministrativeReplicationRoles' $true) {
-        $approvedReplication += @('S-1-5-18', 'S-1-5-32-544')
-        if ($domain.SID) {
-            $approvedReplication += ($domain.SID + '-512')
-        }
-        if ($domain.RootDomainSID) {
-            $approvedReplication += ($domain.RootDomainSID + '-519')
-        }
-    }
-    $replication = @{}
-    $seenAces = @{}
-    foreach ($ace in @(Get-ADAnalyzerDirectoryField $acl 'Entries' @())) {
-        if ($ace.AccessControlType -ne 'Allow' -or -not $ace.IdentitySid) {
-            continue
-        }
-        $aceKey = (@($ace.Target,
-                $ace.IdentitySid,
-                $ace.ObjectType,
-                $ace.Rights,
-                $ace.InheritedObjectType,
-                [string]$ace.IsInherited,
-                [string]$ace.PropagationFlags,
-                [string]$ace.InheritanceType) -join '|')
-        if ($seenAces.ContainsKey($aceKey)) {
-            continue
-        }
-        $seenAces[$aceKey] = $true
-        if ($ace.TargetType -eq 'DomainRoot' -and [string]$ace.PropagationFlags -notmatch 'InheritOnly') {
-            if (-not $replication.ContainsKey($ace.IdentitySid)) {
-                $replication[$ace.IdentitySid] = @{
-                    Changes = $false
-                    All = $false
-                    Evidence = [System.Collections.Generic.List[object]]::new()
-                }
-            }
-            $grant = $replication[$ace.IdentitySid]
-            $allRights = $ace.Rights -match 'GenericAll' -or
-            ($ace.Rights -match 'ExtendedRight' -and
-            (!$ace.ObjectType -or
-            $ace.ObjectType -eq ([guid]::Empty).ToString()))
-            if ($allRights -or ($ace.Rights -match 'ExtendedRight' -and $ace.ObjectType -eq '1131f6aa-9c07-11d1-f79f-00c04fc2dcd2')) {
-                $grant.Changes = $true
-            }
-            if ($allRights -or ($ace.Rights -match 'ExtendedRight' -and $ace.ObjectType -eq '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2')) {
-                $grant.All = $true
-            }
-            $grant.Evidence.Add($ace)
-        }
-        if ($ace.Rights -match 'GenericAll|WriteDacl|WriteOwner' -and $ace.IdentitySid -notin @($domain.PrivilegedSids)) {
-            Add-ADAnalyzerDirectoryCheck 'ACL.DELEGATED_CONTROL' Fail High ACL $aceKey $ace @{
-                ApprovedPrivilegedSids = $domain.PrivilegedSids
-            } @{
-                EffectiveAccessCalculated = $false
-            } 'Potential broad delegated control; ACE order, deny rules and token semantics still require review.' $null Configured
-        }
-        if ($ace.ObjectTypeName -in @('msLAPS-Password',
-                'msLAPS-EncryptedPassword',
-                'msLAPS-EncryptedPasswordHistory',
-                'msLAPS-EncryptedDSRMPassword',
-                'ms-Mcs-AdmPwd') -and
-            $ace.Rights -match 'ReadProperty|ExtendedRight|GenericRead|GenericAll') {
-            $approvedReaders = @(Get-ADAnalyzerDirectoryField $policy 'ApprovedLapsReaderSids' @())
-            $readerStatus = if (-not $approvedReaders.Count) {
-                'NotConfigured'
-            }
-            elseif ($ace.IdentitySid -in $approvedReaders) {
-                'Pass'
-            }
-            else {
-                'Fail'
-            }
-            Add-ADAnalyzerDirectoryCheck 'LAPS.ATTRIBUTE_READ_ACL' $readerStatus High ACL $aceKey $ace $approvedReaders @{
-                EffectiveAccessCalculated = $false
-                ConfidentialAttributeAccessCalculated = $false
-                DecryptionPermissionsCalculated = $false
-            } 'An allow ACE references LAPS data; this does not establish plaintext retrieval or effective access.' $null Configured
-        }
-    }
-    foreach ($sid in $replication.Keys) {
-        $grant = $replication[$sid]
-        if ($grant.Changes -and $grant.All) {
-            Add-ADAnalyzerDirectoryCheck 'ACL.REPLICATION_RIGHTS' $(if ($sid -in $approvedReplication) {
-                    'Pass'
-                }
-                else {
-                    'Fail'
-                }) Critical ACL ($domainTarget + '|SID=' + $sid) $sid $approvedReplication @{
-                Aces = $grant.Evidence.ToArray()
-                EffectiveAccessCalculated = $false
-            } 'Direct allow ACEs expose replication capabilities; this is not complete effective access.' $null Configured
-        }
-    }
-    $effective = Get-ADAnalyzerDirectoryField (Get-ADAnalyzerDirectoryField $Data 'PasswordPolicies') 'Resultant' @()
-    foreach ($entry in @($effective)) {
-        $password = $entry.Policy
-        foreach ($spec in @(
-                @{
-                    Rule = 'PASSWORD.MIN_LENGTH'
-                    Field = 'MinPasswordLength'
-                    Profile = 'MinimumPasswordLength'
-                    Mode = 'Minimum'
-                },
-                @{
-                    Rule = 'PASSWORD.LOCKOUT_THRESHOLD'
-                    Field = 'LockoutThreshold'
-                    Profile = 'LockoutThreshold'
-                    Mode = 'MaximumNonzero'
-                },
-                @{
-                    Rule = 'PASSWORD.HISTORY'
-                    Field = 'PasswordHistoryCount'
-                    Profile = 'PasswordHistorySize'
-                    Mode = 'Minimum'
-                },
-                @{
-                    Rule = 'PASSWORD.COMPLEXITY'
-                    Field = 'ComplexityEnabled'
-                    Profile = 'PasswordComplexity'
-                    Mode = 'Equal'
-                },
-                @{
-                    Rule = 'PASSWORD.REVERSIBLE_ENCRYPTION'
-                    Field = 'ReversibleEncryptionEnabled'
-                    Profile = 'AllowReversibleEncryption'
-                    Mode = 'Allow'
-                }
-            )) {
-            $expected = Get-ADAnalyzerDirectoryField $policy $spec.Profile
-            $actual = Get-ADAnalyzerDirectoryField $password $spec.Field
-            $status = if ($null -eq $expected -or ($spec.Mode -eq 'MaximumNonzero' -and $expected -eq 0)) {
-                'NotConfigured'
-            }
-            elseif ($entry.Status -ne 'Collected' -or $null -eq $actual) {
-                'Unknown'
-            }
-            elseif ($spec.Mode -eq 'Minimum' -and $actual -lt $expected) {
-                'Fail'
-            }
-            elseif ($spec.Mode -eq 'MaximumNonzero' -and ($actual -eq 0 -or $actual -gt $expected)) {
-                'Fail'
-            }
-            elseif ($spec.Mode -eq 'Equal' -and $actual -ne $expected) {
-                'Fail'
-            }
-            elseif ($spec.Mode -eq 'Allow' -and $actual -and -not $expected) {
-                'Fail'
-            }
-            else {
-                'Pass'
-            }
-            Add-ADAnalyzerDirectoryCheck $spec.Rule $status Medium PasswordPolicy $entry.Target $actual $expected @{
-                PolicySource = $entry.Source
-                PolicyDN = Get-ADAnalyzerDirectoryField $password 'DistinguishedName'
-            } 'Effective/default policy metadata; actual password content is not inspected.' $null Applicable
-        }
-        foreach ($spec in @(
-                @{
-                    Rule = 'PASSWORD.LOCKOUT_DURATION'
-                    Field = 'LockoutDuration'
-                    Profile = 'LockoutDurationMinutes'
-                    Unit = 'Minutes'
-                    Zero = 'Unlimited'
-                },
-                @{
-                    Rule = 'PASSWORD.LOCKOUT_RESET'
-                    Field = 'LockoutObservationWindow'
-                    Profile = 'ResetLockoutMinutes'
-                    Unit = 'Minutes'
-                    Zero = 'Normal'
-                },
-                @{
-                    Rule = 'PASSWORD.MIN_AGE'
-                    Field = 'MinPasswordAge'
-                    Profile = 'MinimumPasswordAgeDays'
-                    Unit = 'Days'
-                    Zero = 'Normal'
-                },
-                @{
-                    Rule = 'PASSWORD.MAX_AGE'
-                    Field = 'MaxPasswordAge'
-                    Profile = 'MaximumPasswordAgeDays'
-                    Unit = 'Days'
-                    Zero = 'Never'
-                }
-            )) {
-            $expected = Get-ADAnalyzerDirectoryField $policy $spec.Profile
-            $raw = Get-ADAnalyzerDirectoryField $password $spec.Field
-            $actual = $null
-            if ($null -ne $raw) {
-                try {
-                    $span = [timespan]$raw
-                    $actual = if ($spec.Unit -eq 'Days') {
-                        $span.TotalDays
-                    }
-                    else {
-                        $span.TotalMinutes
-                    }
-                }
-                catch {
-                }
-            }
-            $allowNever = Get-ADAnalyzerDirectoryField $policy 'AllowPasswordNeverExpires' $false
-            $status = if ($null -eq $expected) {
-                'NotConfigured'
-            }
-            elseif ($entry.Status -ne 'Collected' -or $null -eq $actual) {
-                'Unknown'
-            }
-            elseif ($spec.Zero -eq 'Unlimited' -and $actual -eq 0) {
-                'Pass'
-            }
-            elseif ($spec.Zero -eq 'Never' -and $actual -eq 0 -and $allowNever) {
-                'Pass'
-            }
-            elseif ($spec.Zero -eq 'Never' -and $expected -eq 0) {
-                'NotConfigured'
-            }
-            elseif ($spec.Zero -eq 'Never' -and ($actual -eq 0 -or $actual -gt $expected)) {
-                'Fail'
-            }
-            elseif ($spec.Zero -ne 'Never' -and $actual -lt $expected) {
-                'Fail'
-            }
-            else {
-                'Pass'
-            }
-            Add-ADAnalyzerDirectoryCheck $spec.Rule $status Medium PasswordPolicy $entry.Target $actual $expected @{
-                PolicySource = $entry.Source
-                ZeroSemantics = $spec.Zero
-                AllowPasswordNeverExpires = $allowNever
-            } 'Durations use explicit zero-value semantics.' $null Applicable
-        }
-    }
-    foreach ($hostRecord in @(Get-ADAnalyzerDirectoryField $Data 'Hosts' @())) {
-        Add-ADAnalyzerDirectoryCheck 'HOST.OBSERVATIONS' Unknown Information Host $hostRecord.ComputerName $hostRecord 'Explicit host baseline and effective-state validation' @{
-            ObservedOnly = $true
-        } 'CIM and registry observations are not implied effective compliance.' $null Unknown
-    }
+
+    $evaluator.EvaluateForCommand($Data, $Profile, $PSCmdlet, $preference)
 }
