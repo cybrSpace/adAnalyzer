@@ -1348,6 +1348,31 @@ try {
             Assert-True (($output -join ' ') -like ('*PASS DTD projection ' + $case + '*')) 'Fresh process did not execute the selected case.'
         }
     }
+
+    foreach ($case in @(
+            'Owner',
+            'Unsupported',
+            'Parity',
+            'Defaults',
+            'Namespace',
+            'RootSecret',
+            'Document',
+            'Isolation'
+        )) {
+        Invoke-Test ('XML node boundary: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $output = & $executable -NoLogo -NoProfile -NonInteractive -File (
+                Join-Path $PSScriptRoot 'XmlNodeBoundaryFixture.ps1'
+            ) -Case $case 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw ($output -join [Environment]::NewLine)
+            }
+            Assert-True (($output -join ' ') -like ('*PASS XML node boundary ' + $case + '*')) 'Fresh process did not execute selected case.'
+        }
+    }
 }
 finally {
     Remove-Item -LiteralPath $script:Temporary -Recurse -Force -WhatIf:$false -Confirm:$false

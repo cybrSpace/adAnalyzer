@@ -149,6 +149,12 @@ function Get-ADAnalyzerXmlSecretName {
 
 function ConvertTo-ADAnalyzerSecretIndicatorXml {
     param([Parameter(Mandatory)][Xml.XmlNode]$Node)
+    if ($Node.PSBase.NodeType -notin @(
+            [Xml.XmlNodeType]::Document,
+            [Xml.XmlNodeType]::Element
+        )) {
+        throw [ArgumentException]::new('XML projection supports Document and Element nodes only.', 'Node')
+    }
     $sourceDocument = if ($Node -is [xml]) {
         $Node
     }
@@ -256,6 +262,18 @@ function ConvertTo-ADAnalyzerSecretIndicatorXml {
         }
         else {
             $copy = $flag
+        }
+    }
+    if ($copy -is [Xml.XmlElement]) {
+        $detachedDocument = [xml]::new()
+        $detachedDocument.PreserveWhitespace = $true
+        $detachedDocument.XmlResolver = $null
+        $reader = [Xml.XmlNodeReader]::new($copy)
+        try {
+            return $detachedDocument.ReadNode($reader)
+        }
+        finally {
+            $reader.Dispose()
         }
     }
     return $copy
