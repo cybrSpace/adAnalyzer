@@ -149,6 +149,16 @@ function Get-ADAnalyzerXmlSecretName {
 
 function ConvertTo-ADAnalyzerSecretIndicatorXml {
     param([Parameter(Mandatory)][Xml.XmlNode]$Node)
+    $sourceDocument = if ($Node -is [xml]) {
+        $Node
+    }
+    else {
+        $Node.PSBase.OwnerDocument
+    }
+    if ($null -ne $sourceDocument -and
+        $null -ne $sourceDocument.PSBase.DocumentType) {
+        throw [IO.InvalidDataException]::new('DTD declarations are not supported in secret-presence projection.')
+    }
     $copy = $Node.CloneNode($true)
     $document = if ($copy -is [xml]) {
         $copy
@@ -254,11 +264,14 @@ function ConvertTo-ADAnalyzerSecretIndicatorXml {
 function ConvertTo-ADAnalyzerSecretIndicatorText {
     param([string]$Text)
     $names = Get-ADAnalyzerSecretNames
-    if ($Text -notmatch ('(?i)(?:' + $names + ')')) {
+    $hasSecretName = $Text -match ('(?i)(?:' + $names + ')')
+    $hasDtdMarkup = $Text -match '(?i)<!DOCTYPE\b'
+    if (-not $hasSecretName -and -not $hasDtdMarkup) {
         return $Text
     }
     # Use a non-resolving parser for complete XML and a narrow text projection
     # for fragments/diagnostic strings. Neither path expands external entities.
+    $parsed = $false
     foreach ($fragment in @($false, $true)) {
         try {
             $settings = [Xml.XmlReaderSettings]::new()
@@ -277,6 +290,10 @@ function ConvertTo-ADAnalyzerSecretIndicatorText {
                 $document.XmlResolver = $null
                 $document.Load($reader)
                 $safe = ConvertTo-ADAnalyzerSecretIndicatorXml $document
+                $parsed = $true
+                if (-not $hasSecretName) {
+                    return $Text
+                }
                 if (-not $fragment) {
                     return $safe.OuterXml
                 }
@@ -296,6 +313,9 @@ function ConvertTo-ADAnalyzerSecretIndicatorText {
             # A second, safely wrapped parse covers XML fragments. Unparseable
             # text then uses the narrow direct-secret projection below.
         }
+    }
+    if ($hasDtdMarkup -and -not $parsed) {
+        throw [IO.InvalidDataException]::new('DTD declarations are not supported in secret-presence projection.')
     }
     $name = '(?<name>(?:[A-Za-z_][\w.-]*:)?(?:' + $names + '))'
     $attribute = '(?is)(?<![\w:.-])' + $name + '\s*=\s*(?<quote>["''])(?<value>.*?)\k<quote>'

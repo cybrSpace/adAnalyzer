@@ -1322,6 +1322,32 @@ try {
         Assert-Throws { Apply-FixturePlan $plan }
         Assert-Equal 0 $script:Reads
     }
+
+    foreach ($case in @(
+            'Document',
+            'Element',
+            'Text',
+            'Malformed',
+            'SafeData',
+            'Export',
+            'WhatIf',
+            'Controls',
+            'NoExpansion'
+        )) {
+        Invoke-Test ('DTD presence boundary: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $output = & $executable -NoLogo -NoProfile -NonInteractive -File (
+                Join-Path $PSScriptRoot 'DtdProjectionFixture.ps1'
+            ) -Case $case 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw ($output -join [Environment]::NewLine)
+            }
+            Assert-True (($output -join ' ') -like ('*PASS DTD projection ' + $case + '*')) 'Fresh process did not execute the selected case.'
+        }
+    }
 }
 finally {
     Remove-Item -LiteralPath $script:Temporary -Recurse -Force -WhatIf:$false -Confirm:$false
