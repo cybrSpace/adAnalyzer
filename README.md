@@ -79,6 +79,19 @@ The two `etc/Get-ServerHPA*.ps1` helpers expose `Get-ServerHPA -Computer <host> 
 
 `etc/Test-ServerConnection.ps1` defines `Test-ServerConnection -ComputerName <hosts>` with optional `Port` (default 445), `OutputPath`, and `WhatIf`. Its scan class validates and copies explicit selectors, probes each requested host/port pair once through the built-in Windows `Test-NetConnection`, and returns detached rows in input order. The five columns remain `ComputerName,RemoteAddress,RemotePort,tcpTest,result`: `tcpTest` is reachability; `result` means the probe completed with one boolean result. Refused connections retain `tcpTest=false,result=true`; thrown, nonterminating, empty, ambiguous, or malformed probe results have null address/TCP fields and `result=false`. Optional CSV export uses the shared UTF-8 atomic writer after complete serialization; failures preserve the prior report and emit no rows. There is no automatic filename or formatting-object output. `WhatIf` collects rows while suppressing file/directory writes. Dot sourcing is inert and CLI computers are explicit. This utility needs the built-in Windows networking command, not RSAT; probe timing follows that command's native behavior.
 
+`etc/Get-NTLMEvents.ps1` now loads inertly and requires explicit hosts. Its class-owned scan reads Security event 4624 with the named `LmPackageName=NTLM V1` filter and excludes anonymous logons. The explicit workflow uses a server-side XPath query on Windows PowerShell 5.1 and PowerShell 7; it does not require RSAT. The default start time is computed once per invocation as one day before the call. Event-derived time and the existing eight CSV fields are preserved.
+
+```powershell
+. .\etc\Get-NTLMEvents.ps1
+$rows = Get-ADAnalyzerNtlmEvents -ComputerName @('server1', 'server2') -Credential $credential
+$rows = Get-ADAnalyzerNtlmEvents -ComputerName 'server1' -StartTime (Get-Date).AddDays(-2) -OutputPath .\reports\ntlm.csv
+# Direct class method; an empty credential uses ambient authentication defaults.
+$scan = [Target]::Scan([Collections.ArrayList]@('server1'), [datetime](Get-Date).AddDays(-1), [pscredential]::Empty)
+$rows = $scan.Report()
+```
+
+The new scan overload copies selectors, retains no credentials, and closes owned event records after projection. Query, projection, and cleanup failures terminate before a partial report returns. Optional CSV export happens only for an explicit path after collection; `WhatIf` collects without writes, and export failure emits no report rows. The legacy `Target.Scan(ArrayList, Hashtable, string)` overload retains its explicit credential prompt. Its arbitrary named EventData filters require PowerShell 6 or later and are rejected before prompting on 5.1; use the DateTime/PSCredential overload there. This follows the documented [named-data filter support](https://learn.microsoft.com/en-us/powershell/scripting/samples/creating-get-winevent-queries-with-filterhashtable). Live event collection requires Windows, event-log permissions, and reachable selected hosts; tests use synthetic events.
+
 The standalone `etc/Get-GPOXML.ps1` and `etc/Get-LocalAdminGPO.ps1` scripts also use the package reader. They require explicit targets and selection, return XML or canonical check objects, and write only when `OutputPath` is supplied. Dot sourcing defines their functions without connecting, importing native modules, prompting, or opening files:
 
 ```powershell

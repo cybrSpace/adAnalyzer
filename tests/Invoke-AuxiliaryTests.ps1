@@ -1171,6 +1171,46 @@ Write-Output ('PASS legacy '+$Script+' '+$Mode)
             Assert-Equal 0 @(Get-ChildItem -LiteralPath $script:Temporary -Force -Filter '.ad-analyzer-*.tmp').Count
         }
     }
+
+    foreach ($case in @(
+            'Inert',
+            'Construction',
+            'Direct',
+            'Command',
+            'Cli',
+            'MissingCli',
+            'EmptyCli',
+            'WhitespaceCli',
+            'CliWhatIf',
+            'InvalidTargets',
+            'Credential',
+            'Defaults',
+            'Legacy',
+            'LegacyGuard',
+            'Empty',
+            'QueryFailure',
+            'ProjectionFailure',
+            'CleanupFailure',
+            'Export',
+            'WhatIf',
+            'ExportFailure',
+            'Isolation'
+        )) {
+        Invoke-AuxiliaryTest ('whole-file NTLM workflow: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $output = & $executable -NoLogo -NoProfile -NonInteractive -File (
+                Join-Path $PSScriptRoot 'NtlmWorkflowFixture.ps1'
+            ) -Case $case 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw ($output -join [Environment]::NewLine)
+            }
+            Assert-True (($output -join ' ') -like ('*PASS NTLM workflow ' + $case + '*')) 'Fresh process did not execute the selected NTLM case.'
+        }
+    }
+
     Assert-Equal 0 $script:ExternalCalls
 }
 finally {

@@ -1,28 +1,17 @@
-#requires -version 6.1
+#requires -version 5.1
 
 using namespace System.Collections
 using namespace System.Collections.Specialized
 
+[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+    [Alias('ComputerName')][string[]]$CliComputerName = @(),
+    [Alias('StartTime')][Nullable[datetime]]$CliStartTime,
+    [Alias('Credential')][pscredential]$CliCredential,
+    [Alias('OutputPath')][string]$CliOutputPath
+)
+
 . (Join-Path (Split-Path -Parent $PSScriptRoot) 'bin/ADFile.ps1')
-
-$var = @{
-
-    'user' = [String]'ad\da-alipa'
-
-    'server' = [ArrayList]@(
-        'dc1',
-        'dc2'
-    )
-    'filter' = [Hashtable]@{
-
-        'LogName' = 'Security'
-        'Id' = '4624'
-        'StartTime' = (Get-Date).AddDays(-1)
-        'LmPackageName' = 'NTLM V1'
-    }
-
-    'export' = [String]('{0}.{1}.csv' -f '.\tmp\NTLMEvents', (Get-Date -f 'yyyy.MM.dd.HHmm'))
-}
 
 class Target {
 
@@ -37,6 +26,16 @@ class Target {
     }
 
     static [Target]Scan([ArrayList]$server, [Hashtable]$filter, [String]$user) {
+
+        if ($global:PSVersionTable.PSVersion.Major -lt 6) {
+            $standardKeys = @(
+                'LogName', 'ProviderName', 'Path', 'Keywords', 'ID',
+                'Level', 'StartTime', 'EndTime', 'UserID', 'Data'
+            )
+            if (@($filter.Keys | Where-Object { $_ -notin $standardKeys }).Count) {
+                throw 'Legacy named EventData filters require PowerShell 6 or later. Use the DateTime/PSCredential Scan overload on Windows PowerShell 5.1.'
+            }
+        }
 
         $c = (Get-Credential -UserName $user -Message 'Enter password for user: ' -ErrorAction Stop)
 
@@ -63,6 +62,81 @@ class Target {
         }
 
         return $target
+    }
+
+    static [Target] Scan([ArrayList]$server, [datetime]$startTime, [pscredential]$credential) {
+        $ErrorActionPreference = 'Stop'
+        if ($null -eq $server -or $server.Count -eq 0) {
+            throw [ArgumentException]::new('Specify at least one computer.', 'server')
+        }
+        if ($startTime -eq [datetime]::MinValue) {
+            throw [ArgumentException]::new('Specify a start time.', 'startTime')
+        }
+
+        $ownedServers = [ArrayList]::new()
+        foreach ($computer in $server) {
+            if ($computer -isnot [string] -or [string]::IsNullOrWhiteSpace($computer)) {
+                throw [ArgumentException]::new('Computer names must be nonempty strings.', 'server')
+            }
+            $null = $ownedServers.Add([string]$computer)
+        }
+
+        $startUtc = $startTime.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+        $xpath = "*[System[(EventID=4624) and TimeCreated[@SystemTime >= '$startUtc']] and EventData[Data[@Name='LmPackageName']='NTLM V1']]"
+        $queryFilter = @{
+            LogName = 'Security'
+            Id = '4624'
+            StartTime = $startTime
+            LmPackageName = 'NTLM V1'
+        }
+        $scanTarget = [Target]::new($ownedServers, $queryFilter)
+        $queryArguments = @{
+            LogName = 'Security'
+            FilterXPath = $xpath
+            ErrorAction = 'Stop'
+        }
+        if ($null -ne $credential -and $credential -ne [pscredential]::Empty) {
+            $queryArguments.Credential = $credential
+        }
+
+        foreach ($computer in $ownedServers) {
+            $queryArguments.ComputerName = $computer
+            Get-WinEvent @queryArguments | ForEach-Object {
+                $eventRecord = $_
+                $recordFailure = $null
+                try {
+                    if ($eventRecord.Properties[5].Value -ne 'ANONYMOUS LOGON') {
+                        $finding = [Finding]::new(
+                            $eventRecord.TimeCreated.ToString('g'),
+                            $computer,
+                            $eventRecord.Properties
+                        )
+                        $null = $scanTarget.Collection.Add([pscustomobject]$finding)
+                    }
+                }
+                catch {
+                    $recordFailure = $_
+                }
+                finally {
+                    if ($eventRecord -is [IDisposable]) {
+                        try {
+                            $eventRecord.Dispose()
+                        }
+                        catch {
+                            if ($null -eq $recordFailure) {
+                                throw
+                            }
+                            $recordFailure.Exception.Data['CleanupErrors'] = $_.Exception.Message
+                        }
+                    }
+                }
+                if ($null -ne $recordFailure) {
+                    throw $recordFailure
+                }
+            }
+        }
+
+        return $scanTarget
     }
 
     [void]Export([String]$value) {
@@ -118,15 +192,46 @@ class Collection : ArrayList {
     }
 }
 
-try {
+function Get-ADAnalyzerNtlmEvents {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ComputerName,
+        [Nullable[datetime]]$StartTime,
+        [pscredential]$Credential,
+        [string]$OutputPath
+    )
 
-    $target = [Target]::Scan($var['server'], $var['filter'], $var['user'])
+    $since = if ($PSBoundParameters.ContainsKey('StartTime')) {
+        if ($null -eq $StartTime) {
+            throw 'StartTime must not be null.'
+        }
+        [datetime]$StartTime
+    }
+    else {
+        (Get-Date).AddDays(-1)
+    }
 
-    $target.Report()
-
-    $target.Export($var['export'])
+    $scan = [Target]::Scan([ArrayList]$ComputerName, $since, $Credential)
+    if ($OutputPath -and $PSCmdlet.ShouldProcess($OutputPath, 'Export NTLM event CSV')) {
+        $scan.Export($OutputPath)
+    }
+    $scan.Report()
 }
-catch {
 
-    throw ('{0}({1})' -f 'error', $_.Exception.Message)
+if ($MyInvocation.InvocationName -ne '.') {
+    $invokeArguments = @{
+        ComputerName = $CliComputerName
+    }
+    foreach ($parameter in @('StartTime', 'Credential', 'OutputPath')) {
+        if ($PSBoundParameters.ContainsKey('Cli' + $parameter)) {
+            $invokeArguments[$parameter] = $PSBoundParameters['Cli' + $parameter]
+        }
+    }
+    foreach ($parameter in @('WhatIf', 'Confirm', 'ErrorAction')) {
+        if ($PSBoundParameters.ContainsKey($parameter)) {
+            $invokeArguments[$parameter] = $PSBoundParameters[$parameter]
+        }
+    }
+
+    Get-ADAnalyzerNtlmEvents @invokeArguments
 }
