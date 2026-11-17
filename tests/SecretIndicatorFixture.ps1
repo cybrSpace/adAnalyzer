@@ -1855,11 +1855,25 @@ namespace ADAnalyzer.SecretIndicatorFixture
                     $xml -ceq $beforeXml -and
                     -not $json.Contains($script:Marker) -and
                     -not $xml.Contains($script:Marker)) 'Native service serialization captured input or results.'
-                Assert-Secret (-not (ConvertTo-Json `
-                            -InputObject $result `
-                            -Depth 30 `
-                            -Compress).Contains($script:Marker) -and
-                    -not [Management.Automation.PSSerializer]::Serialize($result).Contains($script:Marker)) 'A supported projected result retained its own payload.'
+                $resultJson = ConvertTo-Json -InputObject $result -Depth 30 -Compress
+                $nullJson = ConvertTo-Json -InputObject $null -Depth 30 -Compress
+                Assert-Secret (
+                    ($null -eq $result) -eq ($workload.Operation -eq 'Baseline')
+                ) 'Only the void baseline method should produce no result.'
+                if ($null -eq $result) {
+                    # Windows PowerShell 5.1 emits no JSON for null. Compare
+                    # the native engine contract before inspecting its text.
+                    Assert-Secret ($resultJson -ceq $nullJson) 'Void result serialization changed.'
+                }
+                else {
+                    Assert-Secret (
+                        -not [string]::IsNullOrWhiteSpace([string]$resultJson)
+                    ) 'A non-null projected result was not serialized.'
+                }
+                Assert-Secret (
+                    -not ([string]$resultJson).Contains($script:Marker) -and
+                    -not [Management.Automation.PSSerializer]::Serialize($result).Contains($script:Marker)
+                ) 'A supported projected result retained its own payload.'
                 Assert-Secret (@($instance.PSObject.Properties).Count -eq 0) 'A processing call gained retained instance properties.'
                 $script:ExecutedScenarios++
             }
