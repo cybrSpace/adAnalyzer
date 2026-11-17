@@ -304,6 +304,108 @@ function Resolve-ADAnalyzerMembership {
     $graph.ResolveUsingIndex($Object, $GroupIndex, $DomainSid, $PrivilegedSids)
 }
 
+class ADAnalyzerAccountClassifier {
+    ADAnalyzerAccountClassifier() {
+    }
+
+    [object] Classify([object]$Object) {
+        return $this.Classify($Object, $null, $null)
+    }
+
+    [object] Classify([object]$Object, [hashtable]$Profile) {
+        return $this.Classify($Object, $Profile, $null)
+    }
+
+    [object] Classify(
+        [object]$Object,
+        [hashtable]$Profile,
+        [object]$Membership
+    ) {
+        $classification = Get-ADAnalyzerDirectoryField $Profile 'AccountClassification' @{}
+        $evidence = [System.Collections.Generic.List[object]]::new()
+        $invalidRules = [System.Collections.Generic.List[string]]::new()
+        $objectClass = [string](Get-ADAnalyzerDirectoryField $Object 'DirectoryObjectClass')
+        if ($objectClass -in @('msDS-GroupManagedServiceAccount', 'msDS-ManagedServiceAccount')) {
+            $evidence.Add([pscustomobject]@{
+                    Type = 'Service'
+                    Source = 'DirectoryObjectClass'
+                    Value = $objectClass
+                })
+        }
+        $dn = [string](Get-ADAnalyzerDirectoryField $Object 'DistinguishedName')
+        foreach ($type in @('User', 'Service')) {
+            foreach ($ou in @(Get-ADAnalyzerDirectoryField $classification ($type + 'OUs') @())) {
+                if ($ou -and ($dn -ieq $ou -or $dn.EndsWith(',' + $ou, [StringComparison]::OrdinalIgnoreCase))) {
+                    $evidence.Add([pscustomobject]@{
+                            Type = $type
+                            Source = 'OU'
+                            Value = [string]$ou
+                        })
+                }
+            }
+            $identities = @(Get-ADAnalyzerDirectoryField $Object 'MemberOf' @())
+            if ($Membership) {
+                $identities += @($Membership.EffectiveSids)
+            }
+            foreach ($group in @(Get-ADAnalyzerDirectoryField $classification ($type + 'Groups') @())) {
+                if ($group -and $group -in $identities) {
+                    $evidence.Add([pscustomobject]@{
+                            Type = $type
+                            Source = 'Group'
+                            Value = [string]$group
+                        })
+                }
+            }
+        }
+        foreach ($rule in @(Get-ADAnalyzerDirectoryField $classification 'AttributeRules' @())) {
+            $attribute = [string](Get-ADAnalyzerDirectoryField $rule 'Attribute')
+            $type = [string](Get-ADAnalyzerDirectoryField $rule 'Type')
+            if (-not $attribute -or $type -notin @('User', 'Service')) {
+                continue
+            }
+            if (-not (Test-ADAnalyzerClassificationAttribute $attribute)) {
+                $invalidRules.Add($attribute)
+                continue
+            }
+            $actual = Get-ADAnalyzerDirectoryField $Object $attribute
+            $expected = Get-ADAnalyzerDirectoryField $rule 'Value'
+            $matchType = Get-ADAnalyzerDirectoryField $rule 'Match' 'Equals'
+            $matched = $false
+            if ($matchType -eq 'Regex') {
+                try {
+                    $matched = [string]$actual -match [string]$expected
+                }
+                catch {
+                    $matched = $false
+                    $invalidRules.Add($attribute + ':Regex')
+                }
+            }
+            else {
+                $matched = $null -ne $actual -and [string]$actual -ieq [string]$expected
+            }
+            if ($matched) {
+                $evidence.Add([pscustomobject]@{
+                        Type = $type
+                        Source = ('Attribute:' + $attribute)
+                        Value = $actual
+                    })
+            }
+        }
+        $types = @($evidence.ToArray() | Select-Object -ExpandProperty Type -Unique)
+        return [pscustomobject]@{
+            Type = if ($types.Count -eq 1 -and -not $invalidRules.Count) {
+                $types[0]
+            }
+            else {
+                'Unknown'
+            }
+            Evidence = $evidence.ToArray()
+            Conflicting = $types.Count -gt 1
+            InvalidRules = $invalidRules.ToArray()
+        }
+    }
+}
+
 function Get-ADAnalyzerAccountType {
     [CmdletBinding()]
     param(
@@ -312,88 +414,8 @@ function Get-ADAnalyzerAccountType {
         $Membership
 
     )
-    $classification = Get-ADAnalyzerDirectoryField $Profile 'AccountClassification' @{}
-    $evidence = [System.Collections.Generic.List[object]]::new()
-    $invalidRules = [System.Collections.Generic.List[string]]::new()
-    $objectClass = [string](Get-ADAnalyzerDirectoryField $Object 'DirectoryObjectClass')
-    if ($objectClass -in @('msDS-GroupManagedServiceAccount', 'msDS-ManagedServiceAccount')) {
-        $evidence.Add([pscustomobject]@{
-                Type = 'Service'
-                Source = 'DirectoryObjectClass'
-                Value = $objectClass
-            })
-    }
-    $dn = [string](Get-ADAnalyzerDirectoryField $Object 'DistinguishedName')
-    foreach ($type in @('User', 'Service')) {
-        foreach ($ou in @(Get-ADAnalyzerDirectoryField $classification ($type + 'OUs') @())) {
-            if ($ou -and ($dn -ieq $ou -or $dn.EndsWith(',' + $ou, [StringComparison]::OrdinalIgnoreCase))) {
-                $evidence.Add([pscustomobject]@{
-                        Type = $type
-                        Source = 'OU'
-                        Value = [string]$ou
-                    })
-            }
-        }
-        $identities = @(Get-ADAnalyzerDirectoryField $Object 'MemberOf' @())
-        if ($Membership) {
-            $identities += @($Membership.EffectiveSids)
-        }
-        foreach ($group in @(Get-ADAnalyzerDirectoryField $classification ($type + 'Groups') @())) {
-            if ($group -and $group -in $identities) {
-                $evidence.Add([pscustomobject]@{
-                        Type = $type
-                        Source = 'Group'
-                        Value = [string]$group
-                    })
-            }
-        }
-    }
-    foreach ($rule in @(Get-ADAnalyzerDirectoryField $classification 'AttributeRules' @())) {
-        $attribute = [string](Get-ADAnalyzerDirectoryField $rule 'Attribute')
-        $type = [string](Get-ADAnalyzerDirectoryField $rule 'Type')
-        if (-not $attribute -or $type -notin @('User', 'Service')) {
-            continue
-        }
-        if (-not (Test-ADAnalyzerClassificationAttribute $attribute)) {
-            $invalidRules.Add($attribute)
-            continue
-        }
-        $actual = Get-ADAnalyzerDirectoryField $Object $attribute
-        $expected = Get-ADAnalyzerDirectoryField $rule 'Value'
-        $matchType = Get-ADAnalyzerDirectoryField $rule 'Match' 'Equals'
-        $matched = $false
-        if ($matchType -eq 'Regex') {
-            try {
-                $matched = [string]$actual -match [string]$expected
-            }
-            catch {
-                $matched = $false
-                $invalidRules.Add($attribute + ':Regex')
-            }
-        }
-        else {
-            $matched = $null -ne $actual -and [string]$actual -ieq [string]$expected
-        }
-        if ($matched) {
-            $evidence.Add([pscustomobject]@{
-                    Type = $type
-                    Source = ('Attribute:' + $attribute)
-                    Value = $actual
-                })
-        }
-    }
-    $types = @($evidence.ToArray() | Select-Object -ExpandProperty Type -Unique)
-    [pscustomobject]@{
-        Type = if ($types.Count -eq 1 -and -not $invalidRules.Count) {
-            $types[0]
-        }
-        else {
-            'Unknown'
-        }
-        Evidence = $evidence.ToArray()
-        Conflicting = $types.Count -gt 1
-        InvalidRules = $invalidRules.ToArray()
-    }
+    $classifier = [ADAnalyzerAccountClassifier]::new()
+    $classifier.Classify($Object, $Profile, $Membership)
 }
 
 function Invoke-ADAnalyzerDirectoryQuery {
@@ -1161,6 +1183,7 @@ function Get-ADAnalyzerDirectoryData {
             }
         }
         $membershipGraph = [ADAnalyzerMembershipGraph]::new($groups)
+        $accountClassifier = [ADAnalyzerAccountClassifier]::new()
         foreach ($object in @($users) + @($computers) + @($services)) {
             $sourceKey = if ($object.ObjectClass -eq 'User') {
                 'Users'
@@ -1189,7 +1212,7 @@ function Get-ADAnalyzerDirectoryData {
             }
             $object | Add-Member NoteProperty SafetyMetadataStatus $safetyStatus -Force
             $membership = $membershipGraph.Resolve($object, $domainSid, $privilegedSids)
-            $type = Get-ADAnalyzerAccountType -Object $object -Profile $Profile -Membership $membership
+            $type = $accountClassifier.Classify($object, $Profile, $membership)
             $object | Add-Member NoteProperty TransitiveGroups $membership.EffectiveSids -Force
             $object | Add-Member NoteProperty Membership $membership -Force
             $object | Add-Member NoteProperty Privileged $membership.IsPrivileged -Force

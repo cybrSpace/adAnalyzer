@@ -2306,6 +2306,34 @@ foreach ($case in @(
         Assert-DirectoryTrue (($output -join ' ') -like ('*PASS directory policy class ' + $case + '*')) 'Fresh process did not execute the selected case.'
     }
 }
+
+foreach ($case in @(
+        'Construction',
+        'Parity',
+        'Types',
+        'Isolation',
+        'Secrets',
+        'Ownership',
+        'Serialization',
+        'Command',
+        'DirectoryRoute',
+        'Errors'
+    )) {
+    Invoke-DirectoryTest ('constructor account classifier: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $output = & $executable -NoLogo -NoProfile -NonInteractive -File (
+            Join-Path $PSScriptRoot 'AccountClassifierClassFixture.ps1'
+        ) -Case $case 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            foreach ($line in $output) {
+                Write-Host ('Fixture output: ' + [string]$line)
+            }
+            throw ($output -join [Environment]::NewLine)
+        }
+        Assert-DirectoryTrue (($output -join ' ') -like ('*PASS account classifier class ' + $case + '*')) 'Fresh process did not execute the selected case.'
+    }
+}
+
 Write-Host ("{0} directory tests passed; {1} failed" -f $script:Passed, $script:Failed)
 if ($script:Failed) {
     exit 1

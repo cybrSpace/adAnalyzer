@@ -129,9 +129,13 @@ $policyEvaluator = [ADAnalyzerGpoPolicyEvaluator]::new()
 $checks = $policyEvaluator.Evaluate($gpoMetadata, $policy, $profile)
 $membershipGraph = [ADAnalyzerMembershipGraph]::new($groups)
 $membership = $membershipGraph.Resolve($account, $domainSid, $privilegedSids)
+$accountClassifier = [ADAnalyzerAccountClassifier]::new()
+$classification = $accountClassifier.Classify($account, $profile, $membership)
 $directoryEvaluator = [ADAnalyzerDirectoryPolicyEvaluator]::new()
 $checks = $directoryEvaluator.Evaluate($directorySnapshot, $profile)
 ```
+
+`ADAnalyzerAccountClassifier` owns schema, OU, group and attribute classification, including conflicting and invalid-rule evidence. Its inert constructor retains no configuration or results; pass a raw profile to `Classify(account, profile)` and optional membership to `Classify(account, profile, membership)`. `Classify(account)` uses no configured selectors. Each call creates fresh result containers; raw attribute evidence retains its existing value types and references. It does not normalize caller profiles or collect directory data. The modern collector reuses one classifier; legacy and remediation callers retain the thin `Get-ADAnalyzerAccountType` adapter.
 
 `ADAnalyzerProfile` owns fresh defaults, copying, merging, validation, and explicit JSON/PSD1 loading. `[ADAnalyzerProfile]::new()` and `::new(overrides)` construct independent normalized configuration without file reads or native-module imports. `[ADAnalyzerProfile]::Load(path)` reads a file explicitly and returns a profile instance; `ToHashtable()` returns a detached configuration snapshot for existing APIs. `DefaultSnapshot()` returns fresh raw defaults. Raw default policy thresholds retain their `Int32` contract, while normalization retains the established `Int64` policy values. Native JSON/CLIXML serialization of the profile object omits its private configuration state. Existing default/import commands delegate to these methods; the legacy merge adapter retains its in-place, no-output contract.
 
