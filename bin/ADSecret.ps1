@@ -166,6 +166,16 @@ function ConvertTo-ADAnalyzerSecretIndicatorXml {
         throw [IO.InvalidDataException]::new('DTD declarations are not supported in secret-presence projection.')
     }
     $copy = $Node.CloneNode($true)
+    if ($Node -is [xml] -and $null -ne $Node.PSBase.DocumentElement) {
+        $rootReader = [Xml.XmlNodeReader]::new($Node.PSBase.DocumentElement.CloneNode($true))
+        try {
+            $rootCopy = $copy.ReadNode($rootReader)
+            $null = $copy.ReplaceChild($rootCopy, $copy.PSBase.DocumentElement)
+        }
+        finally {
+            $rootReader.Dispose()
+        }
+    }
     $document = if ($copy -is [xml]) {
         $copy
     }

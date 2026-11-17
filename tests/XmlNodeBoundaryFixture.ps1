@@ -1,6 +1,16 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('Owner', 'Unsupported', 'Parity', 'Defaults', 'Namespace', 'RootSecret', 'Document', 'Isolation', 'RecordBaseline')]
+    [ValidateSet('Owner',
+        'Unsupported',
+        'Parity',
+        'Defaults',
+        'Namespace',
+        'RootSecret',
+        'Document',
+        'Isolation',
+        'DocumentDefaults',
+        'SchemaIsolation',
+        'RecordBaseline')]
     [string]$Case = 'Owner'
 )
 $ErrorActionPreference = 'Stop'
@@ -279,7 +289,97 @@ switch ($Case) {
         Assert-Node ($safe -is [xml] -and $null -eq $safe.PSBase.OwnerDocument) 'Document return kind changed.'
         Assert-Node ($safe.OuterXml -ceq $scenario.Node.OuterXml) 'Document declaration changed.'
         Assert-Node (-not [object]::ReferenceEquals($safe, $scenario.Node)) 'Document aliases input.'
+        $text = '<?xml version="1.0" encoding="utf-16" standalone="yes"?><!-- before --><?fixture value?><Root>text</Root><!-- after -->'
+        $settings = [Xml.XmlReaderSettings]::new()
+        $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+        $settings.XmlResolver = $null
+        $textReader = [IO.StringReader]::new($text)
+        $reader = $null
+        try {
+            $reader = [Xml.XmlReader]::Create($textReader, $settings, 'urn:adanalyzer:document-control')
+            $source = [xml]::new()
+            $source.PreserveWhitespace = $true
+            $source.XmlResolver = $null
+            $source.Load($reader)
+            $before = ConvertTo-NodeJson (Get-NodeSnapshot $source)
+            $copy = ConvertTo-ADAnalyzerSecretIndicatorXml $source
+            Assert-Node ($copy.PSBase.BaseURI -ceq $source.PSBase.BaseURI) 'Document base URI changed.'
+            Assert-Node ($copy.PSBase.OuterXml -ceq $source.PSBase.OuterXml) 'Document prolog or exterior nodes changed.'
+            Assert-Node ((ConvertTo-NodeJson (Get-NodeSnapshot $copy)) -ceq $before) 'Document control tree changed.'
+        }
+        finally {
+            if ($null -ne $reader) {
+                $reader.Dispose()
+            }
+            $textReader.Dispose()
+        }
+        $empty = [xml]::new()
+        $copy = ConvertTo-ADAnalyzerSecretIndicatorXml $empty
+        Assert-Node ($copy -is [xml] -and $copy.PSBase.ChildNodes.Count -eq 0) 'Empty document contract changed.'
     }
+
+    'DocumentDefaults' {
+        $source = New-DefaultNodeDocument
+        $before = ConvertTo-NodeJson (Get-NodeSnapshot $source)
+        $safe = ConvertTo-ADAnalyzerSecretIndicatorXml $source
+        Assert-Node ($safe -is [xml]) 'Document projection changed return kind.'
+        $root = $safe.PSBase.DocumentElement
+        Assert-Node ($root.GetAttribute('PasswordPresent') -ceq 'true' -and
+            -not $root.HasAttribute('Password')) 'Document default secret presence was lost.'
+        $mode = $root.GetAttributeNode('Mode')
+        $childMode = $root.SelectSingleNode('./Child').GetAttributeNode('ChildMode')
+        Assert-Node ($null -ne $mode -and
+            $mode.Value -ceq 'root-default' -and
+            -not $mode.Specified) 'Document root default lost/materialized.'
+        Assert-Node ($null -ne $childMode -and
+            $childMode.Value -ceq 'child-default' -and
+            -not $childMode.Specified) 'Document descendant default lost/materialized.'
+        Assert-Node (($root.Attributes.Name -join ',') -ceq 'Id,Mode,PasswordPresent') 'Document default attribute order changed.'
+        Assert-Node ($before -ceq (ConvertTo-NodeJson (Get-NodeSnapshot $source))) 'Document defaults projection changed source.'
+        $mode.Value = 'result-only'
+        Assert-Node ($source.DocumentElement.GetAttribute('Mode') -ceq 'root-default') 'Default attribute aliases source.'
+        Assert-Node (-not [object]::ReferenceEquals($safe, $source)) 'Document result aliases source.'
+    }
+
+    'SchemaIsolation' {
+        $source = New-DefaultNodeDocument
+        $schemaType = $source.PSBase.DocumentElement.PSBase.SchemaInfo.SchemaType
+        Assert-Node ($null -ne $schemaType) 'Fixture schema information is missing.'
+        $passwordSchema = @($schemaType.AttributeUses.Values | Where-Object Name -eq Password)[0]
+        Assert-Node ($passwordSchema.DefaultValue -ceq $script:Marker) 'Fixture schema payload is missing.'
+        $safe = ConvertTo-ADAnalyzerSecretIndicatorXml $source
+        Assert-Node ($safe.DocumentElement.GetAttribute('PasswordPresent') -ceq 'true') 'Schema-default secret was not detected.'
+        Assert-Node ($safe.PSBase.Schemas.Count -eq 0 -and
+            -not [object]::ReferenceEquals($safe.PSBase.Schemas,
+                $source.PSBase.Schemas)) 'Result retained source schema collection.'
+        $stack = [Collections.Generic.Stack[Xml.XmlNode]]::new()
+        $stack.Push($safe)
+        $visited = 0
+        while ($stack.Count) {
+            $node = $stack.Pop()
+            $information = $node.PSBase.SchemaInfo
+            if ($null -ne $information) {
+                Assert-Node ($null -eq $information.SchemaType -and
+                    $null -eq $information.SchemaElement -and
+                    $null -eq $information.SchemaAttribute) 'Result retained source schema metadata.'
+            }
+            foreach ($child in $node.PSBase.ChildNodes) {
+                $stack.Push($child)
+            }
+            foreach ($attribute in $node.PSBase.Attributes) {
+                $stack.Push($attribute)
+            }
+            $visited++
+        }
+        Assert-Node ($visited -gt 4) 'Schema graph was not fully visited.'
+        Assert-Node (-not (ConvertTo-Json `
+                    -InputObject $safe `
+                    -Depth 30 `
+                    -Compress).Contains($script:Marker)) 'Document JSON retained schema payload.'
+        Assert-Node (-not [Management.Automation.PSSerializer]::Serialize($safe).Contains($script:Marker)) 'Document CLIXML retained schema payload.'
+        Assert-Node ($source.DocumentElement.GetAttribute('Password') -ceq $script:Marker) 'Source default secret changed.'
+    }
+
     'Isolation' {
         $source = New-NodeDocument ('<Root><Item id="original"><Value>text</Value></Item><Sibling password="' + $script:Marker + '"/></Root>')
         $node = $source.SelectSingleNode('/Root/Item')

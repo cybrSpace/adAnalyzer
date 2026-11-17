@@ -1357,7 +1357,9 @@ try {
             'Namespace',
             'RootSecret',
             'Document',
-            'Isolation'
+            'Isolation',
+            'DocumentDefaults',
+            'SchemaIsolation'
         )) {
         Invoke-Test ('XML node boundary: ' + $case) {
             $executable = (Get-Process -Id $PID).Path
