@@ -1211,6 +1211,39 @@ Write-Output ('PASS legacy '+$Script+' '+$Mode)
         }
     }
 
+
+    foreach ($case in @(
+            'Utf8NoBom',
+            'Utf8Bom',
+            'Utf16LE',
+            'Utf16BE',
+            'Utf32LE',
+            'Utf32BE',
+            'SimulatedAnsi',
+            'Malformed',
+            'SharedWriter'
+        )) {
+        Invoke-AuxiliaryTest ('external JSON input encoding: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $output = & $executable -NoLogo -NoProfile -NonInteractive -File (
+                Join-Path $PSScriptRoot 'JsonInputEncodingFixture.ps1'
+            ) -Case $case 2>&1
+            foreach ($line in $output | Where-Object {
+                    [string]$_ -like 'Runtime JSON encoding:*' -or
+                    [string]$_ -like 'PASS native old-default*'
+                }) {
+                Write-Host ([string]$line)
+            }
+            if ($LASTEXITCODE -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw ($output -join [Environment]::NewLine)
+            }
+            Assert-True (($output -join ' ') -like ('*PASS JSON input encoding ' + $case + '*')) 'Fresh process did not execute the selected JSON encoding case.'
+        }
+    }
+
     Assert-Equal 0 $script:ExternalCalls
 }
 finally {

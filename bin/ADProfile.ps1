@@ -250,7 +250,7 @@ function Import-ADAnalyzerProfile {
                 $Profile = Import-PowerShellDataFile -LiteralPath $Path -ErrorAction Stop
             }
             '.json' {
-                $Profile = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $Profile = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             }
             default {
                 throw 'Profiles must be .json or restricted .psd1 data files'

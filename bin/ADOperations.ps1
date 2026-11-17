@@ -173,6 +173,7 @@ function Read-ADAnalyzerOperationDocument {
         $InputObject = Microsoft.PowerShell.Management\Get-Content `
             -LiteralPath $InputObject `
             -Raw `
+            -Encoding UTF8 `
             -ErrorAction Stop | ConvertFrom-Json `
             -ErrorAction Stop
     }
