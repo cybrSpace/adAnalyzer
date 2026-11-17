@@ -59,6 +59,23 @@ function Get-CanonicalJson($Value) {
     ConvertTo-Json -InputObject (ConvertTo-Canonical $Value) -Depth 100 -Compress
 }
 
+function Assert-CanonicalEqual([string]$Expected, [string]$Actual, [string]$Message) {
+    if ($Expected -ceq $Actual) {
+        return
+    }
+
+    $offset = 0
+    $limit = [math]::Min($Expected.Length, $Actual.Length)
+    while ($offset -lt $limit -and $Expected[$offset] -ceq $Actual[$offset]) {
+        $offset++
+    }
+    $start = [math]::Max(0, $offset - 80)
+    $expectedContext = $Expected.Substring($start, [math]::Min(250, $Expected.Length - $start))
+    $actualContext = $Actual.Substring($start, [math]::Min(250, $Actual.Length - $start))
+    throw ($Message + ' First JSON difference at ' + $offset +
+        '; expected: ' + $expectedContext + '; actual: ' + $actualContext)
+}
+
 function New-PolicyContext([switch]$Mixed) {
     $profile = Get-ADAnalyzerDefaultProfile
     $data = [pscustomobject]@{
@@ -306,8 +323,8 @@ switch ($Case) {
             $evaluator = [ADAnalyzerDirectoryPolicyEvaluator]::new()
             $direct = $evaluator.Evaluate($context.Data, $context.Profile)
             $command = @(Test-ADAnalyzerDirectoryPolicy -Data $context.Data -Profile $context.Profile)
-            Assert-Policy ((Get-CanonicalJson $direct) -ceq $baseline.$kind) ($kind + ' direct results differ from the original baseline.')
-            Assert-Policy ((Get-CanonicalJson $command) -ceq $baseline.$kind) ($kind + ' command results differ from the original baseline.')
+            Assert-CanonicalEqual $baseline.$kind (Get-CanonicalJson $direct) ($kind + ' direct results differ from the original baseline.')
+            Assert-CanonicalEqual $baseline.$kind (Get-CanonicalJson $command) ($kind + ' command results differ from the original baseline.')
             Assert-Policy ((Get-CanonicalJson $context) -ceq $before) 'Evaluation mutated input data or profile.'
         }
     }
@@ -353,7 +370,7 @@ switch ($Case) {
         $first[0].Status = 'Invalid'
         for ($i = 0; $i -lt 3; $i++) {
             $again = $evaluator.Evaluate($context.Data, $context.Profile)
-            Assert-Policy ((Get-CanonicalJson $again) -ceq $baseline.Mixed) 'Repeated evaluation retained result mutation or duplicate checks.'
+            Assert-CanonicalEqual $baseline.Mixed (Get-CanonicalJson $again) 'Repeated evaluation retained result mutation or duplicate checks.'
         }
         $other = [ADAnalyzerDirectoryPolicyEvaluator]::new()
         $empty = New-PolicyContext
