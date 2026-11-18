@@ -653,6 +653,201 @@ public sealed class ADAnalyzerDynamicPolicyRecordFixture : DynamicObject
         }
     }
 
+    function New-GpoDictionaryFixture([string]$Kind, [StringComparer]$Comparer) {
+        switch ($Kind) {
+            'Hashtable' {
+                return [hashtable]::new($Comparer)
+            }
+            'OrderedDictionary' {
+                return [Collections.Specialized.OrderedDictionary]::new($Comparer)
+            }
+            'Dictionary' {
+                return [Collections.Generic.Dictionary[string, object]]::new($Comparer)
+            }
+        }
+    }
+
+    function Invoke-GpoDictionaryProjection([Collections.IDictionary]$Record, [string]$Route) {
+        if ($Route -eq 'Command') {
+            return (ConvertTo-ADAnalyzerSecretRecord -Record $Record)
+        }
+        return [ADAnalyzerSecretIndicator]::new().ProjectRecord($Record)
+    }
+
+    Add-Type @'
+using System.Collections;
+using System.Collections.Generic;
+
+public sealed class ADAnalyzerDictionaryRecordFixture : Hashtable
+{
+    public readonly List<string> Observations = new List<string>();
+
+    public override object this[object key]
+    {
+        get
+        {
+            Observations.Add((string)key);
+            return base[key];
+        }
+        set { base[key] = value; }
+    }
+}
+'@
+
+    $dictionaryMarker = 'inert-dictionary-presence-fixture'
+    foreach ($route in @('Command', 'Object')) {
+        foreach ($kind in @('Hashtable', 'OrderedDictionary', 'Dictionary')) {
+            Test-Gpo ('strict ' + $kind + ' retains ordinary references and native identity comparison through ' + $route) {
+                Set-StrictMode -Version Latest
+                $raw = [byte[]]@(19, 42)
+                $ordinary = New-GpoDictionaryFixture $kind ([StringComparer]::Ordinal)
+                $ordinary['valuename'] = 'DefaultPassword'
+                $ordinary['Value'] = $raw
+                $result = Invoke-GpoDictionaryProjection $ordinary $route
+                Assert-True ([object]::ReferenceEquals($result, $ordinary) -and
+                    [object]::ReferenceEquals($result['Value'], $raw) -and
+                    $result['Value'] -is [byte[]]) 'An exact-case identity mismatch did not return the ordinary record and original bytes.'
+
+                $recognized = New-GpoDictionaryFixture $kind ([StringComparer]::OrdinalIgnoreCase)
+                $recognized['valuename'] = 'DefaultPassword'
+                $recognized['value'] = $dictionaryMarker
+                $result = Invoke-GpoDictionaryProjection $recognized $route
+                Assert-True ($result.SecretPresent -is [bool] -and $result.SecretPresent -and
+                    $null -eq $result.PSObject.Properties['Value']) 'Case-insensitive identity did not produce Boolean presence.'
+            }
+
+            Test-Gpo ('strict ' + $kind + ' projects presence without copying adapted dictionary fields through ' + $route) {
+                Set-StrictMode -Version Latest
+                foreach ($sample in @('Present', 'Empty', 'Prior', 'CaseVariants')) {
+                    $inputMap = New-GpoDictionaryFixture $kind ([StringComparer]::Ordinal)
+                    $metadata = [pscustomobject]@{
+                        Public = 'fixture metadata'
+                    }
+                    $inputMap['ValueName'] = 'DefaultPassword'
+                    $inputMap['Source'] = 'fixture.pol'
+                    $inputMap['RAWDATA'] = $dictionaryMarker
+                    $inputMap['data'] = $dictionaryMarker
+                    $inputMap['Bytes'] = $dictionaryMarker
+                    switch ($sample) {
+                        'Present' {
+                            $inputMap['Value'] = $dictionaryMarker
+                        }
+                        'Empty' {
+                            $inputMap['Value'] = ''
+                            $inputMap['SecretPresent'] = $false
+                        }
+                        'Prior' {
+                            $inputMap['SecretPresent'] = $true
+                        }
+                        'CaseVariants' {
+                            $inputMap['Value'] = ''
+                            $inputMap['value'] = $dictionaryMarker
+                            $inputMap['Keys'] = 'fixture key metadata'
+                            $inputMap['Values'] = $metadata
+                            $inputMap['SyncRoot'] = 'fixture sync metadata'
+                        }
+                    }
+                    $expectedPresent = $sample -ne 'Empty'
+                    $result = Invoke-GpoDictionaryProjection $inputMap $route
+                    Assert-True (-not [object]::ReferenceEquals($result, $inputMap) -and
+                        $result.SecretPresent -is [bool] -and $result.SecretPresent -eq $expectedPresent -and
+                        $result.ValueName -ceq 'DefaultPassword' -and $result.Source -ceq 'fixture.pol') 'Dictionary projection lost presence or ordinary metadata.'
+                    foreach ($field in @('Value', 'RawData', 'Data', 'Bytes', 'Count', 'Comparer', 'IsReadOnly', 'IsFixedSize', 'IsSynchronized')) {
+                        Assert-True ($null -eq $result.PSObject.Properties[$field]) 'Dictionary projection retained a payload or adapted field.'
+                    }
+                    if ($sample -eq 'CaseVariants') {
+                        Assert-True ($result.Keys -ceq 'fixture key metadata' -and
+                            [object]::ReferenceEquals($result.Values, $metadata) -and
+                            $result.SyncRoot -ceq 'fixture sync metadata') 'Real colliding Keys, Values, or SyncRoot metadata did not survive.'
+                    }
+                    else {
+                        foreach ($field in @('Keys', 'Values', 'SyncRoot')) {
+                            Assert-True ($null -eq $result.PSObject.Properties[$field]) 'Projection copied a native dictionary view.'
+                        }
+                    }
+                    Assert-True ($inputMap['RAWDATA'] -ceq $dictionaryMarker -and
+                        $inputMap['data'] -ceq $dictionaryMarker -and $inputMap['Bytes'] -ceq $dictionaryMarker) 'Projection changed the source record.'
+                }
+            }
+        }
+
+        Test-Gpo ('strict dictionary projection only reads the value needed for presence through ' + $route) {
+            Set-StrictMode -Version Latest
+            foreach ($prior in @($false, $true)) {
+                $inputMap = [ADAnalyzerDictionaryRecordFixture]::new()
+                $inputMap['Name'] = $null
+                $inputMap['ValueName'] = 'DefaultPassword'
+                $inputMap['Attribute'] = $null
+                $inputMap['PropertyName'] = $null
+                $inputMap['SecretPresent'] = $prior
+                $inputMap['Value'] = $dictionaryMarker
+                $inputMap['RawData'] = $dictionaryMarker
+                $inputMap['Data'] = $dictionaryMarker
+                $inputMap['Bytes'] = $dictionaryMarker
+                $result = Invoke-GpoDictionaryProjection $inputMap $route
+                $readCount = 1
+                if ($prior) {
+                    $readCount = 0
+                }
+                Assert-True (@($inputMap.Observations | Where-Object { $_ -ieq 'Value' }).Count -eq $readCount -and
+                    @($inputMap.Observations | Where-Object { $_ -in 'RawData', 'Data', 'Bytes' }).Count -eq 0 -and
+                    $result.SecretPresent -is [bool] -and $result.SecretPresent) 'Projection read a discarded field or missed the single necessary presence read.'
+            }
+        }
+
+        Test-Gpo ('strict dictionary projection keeps PowerShell type metadata independent through ' + $route) {
+            Set-StrictMode -Version Latest
+            $expectedTypeNames = ([pscustomobject]@{}).PSObject.TypeNames -join '|'
+            $fixtureTypeName = 'ADAnalyzer.Fixture.Metadata'
+            foreach ($name in @('', 'PSBase', 'PSObject', 'PSAdapted', 'PSExtended', 'PSTypeName', 'PSTypeNames')) {
+                $inputMap = @{
+                    ValueName = 'DefaultPassword'
+                    Value = $dictionaryMarker
+                    Source = 'fixture.pol'
+                }
+                $inputMap[$name] = $fixtureTypeName
+
+                $result = Invoke-GpoDictionaryProjection $inputMap $route
+                $copiedMembers = @($result.PSObject.Properties | Where-Object {
+                        $_ -is [Management.Automation.PSNoteProperty] -and $_.Name -eq $name
+                    })
+                Assert-True (
+                    $result.SecretPresent -is [bool] -and
+                    $result.SecretPresent -and
+                    $result.Source -ceq 'fixture.pol' -and
+                    ($result.PSObject.TypeNames -join '|') -ceq $expectedTypeNames -and
+                    $copiedMembers.Count -eq 0 -and
+                    $inputMap[$name] -ceq $fixtureTypeName
+                ) 'Dictionary data affected PowerShell type handling or valid metadata.'
+            }
+        }
+
+        Test-Gpo ('strict dictionary projection retains the natively selected identity through ' + $route) {
+            Set-StrictMode -Version Latest
+            foreach ($reverse in @($false, $true)) {
+                $inputMap = [Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
+                if ($reverse) {
+                    $inputMap['valuename'] = 'OrdinarySetting'
+                    $inputMap['ValueName'] = 'DefaultPassword'
+                }
+                else {
+                    $inputMap['ValueName'] = 'DefaultPassword'
+                    $inputMap['valuename'] = 'OrdinarySetting'
+                }
+                $inputMap['Value'] = $dictionaryMarker
+
+                $result = Invoke-GpoDictionaryProjection $inputMap $route
+                Assert-True (
+                    $result.SecretPresent -is [bool] -and
+                    $result.SecretPresent -and
+                    $result.ValueName -ceq 'DefaultPassword' -and
+                    $null -eq $result.PSObject.Properties['Value'] -and
+                    $inputMap['valuename'] -ceq 'OrdinarySetting'
+                ) 'A case-variant dictionary key replaced the identity used for recognition.'
+            }
+        }
+    }
+
     Test-Gpo 'UTF-16 INF preserves numeric zero and boolean false' {
         Assert-Equal 0 ($parsed.SecuritySettings | Where-Object Name -eq 'MinimumPasswordLength').Value
         $value = ($parsed.SecuritySettings | Where-Object Name -eq 'PasswordComplexity').Value

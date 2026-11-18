@@ -1558,6 +1558,110 @@ try {
             $null -eq $explicitNull[0].DeletionDirective -and $null -eq $explicitNull[0].Deleted) 'Explicit null dictionary options changed their projection.'
     }
 
+    foreach ($projectionEntryPoint in @('Resolver', 'Command')) {
+        Test-Policy ('strict dictionary registry secret projection via ' + $projectionEntryPoint) {
+            Set-StrictMode -Version Latest
+            $marker = 'FIXTURE_ONLY_S040_ADMX_PAYLOAD'
+            $records = @(
+                @{
+                    Scope = 'Computer'
+                    Hive = 'HKLM'
+                    Key = $projectionKey
+                    ValueName = 'DefaultPassword'
+                    Type = 1
+                    Source = 'Machine/Registry.pol'
+                    FixtureMetadata = 'retained'
+                    Value = $marker
+                    RawData = $marker
+                }
+                [ordered]@{
+                    Scope = 'Computer'
+                    Hive = 'HKLM'
+                    Key = $projectionKey
+                    ValueName = 'DefaultPassword'
+                    Type = 1
+                    Source = 'Machine/Registry.pol'
+                    FixtureMetadata = 'retained'
+                    KeyOnly = $false
+                    DeletionDirective = $null
+                    SecretPresent = $false
+                    Value = $marker
+                    Data = $marker
+                    Bytes = [Text.Encoding]::UTF8.GetBytes($marker)
+                }
+            )
+
+            foreach ($record in $records) {
+                $before = ConvertTo-Json -InputObject $record -Depth 12 -Compress
+                $inputRows = [object[]]@($record)
+                $results = if ($projectionEntryPoint -ceq 'Resolver') {
+                    @([ADAnalyzerAdmxResolver]::new().Resolve($inputRows, $projectionPath))
+                }
+                else {
+                    @(Resolve-ADAnalyzerRegistryPolicy -RegistrySettings $inputRows -TemplatePath $projectionPath)
+                }
+
+                $after = ConvertTo-Json -InputObject $record -Depth 12 -Compress
+                Assert-Policy ($before -ceq $after) 'Registry secret projection modified its dictionary input.'
+                $rows = @($results)
+                Assert-Policy ($rows.Count -eq 1) 'Registry secret projection did not return one row per input.'
+                $row = $rows[0]
+                Assert-Policy (
+                    $row -is [pscustomobject] -and
+                    $row -isnot [Collections.IDictionary] -and
+                    -not [object]::ReferenceEquals($row, $record)
+                ) 'Registry secret projection did not return a detached record.'
+
+                $json = ConvertTo-Json -InputObject $row -Depth 12 -Compress
+                $xml = [Management.Automation.PSSerializer]::Serialize($row)
+                Assert-Policy (
+                    -not $json.Contains($marker) -and -not $xml.Contains($marker)
+                ) 'Registry secret projection exposed fixture data in serialization.'
+
+                foreach ($name in @(
+                        'Value', 'RawData', 'Data', 'Bytes',
+                        'Keys', 'Values', 'Count', 'Comparer', 'EqualityComparer',
+                        'IsReadOnly', 'IsFixedSize', 'IsSynchronized', 'SyncRoot'
+                    )) {
+                    Assert-Policy (
+                        $null -eq $row.PSObject.Properties[$name]
+                    ) 'Registry secret projection retained a payload field or dictionary container.'
+                }
+
+                Assert-Policy (
+                    $row.SecretPresent -is [bool] -and
+                    $row.SecretPresent -and
+                    $row.MetadataStatus -ceq 'PresenceOnly' -and
+                    $row.State -ceq 'Unknown'
+                ) 'Registry secret projection did not report a positive presence-only state.'
+                Assert-Policy (
+                    $row.Scope -ceq 'Computer' -and
+                    $row.Hive -ceq 'HKLM' -and
+                    $row.Key -ceq $projectionKey -and
+                    $row.ValueName -ceq 'DefaultPassword' -and
+                    $row.Type -eq 1 -and
+                    $row.Source -ceq 'Machine/Registry.pol' -and
+                    $row.FixtureMetadata -ceq 'retained'
+                ) 'Registry secret projection lost identity or explicit metadata.'
+
+                if ($record -is [Collections.Specialized.OrderedDictionary]) {
+                    Assert-Policy (
+                        $row.KeyOnly -is [bool] -and
+                        -not $row.KeyOnly -and
+                        $null -ne $row.PSObject.Properties['DeletionDirective'] -and
+                        $null -eq $row.DeletionDirective
+                    ) 'Registry secret projection changed explicitly supplied optional metadata.'
+                }
+                else {
+                    Assert-Policy (
+                        $null -eq $row.PSObject.Properties['KeyOnly'] -and
+                        $null -eq $row.PSObject.Properties['DeletionDirective']
+                    ) 'Registry secret projection added omitted optional metadata.'
+                }
+            }
+        }
+    }
+
     Test-Policy 'strict registry projection retains the native missing required field error' {
         Set-StrictMode -Version Latest
         $row = New-RegistryFixture $projectionKey FixtureValue 17

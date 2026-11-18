@@ -106,7 +106,8 @@ class ADAnalyzerSecretIndicator {
         }
         $inputFrame = @{ Record = $Record }
         $secret = $false
-        foreach ($label in @('Name', 'ValueName', 'Attribute', 'PropertyName')) {
+        $identityLabels = @('Name', 'ValueName', 'Attribute', 'PropertyName')
+        foreach ($label in $identityLabels) {
             if ((Test-ADAnalyzerOptionalSecretRecordMember $inputFrame $label) -and
                 $this.IsSecretName(([string]$Record.$label))) {
                 $secret = $true
@@ -121,14 +122,39 @@ class ADAnalyzerSecretIndicator {
             $Record.SecretPresent -is [bool]) {
             $present = $Record.SecretPresent
         }
-        foreach ($property in $Record.PSObject.Properties) {
-            if ($property.Name -in @('Value', 'RawData', 'Data', 'Bytes')) {
-                if ($property.Name -eq 'Value') {
-                    $present = $present -or ($this.IsPresent($property.Value))
+        if ($Record -is [Collections.IDictionary]) {
+            $dictionary = [Collections.IDictionary]$Record
+            # Adapted properties such as Values can expose the entire input.
+            $keysProperty = [Collections.IDictionary].GetProperty('Keys')
+            $keys = $keysProperty.GetValue($dictionary, $null)
+            $reservedNames = @('PSBase', 'PSObject', 'PSAdapted', 'PSExtended', 'PSTypeName', 'PSTypeNames')
+            foreach ($key in $keys) {
+                if ($key -isnot [string] -or [string]::IsNullOrEmpty($key) -or $key -in $reservedNames) {
+                    continue
+                }
+                if ($key -ieq 'Value') {
+                    $present = $present -or $this.IsPresent($dictionary[$key])
+                }
+                elseif ($key -notin 'RawData', 'Data', 'Bytes', 'SecretPresent') {
+                    # Keep the exact key consulted by native identity lookup.
+                    $canonical = $identityLabels -ieq $key
+                    if ($canonical.Count -gt 0 -and $key -cne $canonical[0] -and $canonical[0] -cin $keys) {
+                        continue
+                    }
+                    $result[$key] = $dictionary[$key]
                 }
             }
-            else {
-                $result[$property.Name] = $property.Value
+        }
+        else {
+            foreach ($property in $Record.PSObject.Properties) {
+                if ($property.Name -in @('Value', 'RawData', 'Data', 'Bytes')) {
+                    if ($property.Name -eq 'Value') {
+                        $present = $present -or ($this.IsPresent($property.Value))
+                    }
+                }
+                else {
+                    $result[$property.Name] = $property.Value
+                }
             }
         }
         $result['SecretPresent'] = $present
