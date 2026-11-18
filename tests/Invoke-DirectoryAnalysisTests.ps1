@@ -1974,6 +1974,172 @@ Invoke-DirectoryTest 'attribute classification is collected and unsafe credentia
         $script:User.PSObject.Properties.Remove('employeeType')
     }
 }
+Invoke-DirectoryTest 'classification selectors retain raw evidence without overwriting canonical directory identity' {
+    $previousService = $script:ServiceAccount
+    $rawSid = [pscustomobject]@{
+        Value = $script:DomainSid + '-1003'
+    }
+    $script:ServiceAccount = $script:User.PSObject.Copy()
+    $script:ServiceAccount.ObjectClass = 'msDS-GroupManagedServiceAccount'
+    $script:ServiceAccount.ObjectGuid = '33333333-3333-3333-3333-333333333333'
+    $script:ServiceAccount.SID = $rawSid
+    $script:ServiceAccount.DistinguishedName = 'CN=IdentityFixture,OU=Services,DC=example,DC=invalid'
+    $regressions = [Collections.Generic.List[string]]::new()
+    try {
+        foreach ($mode in @('PSDrive', 'Direct')) {
+            $profile = New-DirectoryProfile
+            $profile.Analysis.DirectoryConnection = $mode
+            $profile.Policy.RequireGmsaForServiceAccounts = $true
+            $plain = Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile $profile
+            $plainService = $plain.ServiceAccounts[0]
+            Assert-DirectoryTrue ($plainService.ObjectClass -ceq 'ServiceAccount' -and
+                $plainService.SID -is [string] -and $plainService.SID -ceq $rawSid.Value
+            ) 'Ordinary collection did not establish the canonical identity control.'
+
+            $profile.AccountClassification.AttributeRules = @(
+                @{
+                    Attribute = 'objectCLASS'
+                    Type = 'Service'
+                    Value = $script:ServiceAccount.ObjectClass
+                }
+                @{
+                    Attribute = 'sId'
+                    Type = 'Service'
+                    Match = 'Regex'
+                    Value = [regex]::Escape($rawSid.Value)
+                }
+            )
+            $profile = [ADAnalyzerProfile]::new($profile).ToHashtable()
+            $script:Queries.Clear()
+            $data = Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile $profile
+            $service = $data.ServiceAccounts[0]
+            $query = @($script:Queries | Where-Object Command -eq 'Get-ADServiceAccount')[0]
+            $properties = @($query.Parameters.Properties)
+            Assert-DirectoryTrue ($properties -contains 'ObjectClass' -and $properties -contains 'SID') (
+                "$mode did not request both configured identity attributes."
+            )
+
+            $evidence = $service.AccountClassification.Evidence
+            $classEvidence = @($evidence | Where-Object Source -ceq 'Attribute:objectCLASS')
+            $sidEvidence = @($evidence | Where-Object Source -ceq 'Attribute:sId')
+            Assert-DirectoryTrue ($classEvidence.Count -eq 1 -and
+                $classEvidence[0].Value -ceq $script:ServiceAccount.ObjectClass -and
+                $sidEvidence.Count -eq 1 -and [object]::ReferenceEquals($rawSid, $sidEvidence[0].Value)
+            ) "$mode did not retain the configured raw observations and original SID reference."
+            Assert-DirectoryTrue ($service.DirectoryObjectClass -ceq $script:ServiceAccount.ObjectClass -and
+                -not [object]::ReferenceEquals($script:ServiceAccount, $service)
+            ) "$mode did not retain a detached projection with the original schema class."
+            $serialized = ConvertTo-Json -InputObject $service -Depth 20 -Compress | ConvertFrom-Json
+            Assert-DirectoryTrue (($serialized.PSObject.Properties.Name -join '|') -ieq
+                ($plainService.PSObject.Properties.Name -join '|')
+            ) "$mode added a transient property to the public account schema."
+
+            $checks = @(Test-ADAnalyzerDirectoryPolicy -Data $data -Profile $profile)
+            $classification = Select-DirectoryCheck $checks 'ACCOUNT.CLASSIFICATION' $service.DistinguishedName
+            $managed = Select-DirectoryCheck $checks 'SERVICE_ACCOUNT.MANAGED_IDENTITY' $service.DistinguishedName
+            Assert-DirectoryEqual 'Pass' $managed.Status
+            if ($service.ObjectClass -cne 'ServiceAccount' -or $service.SID -isnot [string] -or
+                $service.SID -cne $rawSid.Value -or $classification.Status -ne 'Pass') {
+                $regressions.Add($mode)
+            }
+        }
+        Assert-DirectoryTrue ($regressions.Count -eq 0) (
+            'Configured raw identity replaced canonical ObjectClass/SID or suppressed ACCOUNT.CLASSIFICATION in ' +
+            ($regressions -join ', ') + '.'
+        )
+    }
+    finally {
+        $script:ServiceAccount = $previousService
+    }
+}
+Invoke-DirectoryTest 'missing and empty raw identity selectors preserve their own classification evidence' {
+    $previousService = $script:ServiceAccount
+    $profile = New-DirectoryProfile
+    $profile.Analysis.DirectoryConnection = 'Direct'
+    $profile.AccountClassification.AttributeRules = @(
+        @{
+            Attribute = 'ObjectClass'
+            Type = 'User'
+            Value = 'ServiceAccount'
+        }
+        @{
+            Attribute = 'ObjectClass'
+            Type = 'Service'
+            Match = 'Regex'
+            Value = '^$'
+        }
+        @{
+            Attribute = 'ObjectClass'
+            Type = 'Service'
+            Value = ''
+        }
+    )
+    try {
+        $script:ServiceAccount = $script:User.PSObject.Copy()
+        $script:ServiceAccount.ObjectGuid = '33333333-3333-3333-3333-333333333333'
+        $script:ServiceAccount.SID = $script:DomainSid + '-1003'
+        $script:ServiceAccount.DistinguishedName = 'CN=NullIdentityFixture,OU=Services,DC=example,DC=invalid'
+        $script:ServiceAccount.PSObject.Properties.Remove('ObjectClass')
+        foreach ($shape in @('Missing', 'Null', 'Empty')) {
+            if ($shape -eq 'Null') {
+                $script:ServiceAccount | Add-Member -NotePropertyName ObjectClass -NotePropertyValue $null
+            }
+            elseif ($shape -eq 'Empty') {
+                $script:ServiceAccount.ObjectClass = ''
+            }
+            $data = Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile $profile
+            $result = $data.ServiceAccounts[0].AccountClassification
+            Assert-DirectoryEqual 'Service' $result.Type
+            if ($shape -eq 'Empty') {
+                Assert-DirectoryEqual 2 $result.Evidence.Count
+                Assert-DirectoryTrue ($result.Evidence[0].Value -is [string] -and $result.Evidence[0].Value -ceq '') (
+                    'The empty directory value was replaced by a fallback.'
+                )
+            }
+            else {
+                Assert-DirectoryEqual 1 $result.Evidence.Count
+                Assert-DirectoryTrue ($null -eq $result.Evidence[0].Value) (
+                    'The missing or null directory value was replaced by a fallback.'
+                )
+            }
+        }
+        $classifier = [ADAnalyzerAccountClassifier]::new()
+        $raw = [pscustomobject]@{
+            ObjectClass = 'ServiceAccount'
+        }
+        $direct = $classifier.Classify($raw, $profile)
+        $legacy = Get-ADAnalyzerAccountType -Object $raw -Profile $profile
+        Assert-DirectoryEqual 'User' $direct.Type
+        Assert-DirectoryEqual 'User' $legacy.Type
+
+        $nested = [object[]]::new(1)
+        $nested[0] = [object[]]@('fixture-class-attribute')
+        $script:ServiceAccount.ObjectClass = $nested
+        $profile.AccountClassification.AttributeRules = @(
+            @{
+                Attribute = 'ObjectClass'
+                Type = 'Service'
+                Match = 'Regex'
+                Value = '^fixture-class-attribute$'
+            }
+        )
+        $projectedControl = [pscustomobject]@{
+            ObjectClass = Get-ADAnalyzerDirectoryField $script:ServiceAccount 'ObjectClass'
+        }
+        $expected = $classifier.Classify($projectedControl, $profile)
+        $data = Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile $profile
+        $nestedEvidence = $data.ServiceAccounts[0].AccountClassification.Evidence
+        Assert-DirectoryEqual 1 $expected.Evidence.Count
+        Assert-DirectoryEqual 1 $nestedEvidence.Count
+        Assert-DirectoryEqual ($expected.Evidence[0].Value.GetType()) ($nestedEvidence[0].Value.GetType())
+        Assert-DirectoryEqual (ConvertTo-Json -InputObject $expected.Evidence[0].Value -Compress) (
+            ConvertTo-Json -InputObject $nestedEvidence[0].Value -Compress
+        )
+    }
+    finally {
+        $script:ServiceAccount = $previousService
+    }
+}
 Invoke-DirectoryTest 'multiple ACL principals and identical ACEs produce unique stable checks' {
     $profile = New-DirectoryProfile
     $data = Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext $true) -Profile $profile

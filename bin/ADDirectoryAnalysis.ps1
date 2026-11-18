@@ -321,6 +321,15 @@ class ADAnalyzerAccountClassifier {
         [hashtable]$Profile,
         [object]$Membership
     ) {
+        return $this.ClassifyObserved($Object, $Profile, $Membership, $null)
+    }
+
+    hidden [object] ClassifyObserved(
+        [object]$Object,
+        [hashtable]$Profile,
+        [object]$Membership,
+        [hashtable]$RawAttributes
+    ) {
         $classification = Get-ADAnalyzerDirectoryField $Profile 'AccountClassification' @{}
         $evidence = [System.Collections.Generic.List[object]]::new()
         $invalidRules = [System.Collections.Generic.List[string]]::new()
@@ -367,7 +376,12 @@ class ADAnalyzerAccountClassifier {
                 $invalidRules.Add($attribute)
                 continue
             }
-            $actual = Get-ADAnalyzerDirectoryField $Object $attribute
+            if ($null -ne $RawAttributes -and $RawAttributes.ContainsKey($attribute)) {
+                $actual = Get-ADAnalyzerDirectoryField $RawAttributes $attribute
+            }
+            else {
+                $actual = Get-ADAnalyzerDirectoryField $Object $attribute
+            }
             $expected = Get-ADAnalyzerDirectoryField $rule 'Value'
             $matchType = Get-ADAnalyzerDirectoryField $rule 'Match' 'Equals'
             $matched = $false
@@ -500,7 +514,8 @@ function ConvertTo-ADAnalyzerDirectoryObject {
     param(
         $Record,
         [string]$Kind,
-        [string[]]$AdditionalProperties = @()
+        [string[]]$AdditionalProperties = @(),
+        [switch]$PreserveClassificationInput
 
     )
     $result = [ordered]@{
@@ -531,9 +546,23 @@ function ConvertTo-ADAnalyzerDirectoryObject {
         $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
     }
     $result['SID'] = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $Record 'SID')
+    $rawAttributes = $null
     foreach ($name in @('BuildNumber', 'EsuStatus', 'EsuValidUntil') + $AdditionalProperties) {
-        if (Test-ADAnalyzerClassificationAttribute $name) {
+        if (-not (Test-ADAnalyzerClassificationAttribute $name)) {
+            continue
+        }
+        if ($name -notin 'ObjectClass', 'SID') {
             $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+            continue
+        }
+        if ($PreserveClassificationInput) {
+            if ($null -eq $rawAttributes) {
+                $rawAttributes = @{}
+            }
+            $rawAttributes[$name] = Get-ADAnalyzerDirectoryField $Record $name
+        }
+        else {
+            $null = Get-ADAnalyzerDirectoryField $Record $name
         }
     }
     $result['ObjectGuid'] = if ($result['ObjectGuid']) {
@@ -577,6 +606,9 @@ function ConvertTo-ADAnalyzerDirectoryObject {
         -FileTime
     $result['LegacyLapsExpiration'] = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $Record 'ms-Mcs-AdmPwdExpirationTime') `
         -FileTime
+    if ($null -ne $rawAttributes) {
+        $result['_ClassificationAttributes'] = $rawAttributes
+    }
     [pscustomobject]$result
 }
 
@@ -1164,9 +1196,14 @@ function Get-ADAnalyzerDirectoryData {
                 $coverage[$key] = 'Unreadable'
             }
         }
-        $users = @($rawUsers | ForEach-Object { ConvertTo-ADAnalyzerDirectoryObject $_ 'User' $classificationAttributes })
-        $computers = @($rawComputers | ForEach-Object { ConvertTo-ADAnalyzerDirectoryObject $_ 'Computer' $classificationAttributes })
-        $services = @($rawServices | ForEach-Object { ConvertTo-ADAnalyzerDirectoryObject $_ 'ServiceAccount' $classificationAttributes })
+        $preserveClassificationInput = 'ObjectClass' -in $classificationAttributes -or 'SID' -in $classificationAttributes
+        $projection = @{
+            AdditionalProperties = $classificationAttributes
+            PreserveClassificationInput = $preserveClassificationInput
+        }
+        $users = @($rawUsers | ForEach-Object { ConvertTo-ADAnalyzerDirectoryObject $_ 'User' @projection })
+        $computers = @($rawComputers | ForEach-Object { ConvertTo-ADAnalyzerDirectoryObject $_ 'Computer' @projection })
+        $services = @($rawServices | ForEach-Object { ConvertTo-ADAnalyzerDirectoryObject $_ 'ServiceAccount' @projection })
         $serviceIds = @($services | ForEach-Object { if ($_.SID) {
                     $_.SID
                 }
@@ -1190,6 +1227,11 @@ function Get-ADAnalyzerDirectoryData {
         $membershipGraph = [ADAnalyzerMembershipGraph]::new($groups)
         $accountClassifier = [ADAnalyzerAccountClassifier]::new()
         foreach ($object in @($users) + @($computers) + @($services)) {
+            $rawAttributes = $null
+            if ($preserveClassificationInput) {
+                $rawAttributes = Get-ADAnalyzerDirectoryField $object '_ClassificationAttributes'
+                $object.PSObject.Properties.Remove('_ClassificationAttributes')
+            }
             $sourceKey = if ($object.ObjectClass -eq 'User') {
                 'Users'
             }
@@ -1217,7 +1259,7 @@ function Get-ADAnalyzerDirectoryData {
             }
             $object | Add-Member NoteProperty SafetyMetadataStatus $safetyStatus -Force
             $membership = $membershipGraph.Resolve($object, $domainSid, $privilegedSids)
-            $type = $accountClassifier.Classify($object, $Profile, $membership)
+            $type = $accountClassifier.ClassifyObserved($object, $Profile, $membership, $rawAttributes)
             $object | Add-Member NoteProperty TransitiveGroups $membership.EffectiveSids -Force
             $object | Add-Member NoteProperty Membership $membership -Force
             $object | Add-Member NoteProperty Privileged $membership.IsPrivileged -Force
