@@ -209,6 +209,16 @@ $sameMembers = $values.Compare(@('one', 'two'), @('two', 'one'))
 
 Parsing returns the established validity and typed value fields, or the SID, name, and validity fields for principals. `Compare` defaults to equality and preserves duplicate counts. The compatibility commands retain native PowerShell observation and error behavior. Direct comparison calls surface malformed inputs as errors. Direct methods use ordinary .NET argument binding. For a Boolean carrying extended PowerShell members, direct parsing produces a Boolean value and the compatibility command retains the wrapper.
 
+The inert `ADAnalyzerGpoPolicyRecordParser` interprets stored Restricted Groups and Local Users and Groups records. It also supplies XML paths, duplicate record identities, and template source recognition. Load it through the same portable entrypoint.
+
+```powershell
+$records = [ADAnalyzerGpoPolicyRecordParser]::new()
+$restricted = $records.ParseRestrictedGroups($iniSettings)
+$localGroups = $records.ParseLocalUsersGroups($xmlFiles)
+```
+
+Methods return the existing ordered record fields with structured validity and member evidence. The local group method reads the provided XML records before interpreting group items. XML documents and readers are scoped to the operation. The legacy commands retain native error and output behavior through small adapters.
+
 ## Profiles and assessment coverage
 
 `Import-ADAnalyzerProfile` merges a JSON or restricted PSD1 data file with fresh defaults, validates input, and rejects unknown settings. External JSON profiles, saved assessment/plan/journal documents, and SAML configuration files are read as UTF-8 unless a Unicode BOM identifies another encoding. UTF-8 without a BOM is supported consistently on Windows PowerShell 5.1 and PowerShell 7. BOM-marked UTF-8, UTF-16, and UTF-32 remain supported. Convert legacy non-BOM ANSI JSON to UTF-8; its code page is ambiguous. The shared writer continues to emit a UTF-8 BOM for compatibility with 5.1 default readers. `Get-ADAnalyzerDefaultProfile` shows every supported key. Profiles control account/password/lockout thresholds, account-role evidence, approved SIDs, custom registry expectations, OS lifecycle/build rules, and remediation approvals. `profiles/default.psd1` is inert; `profiles/example.psd1` documents customization. Profile files are data and cannot contain executable PowerShell scripts.

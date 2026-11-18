@@ -1393,6 +1393,24 @@ foreach ($case in $policyValueCases.Keys) {
         Assert-Policy ($marker -cin @($output)) 'Fresh process did not execute every policy value scenario.'
     }
 }
+
+$gpoParserCases = [ordered]@{
+    Records = 41
+    Faults = 13
+    Direct = 42
+}
+foreach ($case in $gpoParserCases.Keys) {
+    Test-Policy ('GPO policy record parser API: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'GpoPolicyRecordParserFixture.ps1'
+        $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -Case $case 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw ($output -join [Environment]::NewLine)
+        }
+        $marker = 'PASS GPO policy record parser ' + $case + ' ' + $gpoParserCases[$case]
+        Assert-Policy ($marker -cin @($output)) 'Fresh process did not execute every GPO parser case.'
+    }
+}
 Write-Host ("{0} policy-analysis tests passed; {1} failed" -f $script:Passed, $script:Failed)
 if ($script:Failed) {
     throw 'Policy-analysis tests failed'

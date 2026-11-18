@@ -328,27 +328,311 @@ function Get-ADAnalyzerPresencePolicyXml {
     return (ConvertTo-ADAnalyzerSecretIndicatorXml $Node).PSBase.OuterXml
 }
 
+class ADAnalyzerGpoPolicyRecordParser {
+    ADAnalyzerGpoPolicyRecordParser() {
+    }
+
+    [string] GetXmlPath([Xml.XmlNode]$Node) {
+        $parts = @()
+        while ($Node -and $Node.PSBase.NodeType -eq [Xml.XmlNodeType]::Element) {
+            $uid = Get-ADAnalyzerXmlAttribute $Node uid
+            if ($uid) {
+                $parts = @($Node.PSBase.LocalName + '#' + $uid) + $parts
+                break
+            }
+            $position = 1
+            $sibling = $Node.PSBase.PreviousSibling
+            while ($sibling) {
+                if ($sibling.PSBase.NodeType -eq [Xml.XmlNodeType]::Element -and $sibling.PSBase.LocalName -eq $Node.PSBase.LocalName) {
+                    $position++
+                }
+                $sibling = $sibling.PSBase.PreviousSibling
+            }
+            $parts = @($Node.PSBase.LocalName + '[' + $position + ']') + $parts
+            $Node = $Node.PSBase.ParentNode
+        }
+        return $parts -join '/'
+    }
+
+    [string[]] ResolveIdentities([string[]]$Targets) {
+        $counts = $this.NewIdentityIndex()
+        $seen = $this.NewIdentityIndex()
+        foreach ($identity in $Targets) {
+            $counts[$identity] = $this.NextIdentityOrdinal($counts[$identity])
+        }
+
+        $results = [Collections.Generic.List[string]]::new()
+        foreach ($identity in $Targets) {
+            if ($this.IsUniqueIdentity($counts[$identity])) {
+                $results.Add($identity)
+                continue
+            }
+            $seen[$identity] = $this.NextIdentityOrdinal($seen[$identity])
+            $results.Add($this.DuplicateIdentity($identity, $seen[$identity]))
+        }
+        return $results.ToArray()
+    }
+
+    hidden [Collections.Generic.Dictionary[string, int]] NewIdentityIndex() {
+        return [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::OrdinalIgnoreCase)
+    }
+
+    hidden [int] NextIdentityOrdinal([object]$Current) {
+        if ($null -eq $Current) {
+            return 1
+        }
+        return $Current + 1
+    }
+
+    hidden [bool] IsUniqueIdentity([object]$Count) {
+        return $Count -eq 1
+    }
+
+    hidden [string] DuplicateIdentity([string]$Identity, [int]$Occurrence) {
+        return $Identity + '/duplicate/' + $Occurrence.ToString([Globalization.CultureInfo]::InvariantCulture)
+    }
+
+    [bool] IsSecurityTemplateSource([string]$Scope, [string]$Source) {
+        $relative = ([string]$Source).Replace('\', '/')
+        return ($Scope -ieq 'Computer' -and $relative -ieq 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf') -or
+        ($Scope -ieq 'User' -and $relative -ieq 'User/Microsoft/Windows NT/SecEdit/GptTmpl.inf')
+    }
+
+    [object[]] ParseRestrictedGroups([object[]]$IniSettings) {
+        $parser = $this
+        $selected = @($IniSettings | Where-Object {
+            $parser.IsRestrictedGroupSection($_.Section) -and $parser.IsSecurityTemplateSource($_.Scope, $_.Source)
+        })
+        $results = [Collections.Generic.List[object]]::new()
+        foreach ($setting in $selected) {
+            $match = $this.MatchRestrictedGroup([string]$setting.Name)
+            $results.Add($this.ParseRestrictedGroupRecord(@{
+                Setting = $setting
+                Match = $match
+            }))
+        }
+        return $results.ToArray()
+    }
+
+    hidden [bool] IsRestrictedGroupSection([object]$Section) {
+        return $Section -ieq 'Group Membership'
+    }
+
+    hidden [Text.RegularExpressions.Match] MatchRestrictedGroup([string]$Name) {
+        return [regex]::Match($Name,
+            '^(?<group>.+)__(?<mode>Members|Memberof)$',
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    }
+
+    hidden [pscustomobject] ParseRestrictedGroupRecord([hashtable]$InputFrame) {
+        $setting = $InputFrame.Setting
+        $match = $InputFrame.Match
+        $values = [ADAnalyzerPolicyValueSemantics]::new()
+        $valid = $match.Success
+        $group = $null
+        $members = @()
+        $errorText = $null
+        try {
+            if ($valid) {
+                $group = $values.ParsePrincipal($match.Groups['group'].Value)
+                $valid = $group.Valid
+                if (-not [string]::IsNullOrWhiteSpace([string]$setting.Value)) {
+                    $members = @(
+                        Split-AnalyzerPolicyCsv ([string]$setting.Value) | ForEach-Object {
+                            $_
+                        } | ForEach-Object {
+                            $values.ParsePrincipal($_)
+                        }
+                    )
+                    if (@($members | Where-Object { -not $_.Valid }).Count) {
+                        $valid = $false
+                    }
+                }
+            }
+        }
+        catch {
+            $valid = $false
+            $errorText = 'Malformed group membership value'
+        }
+        return [pscustomobject]@{
+            Scope = $setting.Scope
+            Source = $setting.Source
+            GroupSid = $group.Sid
+            GroupName = $group.Name
+            Mode = $match.Groups['mode'].Value
+            Members = $members
+            Valid = $valid
+            Error = $errorText
+            SettingName = $setting.Name
+        }
+    }
+
+    hidden [object[]] ReadXmlRecords([object[]]$XmlFiles) {
+        $records = [Collections.Generic.List[object]]::new()
+        foreach ($file in @($XmlFiles)) {
+            $record = $null
+            try {
+                $record = $this.ReadXmlText(@{
+                    File = $file
+                    Text = [string]$file.Xml
+                })
+            }
+            catch {
+                $record = $this.InvalidXmlRecord(@{
+                    File = $file
+                })
+            }
+            $records.Add($record)
+        }
+        return $records.ToArray()
+    }
+
+    hidden [pscustomobject] ReadXmlText([hashtable]$InputFrame) {
+        try {
+            $settings = [Xml.XmlReaderSettings]::new()
+            $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+            $settings.XmlResolver = $null
+            $text = [IO.StringReader]::new($InputFrame.Text)
+            $reader = [Xml.XmlReader]::Create($text, $settings)
+            $doc = $null
+            try {
+                $doc = [xml]::new()
+                $doc.XmlResolver = $null
+                $doc.Load($reader)
+            }
+            finally {
+                $reader.Dispose()
+                $text.Dispose()
+            }
+            return [pscustomobject]@{
+                File = $InputFrame.File
+                Document = $doc
+                Valid = $true
+            }
+        }
+        catch {
+            return $this.InvalidXmlRecord($InputFrame)
+        }
+    }
+
+    hidden [pscustomobject] InvalidXmlRecord([hashtable]$InputFrame) {
+        return [pscustomobject]@{
+            File = $InputFrame.File
+            Document = $null
+            Valid = $false
+        }
+    }
+
+    [object[]] ParseLocalUsersGroups([object[]]$XmlFiles) {
+        # All file reads precede group traversal, including invalid records.
+        $records = $this.ReadXmlRecords($XmlFiles)
+        $results = [Collections.Generic.List[object]]::new()
+        foreach ($record in $records) {
+            foreach ($item in $this.SelectLocalGroupItems(@{ Record = $record })) {
+                $results.Add($this.ParseLocalGroupItem(@{
+                    Record = $record
+                    Item = $item
+                }))
+            }
+        }
+        return $results.ToArray()
+    }
+
+    hidden [object[]] SelectLocalGroupItems([hashtable]$InputFrame) {
+        $record = $InputFrame.Record
+        if (-not $record.Valid) {
+            return @()
+        }
+        $root = $record.Document.PSBase.DocumentElement
+        if ($root.PSBase.LocalName -ine 'Groups') {
+            return @()
+        }
+        return @($root.PSBase.ChildNodes | Where-Object {
+            $_.PSBase.NodeType -eq [Xml.XmlNodeType]::Element -and
+                $_.PSBase.LocalName -in 'Group', 'User'
+        })
+    }
+
+    hidden [pscustomobject] ParseLocalGroupItem([hashtable]$InputFrame) {
+        $record = $InputFrame.Record
+        $item = $InputFrame.Item
+        $values = [ADAnalyzerPolicyValueSemantics]::new()
+
+        $properties = $item.SelectSingleNode('./*[local-name()="Properties"]')
+        $members = @()
+        foreach ($member in @($(if ($properties) {
+                        $properties.SelectNodes('./*[local-name()="Members"]/*[local-name()="Member"]')
+                    }))) {
+            $sid = Get-ADAnalyzerXmlAttribute $member sid
+            $principal = $values.ParsePrincipal($(if ($sid) {
+                    $sid
+                }
+                else {
+                    Get-ADAnalyzerXmlAttribute $member name
+                }))
+            if ($sid -and -not $values.IsSid($sid)) {
+                $principal.Valid = $false
+            }
+            $members += [pscustomobject]@{
+                Sid = $principal.Sid
+                Name = $principal.Name
+                Valid = $principal.Valid
+                Action = (Get-ADAnalyzerXmlAttribute $member action).ToUpperInvariant()
+            }
+        }
+        $action = (Get-ADAnalyzerXmlAttribute $properties action).ToUpperInvariant()
+        $filters = $item.SelectSingleNode('./*[local-name()="Filters"]')
+        $disabled = Get-ADAnalyzerXmlAttribute $item disabled '0'
+        $targetSid = Get-ADAnalyzerXmlAttribute $properties groupSid
+        if ($item.PSBase.LocalName -eq 'User') {
+            $targetSid = Get-ADAnalyzerXmlAttribute $properties userSid (Get-ADAnalyzerXmlAttribute $properties sid)
+        }
+        $targetName = Get-ADAnalyzerXmlAttribute $properties $(if ($item.PSBase.LocalName -eq 'Group') {
+                'groupName'
+            }
+            else {
+                'userName'
+            })
+        $sidValid = -not $targetSid -or $values.IsSid($targetSid)
+        $result = [pscustomobject]@{
+            Scope = $record.File.Scope
+            Source = $record.File.Path
+            Kind = $item.PSBase.LocalName
+            Uid = (Get-ADAnalyzerXmlAttribute $item uid)
+            ItemPath = $this.GetXmlPath($item)
+            Name = $targetName
+            Sid = $targetSid
+            Action = $action
+            Disabled = ($disabled -in '1', 'true')
+            AccountDisabled = (Get-ADAnalyzerXmlAttribute $properties disabled)
+            PasswordNeverExpires = (Get-ADAnalyzerXmlAttribute $properties neverExpires)
+            Targeted = ($null -ne $filters -and $filters.PSBase.HasChildNodes)
+            Filters = (Get-ADAnalyzerPresencePolicyXml $filters)
+            DeleteAllUsers = (Get-ADAnalyzerXmlAttribute $properties deleteAllUsers '0') -in '1', 'true'
+            DeleteAllGroups = (Get-ADAnalyzerXmlAttribute $properties deleteAllGroups '0') -in '1', 'true'
+            RemovePolicy = (Get-ADAnalyzerXmlAttribute $item removePolicy '0') -in '1', 'true'
+            Members = $members
+            Valid = ($null -ne $properties -and
+                $sidValid -and
+                $disabled -in '0',
+                '1',
+                'true',
+                'false' -and
+                $action -in 'C',
+                'U',
+                'R',
+                'D' -and
+                @($members | Where-Object { -not $_.Valid -or
+                        $_.Action -notin 'ADD',
+                        'REMOVE' }).Count -eq 0)
+        }
+        return $result
+    }
+}
+
 function Get-ADAnalyzerPolicyXmlPath {
     param([Xml.XmlNode]$Node)
-    $parts = @()
-    while ($Node -and $Node.PSBase.NodeType -eq [Xml.XmlNodeType]::Element) {
-        $uid = Get-ADAnalyzerXmlAttribute $Node uid
-        if ($uid) {
-            $parts = @($Node.PSBase.LocalName + '#' + $uid) + $parts
-            break
-        }
-        $position = 1
-        $sibling = $Node.PSBase.PreviousSibling
-        while ($sibling) {
-            if ($sibling.PSBase.NodeType -eq [Xml.XmlNodeType]::Element -and $sibling.PSBase.LocalName -eq $Node.PSBase.LocalName) {
-                $position++
-            }
-            $sibling = $sibling.PSBase.PreviousSibling
-        }
-        $parts = @($Node.PSBase.LocalName + '[' + $position + ']') + $parts
-        $Node = $Node.PSBase.ParentNode
-    }
-    return $parts -join '/'
+    return [ADAnalyzerGpoPolicyRecordParser]::new().GetXmlPath($Node)
 }
 
 function Join-ADAnalyzerPolicyIdentity {
@@ -363,28 +647,21 @@ function Join-ADAnalyzerPolicyIdentity {
 
 function Resolve-ADAnalyzerPolicyIdentityCollisions {
     param([string[]]$Targets)
-    $counts = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::OrdinalIgnoreCase)
-    $seen = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::OrdinalIgnoreCase)
+    $parser = [ADAnalyzerGpoPolicyRecordParser]::new()
+    $counts = $parser.NewIdentityIndex()
+    $seen = $parser.NewIdentityIndex()
+
+    # Native indexing retains the original handling of null identity elements.
     foreach ($identity in $Targets) {
-        if ($counts.ContainsKey($identity)) {
-            $counts[$identity]++
-        }
-        else {
-            $counts[$identity] = 1
-        }
+        $counts[$identity] = $parser.NextIdentityOrdinal($counts[$identity])
     }
     foreach ($identity in $Targets) {
-        if ($counts[$identity] -eq 1) {
+        if ($parser.IsUniqueIdentity($counts[$identity])) {
             $identity
             continue
         }
-        if ($seen.ContainsKey($identity)) {
-            $seen[$identity]++
-        }
-        else {
-            $seen[$identity] = 1
-        }
-        $identity + '/duplicate/' + $seen[$identity].ToString([Globalization.CultureInfo]::InvariantCulture)
+        $seen[$identity] = $parser.NextIdentityOrdinal($seen[$identity])
+        $parser.DuplicateIdentity($identity, $seen[$identity])
     }
 }
 
@@ -497,85 +774,41 @@ function Test-ADAnalyzerSecurityTemplateSource {
         [string]$Source
 
     )
-    $relative = ([string]$Source).Replace('\', '/')
-    ($Scope -ieq 'Computer' -and $relative -ieq 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf') -or
-    ($Scope -ieq 'User' -and $relative -ieq 'User/Microsoft/Windows NT/SecEdit/GptTmpl.inf')
+    return [ADAnalyzerGpoPolicyRecordParser]::new().IsSecurityTemplateSource($Scope, $Source)
 }
 
 function ConvertFrom-ADAnalyzerRestrictedGroups {
     [CmdletBinding()]
     param([object[]]$IniSettings)
-    foreach ($setting in @($IniSettings | Where-Object { $_.Section -ieq 'Group Membership' -and
-                (Test-ADAnalyzerSecurityTemplateSource `
-                    -Scope $_.Scope `
-                    -Source $_.Source) })) {
-        $match = [regex]::Match([string]$setting.Name,
-            '^(?<group>.+)__(?<mode>Members|Memberof)$',
-            [Text.RegularExpressions.RegexOptions]::IgnoreCase)
-        $valid = $match.Success
-        $group = $null
-        $members = @()
-        $errorText = $null
-        try {
-            if ($valid) {
-                $group = ConvertFrom-ADAnalyzerPolicyPrincipal $match.Groups['group'].Value
-                $valid = $group.Valid
-                if (-not [string]::IsNullOrWhiteSpace([string]$setting.Value)) {
-                    $members = @(Split-AnalyzerPolicyCsv ([string]$setting.Value) | ForEach-Object { $_ } | ForEach-Object { ConvertFrom-ADAnalyzerPolicyPrincipal $_ })
-                    if (@($members | Where-Object { -not $_.Valid }).Count) {
-                        $valid = $false
-                    }
-                }
-            }
-        }
-        catch {
-            $valid = $false
-            $errorText = 'Malformed group membership value'
-        }
-        [pscustomobject]@{
-            Scope = $setting.Scope
-            Source = $setting.Source
-            GroupSid = $group.Sid
-            GroupName = $group.Name
-            Mode = $match.Groups['mode'].Value
-            Members = $members
-            Valid = $valid
-            Error = $errorText
-            SettingName = $setting.Name
-        }
+    $parser = [ADAnalyzerGpoPolicyRecordParser]::new()
+    $selected = @($IniSettings | Where-Object {
+        $parser.IsRestrictedGroupSection($_.Section) -and
+        (Test-ADAnalyzerSecurityTemplateSource -Scope $_.Scope -Source $_.Source)
+    })
+    foreach ($setting in $selected) {
+        # Conversion and assignment retain their native command-scope continuation.
+        $match = $parser.MatchRestrictedGroup([string]$setting.Name)
+        $parser.ParseRestrictedGroupRecord(@{
+            Setting = $setting
+            Match = $match
+        })
     }
 }
 
 function Get-ADAnalyzerPolicyXmlRecords {
     param([object[]]$XmlFiles)
+    $parser = [ADAnalyzerGpoPolicyRecordParser]::new()
     foreach ($file in @($XmlFiles)) {
         try {
-            $settings = [Xml.XmlReaderSettings]::new()
-            $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
-            $settings.XmlResolver = $null
-            $text = [IO.StringReader]::new([string]$file.Xml)
-            $reader = [Xml.XmlReader]::Create($text, $settings)
-            try {
-                $doc = [xml]::new()
-                $doc.XmlResolver = $null
-                $doc.Load($reader)
-            }
-            finally {
-                $reader.Dispose()
-                $text.Dispose()
-            }
-            [pscustomobject]@{
+            $parser.ReadXmlText(@{
                 File = $file
-                Document = $doc
-                Valid = $true
-            }
+                Text = [string]$file.Xml
+            })
         }
         catch {
-            [pscustomobject]@{
+            $parser.InvalidXmlRecord(@{
                 File = $file
-                Document = $null
-                Valid = $false
-            }
+            })
         }
     }
 }
@@ -583,84 +816,14 @@ function Get-ADAnalyzerPolicyXmlRecords {
 function ConvertFrom-ADAnalyzerLocalUsersGroups {
     [CmdletBinding()]
     param([object[]]$XmlFiles)
+    $parser = [ADAnalyzerGpoPolicyRecordParser]::new()
     foreach ($record in @(Get-ADAnalyzerPolicyXmlRecords $XmlFiles)) {
-        if (-not $record.Valid) {
-            continue
-        }
-        if ($record.Document.PSBase.DocumentElement.PSBase.LocalName -ine 'Groups') {
-            continue
-        }
-        foreach ($item in @($record.Document.PSBase.DocumentElement.PSBase.ChildNodes | Where-Object { $_.PSBase.NodeType -eq [Xml.XmlNodeType]::Element -and
-                    $_.PSBase.LocalName -in 'Group',
-                    'User' })) {
-            $properties = $item.SelectSingleNode('./*[local-name()="Properties"]')
-            $members = @()
-            foreach ($member in @($(if ($properties) {
-                            $properties.SelectNodes('./*[local-name()="Members"]/*[local-name()="Member"]')
-                        }))) {
-                $sid = Get-ADAnalyzerXmlAttribute $member sid
-                $principal = ConvertFrom-ADAnalyzerPolicyPrincipal $(if ($sid) {
-                        $sid
-                    }
-                    else {
-                        Get-ADAnalyzerXmlAttribute $member name
-                    })
-                if ($sid -and -not (Test-ADAnalyzerPolicySid $sid)) {
-                    $principal.Valid = $false
-                }
-                $members += [pscustomobject]@{
-                    Sid = $principal.Sid
-                    Name = $principal.Name
-                    Valid = $principal.Valid
-                    Action = (Get-ADAnalyzerXmlAttribute $member action).ToUpperInvariant()
-                }
-            }
-            $action = (Get-ADAnalyzerXmlAttribute $properties action).ToUpperInvariant()
-            $filters = $item.SelectSingleNode('./*[local-name()="Filters"]')
-            $disabled = Get-ADAnalyzerXmlAttribute $item disabled '0'
-            $targetSid = Get-ADAnalyzerXmlAttribute $properties groupSid
-            if ($item.PSBase.LocalName -eq 'User') {
-                $targetSid = Get-ADAnalyzerXmlAttribute $properties userSid (Get-ADAnalyzerXmlAttribute $properties sid)
-            }
-            $targetName = Get-ADAnalyzerXmlAttribute $properties $(if ($item.PSBase.LocalName -eq 'Group') {
-                    'groupName'
-                }
-                else {
-                    'userName'
-                })
-            $sidValid = -not $targetSid -or (Test-ADAnalyzerPolicySid $targetSid)
-            [pscustomobject]@{
-                Scope = $record.File.Scope
-                Source = $record.File.Path
-                Kind = $item.PSBase.LocalName
-                Uid = (Get-ADAnalyzerXmlAttribute $item uid)
-                ItemPath = (Get-ADAnalyzerPolicyXmlPath $item)
-                Name = $targetName
-                Sid = $targetSid
-                Action = $action
-                Disabled = ($disabled -in '1', 'true')
-                AccountDisabled = (Get-ADAnalyzerXmlAttribute $properties disabled)
-                PasswordNeverExpires = (Get-ADAnalyzerXmlAttribute $properties neverExpires)
-                Targeted = ($null -ne $filters -and $filters.PSBase.HasChildNodes)
-                Filters = (Get-ADAnalyzerPresencePolicyXml $filters)
-                DeleteAllUsers = (Get-ADAnalyzerXmlAttribute $properties deleteAllUsers '0') -in '1', 'true'
-                DeleteAllGroups = (Get-ADAnalyzerXmlAttribute $properties deleteAllGroups '0') -in '1', 'true'
-                RemovePolicy = (Get-ADAnalyzerXmlAttribute $item removePolicy '0') -in '1', 'true'
-                Members = $members
-                Valid = ($null -ne $properties -and
-                    $sidValid -and
-                    $disabled -in '0',
-                    '1',
-                    'true',
-                    'false' -and
-                    $action -in 'C',
-                    'U',
-                    'R',
-                    'D' -and
-                    @($members | Where-Object { -not $_.Valid -or
-                            $_.Action -notin 'ADD',
-                            'REMOVE' }).Count -eq 0)
-            }
+        # Emit each item before reading metadata for the next file item.
+        foreach ($item in $parser.SelectLocalGroupItems(@{ Record = $record })) {
+            $parser.ParseLocalGroupItem(@{
+                Record = $record
+                Item = $item
+            })
         }
     }
 }
