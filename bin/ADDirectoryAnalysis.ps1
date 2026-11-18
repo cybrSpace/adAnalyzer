@@ -473,6 +473,178 @@ function Invoke-ADAnalyzerDirectoryQuery {
     }
 }
 
+class ADAnalyzerDirectoryObjectProjector {
+    ADAnalyzerDirectoryObjectProjector() {
+    }
+
+    [object] Project([object]$Record, [string]$Kind) {
+        return $this.Project($Record, $Kind, @())
+    }
+
+    [object] Project([object]$Record, [string]$Kind, [string[]]$AdditionalProperties) {
+        $ErrorActionPreference = 'Stop'
+        $result = $this.BeginObject($Kind)
+        foreach ($name in $this.StandardProperties()) {
+            $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+        }
+        $result['SID'] = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $Record 'SID')
+        foreach ($name in @('BuildNumber', 'EsuStatus', 'EsuValidUntil') + $AdditionalProperties) {
+            if (-not (Test-ADAnalyzerClassificationAttribute $name)) {
+                continue
+            }
+            if ($name -notin 'ObjectClass', 'SID') {
+                $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+                continue
+            }
+            $null = Get-ADAnalyzerDirectoryField $Record $name
+        }
+        $result['ObjectGuid'] = if ($result['ObjectGuid']) {
+            [string]$result['ObjectGuid']
+        }
+        else {
+            $null
+        }
+        $result['DirectoryObjectClass'] = [string](Get-ADAnalyzerDirectoryField $Record 'ObjectClass')
+        foreach ($name in @('WhenChanged', 'WhenCreated', 'LastLogonDate', 'PasswordLastSet')) {
+            $result[$name] = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $Record $name)
+        }
+        $result['PasswordNeverExpires'] = Get-ADAnalyzerDirectoryField $Record 'PasswordNeverExpires'
+        $result['SIDHistory'] = @(Get-ADAnalyzerDirectoryField $Record 'SIDHistory' @() | ForEach-Object { ConvertTo-ADAnalyzerSid $_ })
+        $resultantDn = @(Get-ADAnalyzerDirectoryField $Record 'msDS-ResultantPSO' @())
+        $result['ResultantPasswordPolicyDN'] = $this.ResultantPolicyDn($resultantDn)
+        $result['AllowedToDelegateTo'] = @(Get-ADAnalyzerDirectoryField $Record 'msDS-AllowedToDelegateTo' @())
+        $result['SupportedEncryptionTypes'] = Get-ADAnalyzerDirectoryField $Record 'msDS-SupportedEncryptionTypes'
+        $result['Protected'] = if ($null -eq $result['ProtectedFromAccidentalDeletion']) {
+            $null
+        }
+        else {
+            [bool]$result['ProtectedFromAccidentalDeletion']
+        }
+        $uac = if ($null -ne $result['UserAccountControl']) {
+            [long]$result['UserAccountControl']
+        }
+        else {
+            0
+        }
+        $result['IsDomainController'] = $Kind -eq 'Computer' -and $this.HasControllerRole(@{
+                UserAccountControl = $uac
+                PrimaryGroupID = $result['PrimaryGroupID']
+            })
+        $descriptor = Get-ADAnalyzerDirectoryField $Record 'msDS-AllowedToActOnBehalfOfOtherIdentity'
+        $result['ResourceBasedDelegation'] = @($this.ProjectAces($descriptor, [string]$result['DistinguishedName'], 'RBCD'))
+        $result['LapsExpiration'] = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $Record 'msLAPS-PasswordExpirationTime') `
+            -FileTime
+        $result['LegacyLapsExpiration'] = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $Record 'ms-Mcs-AdmPwdExpirationTime') `
+            -FileTime
+        return $this.FinishObject($result, $null)
+    }
+
+    [object[]] ProjectAces([object]$Descriptor, [string]$Target, [string]$TargetType) {
+        $ErrorActionPreference = 'Stop'
+        if ($null -eq $Descriptor) {
+            return @()
+        }
+        if ($Descriptor -is [byte[]]) {
+            $security = [System.DirectoryServices.ActiveDirectorySecurity]::new()
+            $security.SetSecurityDescriptorBinaryForm($Descriptor)
+            $Descriptor = $security
+        }
+        $access = if ($Descriptor.PSObject.Methods['GetAccessRules']) {
+            $Descriptor.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
+        }
+        else {
+            Get-ADAnalyzerDirectoryField $Descriptor 'Access' @()
+        }
+        $rows = [Collections.Generic.List[object]]::new()
+        foreach ($ace in $access) {
+            $rows.Add($this.CreateAce(@{
+                Target = $Target
+                TargetType = $TargetType
+                IdentitySid = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $ace 'IdentityReference' (Get-ADAnalyzerDirectoryField $ace 'IdentitySid'))
+                Rights = [string](Get-ADAnalyzerDirectoryField $ace 'ActiveDirectoryRights' (Get-ADAnalyzerDirectoryField $ace 'Rights'))
+                AccessControlType = [string](Get-ADAnalyzerDirectoryField $ace 'AccessControlType')
+                ObjectType = [string](Get-ADAnalyzerDirectoryField $ace 'ObjectType')
+                InheritedObjectType = [string](Get-ADAnalyzerDirectoryField $ace 'InheritedObjectType')
+                IsInherited = [bool](Get-ADAnalyzerDirectoryField $ace 'IsInherited' $false)
+                PropagationFlags = [string](Get-ADAnalyzerDirectoryField $ace 'PropagationFlags' 'None')
+                InheritanceType = [string](Get-ADAnalyzerDirectoryField $ace 'InheritanceType' 'None')
+            }))
+        }
+        return $rows.ToArray()
+    }
+
+    hidden [string[]] StandardProperties() {
+        return @(
+            'ObjectGuid'
+            'DistinguishedName'
+            'SamAccountName'
+            'Name'
+            'Enabled'
+            'AdminCount'
+            'PrimaryGroupID'
+            'IsCriticalSystemObject'
+            'ProtectedFromAccidentalDeletion'
+            'ServicePrincipalNames'
+            'MemberOf'
+            'Members'
+            'ManagedBy'
+            'DNSHostName'
+            'OperatingSystem'
+            'OperatingSystemVersion'
+            'UserAccountControl'
+            'TrustedForDelegation'
+            'PrincipalsAllowedToDelegateToAccount'
+            'PrincipalsAllowedToRetrieveManagedPassword'
+            'ManagedPasswordIntervalInDays'
+            'Description'
+        )
+    }
+
+    hidden [Collections.Specialized.OrderedDictionary] BeginObject([string]$Kind) {
+        return [ordered]@{
+            ObjectClass = $Kind
+        }
+    }
+
+    hidden [object] ResultantPolicyDn([object[]]$Candidates) {
+        if ($Candidates.Count -eq 1 -and
+            $Candidates[0] -is [string] -and
+            -not [string]::IsNullOrWhiteSpace($Candidates[0])) {
+            return $Candidates[0]
+        }
+        return $null
+    }
+
+    hidden [bool] HasControllerRole([hashtable]$Observed) {
+        return ($Observed.UserAccountControl -band 8192) -ne 0 -or $Observed.PrimaryGroupID -in @(516, 521)
+    }
+
+    hidden [object] FinishObject(
+        [Collections.Specialized.OrderedDictionary]$Result,
+        [hashtable]$RawAttributes
+    ) {
+        if ($null -ne $RawAttributes) {
+            $Result['_ClassificationAttributes'] = $RawAttributes
+        }
+        return [pscustomobject]$Result
+    }
+
+    hidden [object] CreateAce([hashtable]$Observed) {
+        return [pscustomobject]@{
+            Target = $Observed.Target
+            TargetType = $Observed.TargetType
+            IdentitySid = $Observed.IdentitySid
+            Rights = $Observed.Rights
+            AccessControlType = $Observed.AccessControlType
+            ObjectType = $Observed.ObjectType
+            InheritedObjectType = $Observed.InheritedObjectType
+            IsInherited = $Observed.IsInherited
+            PropagationFlags = $Observed.PropagationFlags
+            InheritanceType = $Observed.InheritanceType
+        }
+    }
+}
+
 function Get-ADAnalyzerSecurityAces {
     param(
         $Descriptor,
@@ -480,6 +652,8 @@ function Get-ADAnalyzerSecurityAces {
         [string]$TargetType
 
     )
+    # Native observations and conversions keep the caller's error scope.
+    $projector = [ADAnalyzerDirectoryObjectProjector]::new()
     if ($null -eq $Descriptor) {
         return
     }
@@ -495,7 +669,7 @@ function Get-ADAnalyzerSecurityAces {
         Get-ADAnalyzerDirectoryField $Descriptor 'Access' @()
     }
     foreach ($ace in $access) {
-        [pscustomobject]@{
+        $projector.CreateAce(@{
             Target = $Target
             TargetType = $TargetType
             IdentitySid = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $ace 'IdentityReference' (Get-ADAnalyzerDirectoryField $ace 'IdentitySid'))
@@ -506,7 +680,7 @@ function Get-ADAnalyzerSecurityAces {
             IsInherited = [bool](Get-ADAnalyzerDirectoryField $ace 'IsInherited' $false)
             PropagationFlags = [string](Get-ADAnalyzerDirectoryField $ace 'PropagationFlags' 'None')
             InheritanceType = [string](Get-ADAnalyzerDirectoryField $ace 'InheritanceType' 'None')
-        }
+        })
     }
 }
 
@@ -518,31 +692,10 @@ function ConvertTo-ADAnalyzerDirectoryObject {
         [switch]$PreserveClassificationInput
 
     )
-    $result = [ordered]@{
-        ObjectClass = $Kind
-    }
-    foreach ($name in @('ObjectGuid',
-            'DistinguishedName',
-            'SamAccountName',
-            'Name',
-            'Enabled',
-            'AdminCount',
-            'PrimaryGroupID',
-            'IsCriticalSystemObject',
-            'ProtectedFromAccidentalDeletion',
-            'ServicePrincipalNames',
-            'MemberOf',
-            'Members',
-            'ManagedBy',
-            'DNSHostName',
-            'OperatingSystem',
-            'OperatingSystemVersion',
-            'UserAccountControl',
-            'TrustedForDelegation',
-            'PrincipalsAllowedToDelegateToAccount',
-            'PrincipalsAllowedToRetrieveManagedPassword',
-            'ManagedPasswordIntervalInDays',
-            'Description')) {
+    # Native observations and conversions keep the caller's error scope.
+    $projector = [ADAnalyzerDirectoryObjectProjector]::new()
+    $result = $projector.BeginObject($Kind)
+    foreach ($name in $projector.StandardProperties()) {
         $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
     }
     $result['SID'] = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $Record 'SID')
@@ -578,14 +731,7 @@ function ConvertTo-ADAnalyzerDirectoryObject {
     $result['PasswordNeverExpires'] = Get-ADAnalyzerDirectoryField $Record 'PasswordNeverExpires'
     $result['SIDHistory'] = @(Get-ADAnalyzerDirectoryField $Record 'SIDHistory' @() | ForEach-Object { ConvertTo-ADAnalyzerSid $_ })
     $resultantDn = @(Get-ADAnalyzerDirectoryField $Record 'msDS-ResultantPSO' @())
-    $result['ResultantPasswordPolicyDN'] = if ($resultantDn.Count -eq 1 -and
-        $resultantDn[0] -is [string] -and
-        -not [string]::IsNullOrWhiteSpace($resultantDn[0])) {
-        $resultantDn[0]
-    }
-    else {
-        $null
-    }
+    $result['ResultantPasswordPolicyDN'] = $projector.ResultantPolicyDn($resultantDn)
     $result['AllowedToDelegateTo'] = @(Get-ADAnalyzerDirectoryField $Record 'msDS-AllowedToDelegateTo' @())
     $result['SupportedEncryptionTypes'] = Get-ADAnalyzerDirectoryField $Record 'msDS-SupportedEncryptionTypes'
     $result['Protected'] = if ($null -eq $result['ProtectedFromAccidentalDeletion']) {
@@ -600,16 +746,16 @@ function ConvertTo-ADAnalyzerDirectoryObject {
     else {
         0
     }
-    $result['IsDomainController'] = $Kind -eq 'Computer' -and (($uac -band 8192) -ne 0 -or $result['PrimaryGroupID'] -in @(516, 521))
+    $result['IsDomainController'] = $Kind -eq 'Computer' -and $projector.HasControllerRole(@{
+            UserAccountControl = $uac
+            PrimaryGroupID = $result['PrimaryGroupID']
+        })
     $result['ResourceBasedDelegation'] = @(Get-ADAnalyzerSecurityAces (Get-ADAnalyzerDirectoryField $Record 'msDS-AllowedToActOnBehalfOfOtherIdentity') ([string]$result['DistinguishedName']) 'RBCD')
     $result['LapsExpiration'] = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $Record 'msLAPS-PasswordExpirationTime') `
         -FileTime
     $result['LegacyLapsExpiration'] = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $Record 'ms-Mcs-AdmPwdExpirationTime') `
         -FileTime
-    if ($null -ne $rawAttributes) {
-        $result['_ClassificationAttributes'] = $rawAttributes
-    }
-    [pscustomobject]$result
+    $projector.FinishObject($result, $rawAttributes)
 }
 
 function Get-ADAnalyzerHostData {

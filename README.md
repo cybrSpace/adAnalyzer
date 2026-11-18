@@ -149,6 +149,9 @@ $accountClassifier = [ADAnalyzerAccountClassifier]::new()
 $classification = $accountClassifier.Classify($account, $profile, $membership)
 $directoryEvaluator = [ADAnalyzerDirectoryPolicyEvaluator]::new()
 $checks = $directoryEvaluator.Evaluate($directorySnapshot, $profile)
+$directoryProjector = [ADAnalyzerDirectoryObjectProjector]::new()
+$accountProjection = $directoryProjector.Project($directoryRecord, 'User')
+$accessRules = $directoryProjector.ProjectAces($directoryDescriptor, $distinguishedName, 'DomainRoot')
 
 $secretIndicator = [ADAnalyzerSecretIndicator]::new()
 $safeRecord = $secretIndicator.ProjectRecord($settingRecord)
@@ -164,6 +167,8 @@ $rawValue = $projector.GetValue($record, @('Primary', 'Fallback'), $null)
 ```
 
 `ADAnalyzerAccountClassifier` owns schema, OU, group and attribute classification, including conflicting and invalid-rule evidence. Its inert constructor retains no configuration or results; pass a raw profile to `Classify(account, profile)` and optional membership to `Classify(account, profile, membership)`. `Classify(account)` uses no configured selectors. Each call creates fresh result containers; raw attribute evidence retains its existing value types and references. It does not normalize caller profiles or collect directory data. The modern collector reuses one classifier; legacy and remediation callers retain the thin `Get-ADAnalyzerAccountType` adapter.
+
+`ADAnalyzerDirectoryObjectProjector` turns supplied directory records and access control rules into the typed records used by assessment. Its constructor is inert. `Project(record, kind)` returns a new projected account with normalized identity, dates, delegation and lifecycle fields. The overload `Project(record, kind, additionalProperties)` accepts an array of additional directory attributes. `ProjectAces(descriptor, target, targetType)` returns access control entries from a supplied descriptor. Binary directory descriptors use the Windows .NET directory security API. A failed required cast or descriptor load terminates a direct projection. Existing command adapters retain native observation order, error capture, and streamed ACEs.
 
 `ADAnalyzerProfile` owns fresh defaults, copying, merging, validation, and explicit JSON/PSD1 loading. `[ADAnalyzerProfile]::new()` and `::new(overrides)` construct independent normalized configuration without file reads or native-module imports. `[ADAnalyzerProfile]::Load(path)` reads a file explicitly and returns a profile instance; `ToHashtable()` returns a detached configuration snapshot for existing APIs. `DefaultSnapshot()` returns fresh raw defaults. Raw default policy thresholds retain their `Int32` contract, while normalization retains the established `Int64` policy values. Native JSON/CLIXML serialization of the profile object omits its private configuration state. Existing default/import commands delegate to these methods; the legacy merge adapter retains its in-place, no-output contract.
 

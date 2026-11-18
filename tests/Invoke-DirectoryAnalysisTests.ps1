@@ -2503,6 +2503,33 @@ foreach ($case in @(
     }
 }
 
+$projectorCases = [ordered]@{
+    FullLoader = 2
+    Standalone = 2
+    Objects = 6
+    Aces = 5
+    Native = 4
+}
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    $projectorCases.Add('Windows', 3)
+}
+else {
+    Write-Host 'SKIP Windows directory object projector descriptors'
+}
+foreach ($case in $projectorCases.Keys) {
+    Invoke-DirectoryTest ('constructor directory object projector: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'DirectoryObjectProjectorFixture.ps1'
+        $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -Case $case -RepositoryRoot $RepositoryRoot 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw ($output -join [Environment]::NewLine)
+        }
+        $expected = 'PASS directory object projector {0} {1}' -f $case, $projectorCases[$case]
+        $sentinels = @($output | Where-Object { [string]$_ -clike 'PASS directory object projector *' })
+        Assert-DirectoryTrue ($sentinels.Count -eq 1 -and [string]$sentinels[0] -ceq $expected) 'Fresh process did not execute every selected projector check.'
+    }
+}
+
 Write-Host ("{0} directory tests passed; {1} failed" -f $script:Passed, $script:Failed)
 if ($script:Failed) {
     exit 1
