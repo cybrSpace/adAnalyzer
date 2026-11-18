@@ -1680,8 +1680,12 @@ function Get-ADAnalyzerGpoReport {
         }
         $Gpo = $Gpo[0]
     }
-    # Rebuild from validated metadata; never authenticate to gPCFileSysPath hosts.
-    if ($Gpo.Server -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or $Gpo.Domain -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+    # Use only the single validated target for SYSVOL and directory lookups.
+    $hostPattern = '\A[A-Za-z0-9][A-Za-z0-9._-]*\z'
+    if (($reportServer = $Gpo.Server) -isnot [string] -or
+        $reportServer -notmatch $hostPattern -or
+        ($reportDomain = $Gpo.Domain) -isnot [string] -or
+        $reportDomain -notmatch $hostPattern) {
         throw 'Invalid GPO server/domain'
     }
     $id = [guid]$Gpo.Id
@@ -1692,16 +1696,16 @@ function Get-ADAnalyzerGpoReport {
             $drive = New-PSDrive `
                 -Name ('ADGpo' + [guid]::NewGuid().ToString('N')) `
                 -PSProvider FileSystem `
-                -Root ('\\{0}\SYSVOL' -f $Gpo.Server) `
+                -Root ('\\{0}\SYSVOL' -f $reportServer) `
                 -Credential $Credential `
                 -Scope Local `
                 -ErrorAction Stop `
                 -WhatIf:$false `
                 -Confirm:$false
-            $path = Join-Path ($drive.Name + ':\') ('{0}\Policies\{1}' -f $Gpo.Domain, $id.ToString('B'))
+            $path = Join-Path ($drive.Name + ':\') ('{0}\Policies\{1}' -f $reportDomain, $id.ToString('B'))
         }
         else {
-            $path = '\\{0}\SYSVOL\{1}\Policies\{2}' -f $Gpo.Server, $Gpo.Domain, $id.ToString('B')
+            $path = '\\{0}\SYSVOL\{1}\Policies\{2}' -f $reportServer, $reportDomain, $id.ToString('B')
         }
         $parsed = Read-ADAnalyzerGpo -Path $path
         $mismatch = $null -ne $parsed.SysvolVersion -and
@@ -1726,7 +1730,7 @@ function Get-ADAnalyzerGpoReport {
             }
             $status = @{}
             $connection = @{
-                Server = $Gpo.Server
+                Server = $reportServer
                 ErrorAction = 'Stop'
             }
             if ($Credential -and $Credential -ne [pscredential]::Empty) {
@@ -1751,7 +1755,7 @@ function Get-ADAnalyzerGpoReport {
                 }
                 catch {
                     $status[$token] = 'LookupFailed'
-                    Write-Warning "Unable to resolve policy SID $token on $($Gpo.Server): $($_.Exception.Message)"
+                    Write-Warning "Unable to resolve policy SID $token on ${reportServer}: $($_.Exception.Message)"
                 }
             }
             ConvertTo-AnalyzerGpoXml $Gpo $parsed $names $status

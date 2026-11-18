@@ -264,6 +264,7 @@ try {
             Cases = [ordered]@{
                 Regression = 10
                 Controls = 27
+                Targets = 20
             }
             RequireExactCaseCount = $true
         }

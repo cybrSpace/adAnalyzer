@@ -1,12 +1,13 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('Regression', 'Controls', 'Observe')][string]$Case,
+    [Parameter(Mandatory)][ValidateSet('Regression', 'Controls', 'Targets', 'Observe')][string]$Case,
     [Parameter(Mandatory)][string]$RepositoryRoot,
     [string]$Scenario,
     [ValidateSet('Caught', 'Uncaught')][string]$Capture = 'Caught',
     [switch]$First,
     [switch]$Ambient,
-    [switch]$StopOnError
+    [switch]$StopOnError,
+    [switch]$StrictMetadata
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,6 +44,12 @@ if ($Case -eq 'Observe') {
     . (Join-Path $RepositoryRoot 'bin/ADGpo.ps1')
 
     $script:Events = [Collections.Generic.List[object]]::new()
+    $script:TargetAttempts = [Collections.Generic.List[string]]::new()
+    $script:TargetReads = [Collections.Generic.List[string]]::new()
+    $script:TargetReadCounts = @{
+        Server = 0
+        Domain = 0
+    }
     $script:DriveName = $null
     $script:PolicyId = [guid]'5c07cdaf-63cd-4203-87dd-4083d09a8d03'
     $script:Domain = 'report.fixture.invalid'
@@ -53,6 +60,21 @@ if ($Case -eq 'Observe') {
     $script:TempRoot = Join-Path ([IO.Path]::GetTempPath()) ('gpo-report-fixture-' + [guid]::NewGuid().ToString('N'))
     $script:FixturePath = Join-Path (Join-Path (Join-Path $script:TempRoot $script:Domain) 'Policies') $script:PolicyId.ToString('B')
     $script:Credential = [pscredential]::new('fixture\reader', (ConvertTo-SecureString 'fixture-only' -AsPlainText -Force))
+    $script:ExpectAmbientCredential = $Scenario -in @(
+        'DefaultCredential'
+        'EmptyCredential'
+        'TargetUncredentialedObject'
+        'TargetUncredentialedXml'
+    )
+
+    function Read-TargetFixtureValue([string]$Field, [string]$Initial, [string]$Later) {
+        $script:TargetReads.Add($Field)
+        $script:TargetReadCounts[$Field]++
+        if ($script:TargetReadCounts[$Field] -eq 1) {
+            return $Initial
+        }
+        return $Later
+    }
 
     function Import-Module {
         throw 'GPO report fixture may use only its isolated directory commands.'
@@ -77,6 +99,7 @@ if ($Case -eq 'Observe') {
             [pscredential]$Credential, [string]$Scope, [string]$ErrorAction,
             [switch]$WhatIf, [switch]$Confirm
         )
+        $script:TargetAttempts.Add('Mount')
         Assert-ReportFixture (
             $Root -ceq $script:TrustedRoot -and $Scope -ceq 'Local' -and
             $PSProvider -ceq 'FileSystem' -and $Name -cmatch '^ADGpo[0-9a-f]{32}$' -and
@@ -113,7 +136,8 @@ if ($Case -eq 'Observe') {
 
     function Read-ADAnalyzerGpo {
         param([string]$Path)
-        if ($Scenario -in 'DefaultCredential', 'EmptyCredential') {
+        $script:TargetAttempts.Add('Read')
+        if ($script:ExpectAmbientCredential) {
             Assert-ReportFixture ($Path -ceq $script:UncPolicy) 'Credential-free read used an unexpected path.'
             $script:Events.Add('ReadUNC')
         }
@@ -139,9 +163,16 @@ if ($Case -eq 'Observe') {
     function Get-ADObject {
         [CmdletBinding()]
         param([string]$Filter, [string[]]$Properties, [string]$Server, [pscredential]$Credential)
+        $script:TargetAttempts.Add('Sid')
+        $expectedCredential = if ($script:ExpectAmbientCredential) {
+            -not $PSBoundParameters.ContainsKey('Credential')
+        }
+        else {
+            [object]::ReferenceEquals($Credential, $script:Credential)
+        }
         Assert-ReportFixture (
             $Server -ceq $script:Pinned -and ($Properties -join ',') -ceq 'sAMAccountName' -and
-            $ErrorActionPreference -eq 'Stop' -and [object]::ReferenceEquals($Credential, $script:Credential) -and
+            $ErrorActionPreference -eq 'Stop' -and $expectedCredential -and
             $Filter -cmatch "^objectSid -eq '(?<Sid>S-1-5-21-1-2-3-\d+)'$"
         ) 'SID lookup lost pinned transport or native binding.'
         $sid = $Matches.Sid
@@ -270,11 +301,61 @@ public static class FixtureNativeReportRead
                 $arguments.AsObject = $false
                 $script:Metadata.Version = 65539
             }
-            { $_ -in 'GuidPinned', 'GuidAmbiguous' } {
+            { $_ -in 'GuidPinned', 'GuidAmbiguous', 'TargetGuid' } {
                 $arguments.Remove('Gpo')
                 $arguments.Guid = $script:PolicyId
                 $arguments.Domain = $script:Domain
                 $arguments.Server = $script:Requested
+            }
+        }
+        if ($Scenario -like 'Target*') {
+            $script:Metadata.PSObject.Properties.Remove('Server')
+            $script:Metadata | Add-Member ScriptProperty Server {
+                Read-TargetFixtureValue 'Server' $script:Pinned 'other-server.fixture.invalid'
+            }
+            $script:Metadata.PSObject.Properties.Remove('Domain')
+            $script:Metadata | Add-Member ScriptProperty Domain {
+                Read-TargetFixtureValue 'Domain' $script:Domain 'other-domain.fixture.invalid'
+            }
+
+            if ($Scenario -match '\ATargetBad(?<Field>Server|Domain)(?<Shape>.+)\z') {
+                $field = $Matches.Field
+                $shape = $Matches.Shape
+                $script:Metadata.PSObject.Properties.Remove($field)
+                if ($shape -ne 'Missing') {
+                    $value = switch ($shape) {
+                        'Null' {
+                            $null
+                        }
+                        'Single' {
+                            , @('scalar-shape.fixture.invalid')
+                        }
+                        'Multiple' {
+                            , @('first.fixture.invalid', 'second.fixture.invalid')
+                        }
+                        'Newline' {
+                            "scalar-shape.fixture.invalid`n"
+                        }
+                        'Number' {
+                            123
+                        }
+                        'Syntax' {
+                            'invalid fixture value'
+                        }
+                    }
+                    $script:Metadata | Add-Member -MemberType NoteProperty -Name $field -Value $value
+                }
+            }
+            else {
+                if ($Scenario -eq 'TargetUncredentialedObject') {
+                    $arguments.Remove('Credential')
+                }
+                if ($Scenario -eq 'TargetUncredentialedXml') {
+                    $arguments.Credential = [pscredential]::Empty
+                }
+                if ($Scenario -in 'TargetMountedXml', 'TargetUncredentialedXml') {
+                    $arguments.AsObject = $false
+                }
             }
         }
         if ($Ambient) {
@@ -296,6 +377,9 @@ public static class FixtureNativeReportRead
         $continued = $false
         $caught = $null
         $ErrorActionPreference = 'Continue'
+        if ($StrictMetadata) {
+            Set-StrictMode -Version Latest
+        }
 
         # This outer finally serializes observations without catching an uncaught report failure.
         try {
@@ -341,6 +425,10 @@ public static class FixtureNativeReportRead
                 DriveVisible = $visible
                 SidMapIntact = $names.Count -eq 1 -and $names['S-1-5-21-1-2-3-1004'] -ceq 'Supplied mapping'
             }
+            if ($Scenario -like 'Target*') {
+                $observation | Add-Member -MemberType NoteProperty -Name TargetAttempts -Value $script:TargetAttempts.ToArray()
+                $observation | Add-Member -MemberType NoteProperty -Name TargetReads -Value $script:TargetReads.ToArray()
+            }
             Write-Output ('OBSERVATION ' + (ConvertTo-Json -InputObject $observation -Depth 12 -Compress))
         }
     }
@@ -356,7 +444,8 @@ public static class FixtureNativeReportRead
 }
 
 function Invoke-ReportChild(
-    [string]$Name, [string]$Mode, [bool]$TakeFirst = $false, [bool]$Preferences = $false, [bool]$ActionStop = $false
+    [string]$Name, [string]$Mode, [bool]$TakeFirst = $false, [bool]$Preferences = $false, [bool]$ActionStop = $false,
+    [bool]$Strict = $false
 ) {
     $exe = (Get-Process -Id $PID).Path
     $arguments = @(
@@ -371,6 +460,9 @@ function Invoke-ReportChild(
     }
     if ($ActionStop) {
         $arguments += '-StopOnError'
+    }
+    if ($Strict) {
+        $arguments += '-StrictMetadata'
     }
     $ErrorActionPreference = 'Continue'
     $PSNativeCommandUseErrorActionPreference = $false
@@ -501,6 +593,46 @@ function Test-ReportControl([object]$Spec) {
     }
 }
 
+function Test-ReportTargetSuccess([object]$Spec) {
+    $actual = Invoke-ReportChild $Spec.Name $Spec.Mode
+    $status = $actual.Status
+    Assert-ReportFixture (($status.TargetReads -join '|') -ceq 'Server|Domain') 'The accepted target fields were not each read exactly once in order.'
+    Assert-BaseObservation $actual $Spec.Events $Spec.Kinds $true $false
+    if ($Spec.Kinds -eq 'Warning|Xml') {
+        Assert-ReportFixture (
+            $status.Items[0].Message -ceq 'Unable to resolve policy SID S-1-5-21-1-2-3-1003 on dc-selected.fixture.invalid: Fixture SID lookup failed.' -and
+            $status.Items[1].Mismatch -ceq 'false' -and
+            ($status.Items[1].Resolutions -join '|') -ceq 'Resolved|Resolved|Resolved|NotFound|LookupFailed|Resolved'
+        ) 'The XML report did not retain its selected warning host, version check or SID resolution outcomes.'
+    }
+}
+
+function Test-ReportTargetRejection([string]$Name, [string]$Field, [bool]$Strict = $false) {
+    $actual = Invoke-ReportChild -Name $Name -Mode Caught -Strict $Strict
+    $status = $actual.Status
+    Assert-ReportFixture (@($status.TargetAttempts).Count -eq 0) 'Invalid target metadata reached a mount, policy reader or SID lookup.'
+    $expectedReads = if ($Field -eq 'Server') {
+        ''
+    }
+    else {
+        'Server'
+    }
+    Assert-ReportFixture (($status.TargetReads -join '|') -ceq $expectedReads) 'Target validation reordered reads or read Domain after rejecting Server.'
+    Assert-BaseObservation $actual '' 'Error' $true $false
+    Assert-ReportFixture ($null -ne $status.Caught -and $status.Caught.IsTyped) 'Target validation did not preserve a native diagnostic.'
+    if ($Strict) {
+        Assert-ReportFixture (
+            $status.Caught.Id -match '^PropertyNotFoundStrict(?:,|$)' -and
+            $status.Caught.Type -like '*PropertyNotFoundException'
+        ) 'A strict missing target lost its native property diagnostic.'
+    }
+    else {
+        Assert-ReportFixture (
+            $status.Caught.Message -ceq 'Invalid GPO server/domain'
+        ) 'Target validation did not report the established server/domain error.'
+    }
+}
+
 if ($Case -eq 'Regression') {
     $failures = [Collections.Generic.List[string]]::new()
     $count = 0
@@ -519,6 +651,53 @@ if ($Case -eq 'Regression') {
             catch {
                 $failures.Add(('{0}/{1}: {2}' -f $entry.Fault, $mode, $_.Exception.Message))
             }
+        }
+    }
+}
+elseif ($Case -eq 'Targets') {
+    $owned = 'Mount|Read|Unmount'
+    $sidEvents = 'Sid:S-1-5-21-1-2-3-1001|Sid:S-1-5-21-1-2-3-1002|Sid:S-1-5-21-1-2-3-1003'
+    $successes = @(
+        New-Control 'TargetMountedObject' 'Uncaught' $owned 'Object'
+        New-Control 'TargetUncredentialedObject' 'Uncaught' 'ReadUNC' 'Object'
+        New-Control 'TargetMountedXml' 'Uncaught' ('Mount|Read|' + $sidEvents + '|Unmount') 'Warning|Xml'
+        New-Control 'TargetUncredentialedXml' 'Uncaught' ('ReadUNC|' + $sidEvents) 'Warning|Xml'
+        New-Control 'TargetGuid' 'Uncaught' ('Find|' + $owned) 'Object'
+    )
+    $failures = [Collections.Generic.List[string]]::new()
+    $count = 0
+    foreach ($spec in $successes) {
+        $count++
+        try {
+            Test-ReportTargetSuccess $spec
+        }
+        catch {
+            $failures.Add(('{0}: {1}' -f $spec.Name, $_.Exception.Message))
+        }
+    }
+    foreach ($field in @('Server', 'Domain')) {
+        $shapes = @('Null', 'Missing', 'Single', 'Multiple', 'Newline', 'Number')
+        if ($field -eq 'Server') {
+            $shapes += 'Syntax'
+        }
+        foreach ($shape in $shapes) {
+            $name = 'TargetBad' + $field + $shape
+            $count++
+            try {
+                Test-ReportTargetRejection $name $field
+            }
+            catch {
+                $failures.Add(('{0}: {1}' -f $name, $_.Exception.Message))
+            }
+        }
+
+        $name = 'TargetBad' + $field + 'Missing'
+        $count++
+        try {
+            Test-ReportTargetRejection $name $field -Strict $true
+        }
+        catch {
+            $failures.Add(('{0}/Strict: {1}' -f $name, $_.Exception.Message))
         }
     }
 }
