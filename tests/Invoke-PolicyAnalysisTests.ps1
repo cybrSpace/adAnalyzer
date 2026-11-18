@@ -1428,6 +1428,178 @@ try {
         Assert-Policy (($missing.MetadataStatus -join ',') -ceq 'LanguageResourceMissing,LanguageResourceMissing,LanguageResourceMissing') 'A missing ADML file did not mark every policy.'
         Assert-Policy (($missing.DisplayName -join ',') -ceq 'FirstPolicy,MiddlePolicy,LastPolicy') 'A missing ADML file did not preserve fallback labels.'
     }
+
+    $projectionPath = Join-Path $taskTemp 'strict-projection'
+    $duplicatePath = Join-Path $taskTemp 'strict-ambiguous'
+    $invalidPath = Join-Path $taskTemp 'strict-invalid'
+    $projectionKey = 'Software\Fixture\Projection'
+    $null = [IO.Directory]::CreateDirectory((Join-Path $projectionPath 'en-US'))
+    $null = [IO.Directory]::CreateDirectory($duplicatePath)
+    $null = [IO.Directory]::CreateDirectory($invalidPath)
+    $projectionAdmx = Join-Path $projectionPath 'projection.admx'
+    [IO.File]::WriteAllText($projectionAdmx, @'
+<policyDefinitions revision="1.0" schemaVersion="1.0">
+  <policyNamespaces>
+    <target prefix="projection" namespace="Fixture.Projection" />
+  </policyNamespaces>
+  <policies>
+    <policy name="DeleteAware" class="Machine" displayName="$(string.Label)"
+            key="Software\Fixture\Projection" valueName="FixtureValue">
+      <enabledValue><delete /></enabledValue>
+      <disabledValue><decimal value="17" /></disabledValue>
+    </policy>
+  </policies>
+</policyDefinitions>
+'@)
+    [IO.File]::WriteAllText((Join-Path $projectionPath 'en-US/projection.adml'), @'
+<policyDefinitionResources revision="1.0" schemaVersion="1.0">
+  <resources>
+    <stringTable><string id="Label">Delete aware label</string></stringTable>
+  </resources>
+</policyDefinitionResources>
+'@)
+    [IO.File]::Copy($projectionAdmx, (Join-Path $duplicatePath 'first.admx'))
+    [IO.File]::Copy($projectionAdmx, (Join-Path $duplicatePath 'second.admx'))
+    [IO.File]::WriteAllText((Join-Path $invalidPath 'invalid.admx'), '<policyDefinitions>')
+
+    $unresolved = [ordered]@{
+        TemplateNotFound = (Join-Path $taskTemp 'absent')
+        NoMatch = $projectionPath
+        Ambiguous = $duplicatePath
+        InvalidTemplate = $invalidPath
+    }
+    foreach ($status in $unresolved.Keys) {
+        Test-Policy ('strict registry projection reports ' + $status) {
+            Set-StrictMode -Version Latest
+            $name = 'FixtureValue'
+            $templateError = ''
+            if ($status -eq 'NoMatch') {
+                $name = 'Unmapped'
+            }
+            if ($status -eq 'InvalidTemplate') {
+                $templateError = 'invalid.admx'
+            }
+            $row = New-RegistryFixture $projectionKey $name 23
+            $row | Add-Member -NotePropertyMembers @{
+                DeletionDirective = $false
+                Deleted = $false
+            }
+            $result = @(Resolve-ADAnalyzerRegistryPolicy -RegistrySettings @($row) -TemplatePath $unresolved[$status])
+            Assert-Policy ($result.Count -eq 1 -and $result[0].MetadataStatus -ceq $status -and $result[0].State -ceq 'Unknown') "Expected explicit unresolved metadata $status."
+            foreach ($field in @('PolicyId', 'PolicyNamespace', 'DisplayName', 'DefinitionType', 'ElementId')) {
+                Assert-Policy ($null -eq $result[0].$field) "$status did not project a null $field."
+            }
+            Assert-Policy ($result[0].ValueName -ceq $name -and $result[0].Value -eq 23 -and
+                $result[0].Type -eq 4 -and [object]::ReferenceEquals($result[0].RawData, $row.RawData) -and
+                $result[0].Options.Count -eq 0 -and ($result[0].TemplateErrors -join ',') -ceq $templateError) "$status changed raw data or diagnostics."
+        }
+    }
+
+    Test-Policy 'strict registry projection accepts a named replay tombstone' {
+        Set-StrictMode -Version Latest
+        $directive = New-RegistryFixture $projectionKey '**del.FixtureValue' $null
+        $tombstone = @(Get-ADAnalyzerEffectiveRegistryRecords -RegistrySettings @($directive))
+        Assert-Policy ($tombstone.Count -eq 1 -and $tombstone[0].Deleted -eq $true -and
+            $null -eq $tombstone[0].PSObject.Properties['RawData']) 'Named replay did not make a tombstone without raw bytes.'
+        $result = @(Resolve-ADAnalyzerRegistryPolicy -RegistrySettings $tombstone -TemplatePath $projectionPath)
+        Assert-Policy ($result.Count -eq 1 -and $result[0].MetadataStatus -ceq 'Resolved' -and
+            $result[0].PolicyId -ceq 'DeleteAware' -and $result[0].State -ceq 'Enabled' -and
+            $result[0].Deleted -eq $true -and $null -eq $result[0].Value -and
+            $null -eq $result[0].RawData -and $null -eq $result[0].KeyOnly -and
+            $null -eq $result[0].DeletionDirective) 'Replay deletion lost its rule state or optional null fields.'
+    }
+
+    Test-Policy 'strict registry projection retains optional raw data types and references' {
+        Set-StrictMode -Version Latest
+        $inputs = @(
+            @{ RawData = [byte]17 }
+            @{ RawData = [byte[]]::new(0) }
+            @{ RawData = [byte[]]@(17) }
+            @{ RawData = [byte[]]@(17, 18) }
+        )
+        foreach ($inputCase in $inputs) {
+            $row = New-RegistryFixture $projectionKey FixtureValue 17
+            $row.RawData = $inputCase.RawData
+            $row | Add-Member -NotePropertyName DeletionDirective -NotePropertyValue $false
+            $result = @(Resolve-ADAnalyzerRegistryPolicy -RegistrySettings @($row) -TemplatePath $projectionPath)
+            Assert-Policy ($result.Count -eq 1 -and $result[0].MetadataStatus -ceq 'Resolved' -and
+                $result[0].State -ceq 'Disabled' -and $result[0].Type -eq 4 -and $result[0].Value -eq 17 -and
+                $null -eq $result[0].Deleted -and $result[0].KeyOnly -eq $false -and
+                $result[0].DeletionDirective -eq $false -and
+                $result[0].RawData.GetType() -eq $row.RawData.GetType()) 'A raw reader record changed type, state, or optional fields.'
+            if ($row.RawData -is [byte[]]) {
+                Assert-Policy ([object]::ReferenceEquals($result[0].RawData, $row.RawData)) 'Raw bytes lost their original reference.'
+            }
+            else {
+                Assert-Policy ($result[0].RawData -eq $row.RawData) 'A raw byte changed value.'
+            }
+        }
+
+        $dictionary = [ordered]@{
+            Scope = 'Computer'
+            Hive = 'HKLM'
+            Key = $projectionKey
+            ValueName = 'FixtureValue'
+            Type = 4
+            Value = 17
+            Source = 'Machine/Registry.pol'
+        }
+        $result = @(Resolve-ADAnalyzerRegistryPolicy -RegistrySettings @($dictionary) -TemplatePath $projectionPath)
+        Assert-Policy ($result.Count -eq 1 -and $result[0].State -ceq 'Disabled' -and
+            $null -eq $result[0].RawData -and $null -eq $result[0].KeyOnly -and
+            $null -eq $result[0].DeletionDirective -and $null -eq $result[0].Deleted) 'Omitted dictionary options did not project as null.'
+        $dictionary.RawData = $null
+        $dictionary.KeyOnly = $null
+        $dictionary.DeletionDirective = $null
+        $dictionary.Deleted = $null
+        $explicitNull = @(Resolve-ADAnalyzerRegistryPolicy -RegistrySettings @($dictionary) -TemplatePath $projectionPath)
+        Assert-Policy ($explicitNull.Count -eq 1 -and $explicitNull[0].State -ceq 'Disabled' -and
+            $null -eq $explicitNull[0].RawData -and $null -eq $explicitNull[0].KeyOnly -and
+            $null -eq $explicitNull[0].DeletionDirective -and $null -eq $explicitNull[0].Deleted) 'Explicit null dictionary options changed their projection.'
+    }
+
+    Test-Policy 'strict registry projection retains the native missing required field error' {
+        Set-StrictMode -Version Latest
+        $row = New-RegistryFixture $projectionKey FixtureValue 17
+        $row.PSObject.Properties.Remove('ValueName')
+        $failure = $null
+        try {
+            $null = Resolve-ADAnalyzerRegistryPolicy -RegistrySettings @($row) -TemplatePath $projectionPath
+        }
+        catch {
+            $failure = $_
+        }
+        Assert-Policy ($null -ne $failure -and $failure.FullyQualifiedErrorId -like 'PropertyNotFoundStrict*' -and
+            $failure.Exception.Message -match 'ValueName') 'Missing required ValueName did not retain its native strict property diagnostic.'
+    }
+    Test-Policy 'nested registry input preserves native optional member enumeration' {
+        Set-StrictMode -Off
+        $first = New-RegistryFixture $projectionKey FirstValue 13
+        $first.RawData = [byte]1
+        $first | Add-Member -NotePropertyMembers @{
+            DeletionDirective = $false
+            Deleted = $false
+        }
+        $second = New-RegistryFixture $projectionKey SecondValue 17
+        $second.RawData = [byte]2
+        $second.KeyOnly = $true
+        $second | Add-Member -NotePropertyMembers @{
+            DeletionDirective = $true
+            Deleted = $true
+        }
+
+        $inner = [object[]]@($first, $second)
+        $nested = [object[]]::new(1)
+        $nested[0] = $inner
+        $result = @(Resolve-ADAnalyzerRegistryPolicy -RegistrySettings $nested)
+        Assert-Policy ($result.Count -eq 1 -and $result[0].MetadataStatus -ceq 'TemplateNotFound') 'Nested input changed the native projection shape.'
+        foreach ($name in @('RawData', 'KeyOnly', 'DeletionDirective', 'Deleted')) {
+            $expected = $inner.$name
+            $observed = $result[0].$name
+            Assert-Policy ($null -ne $observed -and $observed.GetType() -eq $expected.GetType() -and
+                ($observed -join ',') -ceq ($expected -join ',')) "Nested input lost native member values or types for $name."
+        }
+    }
 }
 finally {
     Remove-Item -LiteralPath $taskTemp -Recurse -Force

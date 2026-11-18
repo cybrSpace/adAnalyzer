@@ -2475,6 +2475,31 @@ function Get-ADAnalyzerAdmxValue {
     }
 }
 
+function Test-ADAnalyzerAdmxOptionalField {
+    param(
+        $Record,
+        [string]$Name
+    )
+    if ($Record -is [Collections.IDictionary]) {
+        $type = $Record.GetType()
+        $isGenericDictionary = $type.IsGenericType -and
+            $type.GetGenericTypeDefinition() -eq [Collections.Generic.Dictionary[string, object]].GetGenericTypeDefinition()
+        if ($type -notin [hashtable], [Collections.Specialized.OrderedDictionary] -and
+            -not $isGenericDictionary) {
+            # Let PowerShell perform the only lookup on custom dictionary implementations.
+            return $true
+        }
+        if (([Collections.IDictionary]$Record).Contains($Name)) {
+            return $true
+        }
+    }
+    elseif ($Record -is [Collections.IEnumerable] -and $Record -isnot [string]) {
+        # Let PowerShell enumerate members of collection-shaped records.
+        return $true
+    }
+    return $null -ne $Record.PSObject.Properties[$Name]
+}
+
 function Resolve-ADAnalyzerRegistryPolicy {
     <# .SYNOPSIS Adds optional offline ADMX/ADML metadata while preserving raw policy records.
        .DESCRIPTION Supports policy enabled/disabled values and boolean, enum and list elements.
@@ -2489,6 +2514,15 @@ function Resolve-ADAnalyzerRegistryPolicy {
     )
     $definitions = @()
     $errors = @()
+    $unresolvedDefinition = @{
+        Common = @{
+            PolicyId = $null
+            PolicyNamespace = $null
+            DisplayName = $null
+        }
+        Kind = $null
+        ElementId = $null
+    }
     $templateMissing = -not $TemplatePath -or -not (Test-Path -LiteralPath $TemplatePath -PathType Container)
     if (-not $templateMissing) {
         foreach ($file in @(Get-ChildItem -LiteralPath $TemplatePath -Filter '*.admx' -File -ErrorAction Stop)) {
@@ -2622,6 +2656,7 @@ function Resolve-ADAnalyzerRegistryPolicy {
                         $value = Get-ADAnalyzerAdmxValue ($definition.Node.SelectSingleNode('./*[local-name()="' + $pair[0] + '"]'))
                         if ($value.Valid -and
                             (($value.Deleted -and
+                                (Test-ADAnalyzerAdmxOptionalField $row Deleted) -and
                                 $row.Deleted) -or
                             (-not $value.Deleted -and
                             $row.Value -eq $value.Value))) {
@@ -2669,6 +2704,10 @@ function Resolve-ADAnalyzerRegistryPolicy {
                 }
             }
         }
+        $reportDefinition = $definition
+        if ($null -eq $reportDefinition) {
+            $reportDefinition = $unresolvedDefinition
+        }
         [pscustomobject]@{
             Scope = $row.Scope
             Hive = $row.Hive
@@ -2676,18 +2715,38 @@ function Resolve-ADAnalyzerRegistryPolicy {
             ValueName = $row.ValueName
             Type = $row.Type
             Value = $row.Value
-            RawData = $row.RawData
+            RawData = if (Test-ADAnalyzerAdmxOptionalField $row RawData) {
+                , $row.RawData
+            }
+            else {
+                $null
+            }
             Source = $row.Source
-            KeyOnly = $row.KeyOnly
-            DeletionDirective = $row.DeletionDirective
-            Deleted = $row.Deleted
+            KeyOnly = if (Test-ADAnalyzerAdmxOptionalField $row KeyOnly) {
+                , $row.KeyOnly
+            }
+            else {
+                $null
+            }
+            DeletionDirective = if (Test-ADAnalyzerAdmxOptionalField $row DeletionDirective) {
+                , $row.DeletionDirective
+            }
+            else {
+                $null
+            }
+            Deleted = if (Test-ADAnalyzerAdmxOptionalField $row Deleted) {
+                , $row.Deleted
+            }
+            else {
+                $null
+            }
             MetadataStatus = $status
             State = $state
-            PolicyId = $definition.Common.PolicyId
-            PolicyNamespace = $definition.Common.PolicyNamespace
-            DisplayName = $definition.Common.DisplayName
-            DefinitionType = $definition.Kind
-            ElementId = $definition.ElementId
+            PolicyId = $reportDefinition.Common.PolicyId
+            PolicyNamespace = $reportDefinition.Common.PolicyNamespace
+            DisplayName = $reportDefinition.Common.DisplayName
+            DefinitionType = $reportDefinition.Kind
+            ElementId = $reportDefinition.ElementId
             Options = $options
             TemplateErrors = $errors
         }
