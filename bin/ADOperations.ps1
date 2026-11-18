@@ -615,11 +615,11 @@ function Read-ADAnalyzerOperationDocument {
             # Windows PowerShell already passes a decoded array as one object.
             $jsonParameters.NoEnumerate = $true
         }
-        $InputObject = Microsoft.PowerShell.Management\Get-Content `
-            -LiteralPath $InputObject `
-            -Raw `
-            -Encoding UTF8 `
-            -ErrorAction Stop | ConvertFrom-Json @jsonParameters
+        $readParameters = Get-ADAnalyzerJsonReadParameters $InputObject
+        $PSDefaultParameterValues = Get-ADAnalyzerJsonReadDefaults
+        $InputObject = Microsoft.PowerShell.Management\Get-Content @readParameters |
+            ConvertTo-ADAnalyzerJsonText |
+            ConvertFrom-Json @jsonParameters
     }
     if ($InputObject -is [array] -and $InputObject.Rank -eq 1 -and $InputObject.Length -eq 1) {
         $InputObject = $InputObject.GetValue($InputObject.GetLowerBound(0))

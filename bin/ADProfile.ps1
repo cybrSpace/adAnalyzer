@@ -1,5 +1,6 @@
 # Shared configuration and result contracts. No external modules are required.
 . (Join-Path $PSScriptRoot 'ADSecret.ps1')
+. (Join-Path $PSScriptRoot 'ADFile.ps1')
 
 # Configuration capsules expose no automatically serialized profile properties.
 if (-not ('ADAnalyzer.ConfigurationState' -as [type])) {
@@ -194,7 +195,10 @@ class ADAnalyzerProfile {
                 $loaded = Import-PowerShellDataFile -LiteralPath $Path -ErrorAction Stop
             }
             '.json' {
-                $loaded = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop |
+                $readParameters = Get-ADAnalyzerJsonReadParameters $Path
+                $PSDefaultParameterValues = Get-ADAnalyzerJsonReadDefaults
+                $loaded = Get-Content @readParameters |
+                    ConvertTo-ADAnalyzerJsonText |
                     ConvertFrom-Json -ErrorAction Stop
             }
             default {

@@ -423,7 +423,13 @@ if ($MyInvocation.InvocationName -ne '.') {
     if ([string]::IsNullOrWhiteSpace($CliConfigPath)) {
         throw 'Specify ConfigPath containing Url and Config objects.'
     }
-    $document = Get-Content -LiteralPath $CliConfigPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $readParameters = Get-ADAnalyzerJsonReadParameters $CliConfigPath
+    $originalDefaults = $PSDefaultParameterValues
+    $PSDefaultParameterValues = Get-ADAnalyzerJsonReadDefaults
+    $document = Get-Content @readParameters |
+        ConvertTo-ADAnalyzerJsonText |
+        ConvertFrom-Json -ErrorAction Stop
+    $PSDefaultParameterValues = $originalDefaults
     $url = @{}
     $config = @{}
     foreach ($property in $document.Url.PSObject.Properties) {

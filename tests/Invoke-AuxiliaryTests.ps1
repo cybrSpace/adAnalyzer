@@ -1643,17 +1643,29 @@ Write-Output ('PASS legacy '+$Script+' '+$Mode)
     }
 
 
-    foreach ($case in @(
-            'Utf8NoBom',
-            'Utf8Bom',
-            'Utf16LE',
-            'Utf16BE',
-            'Utf32LE',
-            'Utf32BE',
-            'SimulatedAnsi',
-            'Malformed',
-            'SharedWriter'
-        )) {
+    $jsonEncodingCases = [ordered]@{
+        Utf8NoBom = 5
+        Utf8Bom = 5
+        Utf16LE = 5
+        Utf16BE = 5
+        Utf32LE = 5
+        Utf32BE = 5
+        SimulatedAnsi = 5
+        Malformed = 5
+        SharedWriter = 5
+        InvalidUtf8NoBom = 5
+        InvalidUtf8Bom = 5
+        InvalidUtf16LE = 5
+        InvalidUtf16BE = 5
+        InvalidUtf32LE = 5
+        InvalidUtf32BE = 5
+        StandaloneProfile = 2
+        Empty = 5
+        BomOnly = 5
+        ProviderDrive = 5
+        AmbientEncoding = 5
+    }
+    foreach ($case in $jsonEncodingCases.Keys) {
         Invoke-AuxiliaryTest ('external JSON input encoding: ' + $case) {
             $executable = (Get-Process -Id $PID).Path
             $output = & $executable -NoLogo -NoProfile -NonInteractive -File (
@@ -1671,7 +1683,9 @@ Write-Output ('PASS legacy '+$Script+' '+$Mode)
                 }
                 throw ($output -join [Environment]::NewLine)
             }
-            Assert-True (($output -join ' ') -like ('*PASS JSON input encoding ' + $case + '*')) 'Fresh process did not execute the selected JSON encoding case.'
+            $expected = 'PASS JSON input encoding {0} {1}' -f $case, $jsonEncodingCases[$case]
+            $sentinels = @($output | Where-Object { [string]$_ -clike 'PASS JSON input encoding *' })
+            Assert-True ($sentinels.Count -eq 1 -and [string]$sentinels[0] -ceq $expected) 'Fresh process did not execute every selected JSON encoding reader.'
         }
     }
 
