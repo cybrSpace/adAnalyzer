@@ -1016,7 +1016,7 @@ class ADAnalyzerGpoXmlWriter {
             return $node
         }
         $observeSource = $this.SourceObservationSteps()
-        return & $observeSource
+        return & $observeSource $true
     }
 
     hidden [hashtable] NewSidNames() {
@@ -1145,10 +1145,47 @@ class ADAnalyzerGpoXmlWriter {
         return $Document.PSBase.OuterXml
     }
 
+    hidden [object] ProjectEmbeddedXml([object]$Value) {
+        $text = $null
+        $reader = $null
+        try {
+            $source = [string]$Value
+            if ([string]::IsNullOrWhiteSpace($source)) {
+                return $Value
+            }
+
+            $normalizer = [ADAnalyzerGpoSourceNormalizer]::new()
+            $text = [IO.StringReader]::new($source)
+            $reader = [Xml.XmlReader]::Create($text, $normalizer.NewXmlSettings())
+            $document = $normalizer.NewXmlDocument()
+            $document.PreserveWhitespace = $true
+            $document.Load($reader)
+            $safe = ConvertTo-ADAnalyzerSecretIndicatorXml $document
+            $projected = $safe.PSBase.OuterXml
+            if ($projected -ceq $document.PSBase.OuterXml) {
+                return $Value
+            }
+            return $projected
+        }
+        catch {
+            throw 'Provided policy XML is unreadable.'
+        }
+        finally {
+            if ($null -ne $reader) {
+                $reader.Dispose()
+            }
+            if ($null -ne $text) {
+                $text.Dispose()
+            }
+        }
+    }
+
     hidden [scriptblock] SourceObservationSteps() {
         # Run raw reads and conversions in the caller's PowerShell frame. A
         # command under Continue can still return its DOM after a bad row.
         return {
+            param([bool]$ProjectSecretInput)
+
             $known = $writer.NewSidNames()
             foreach ($key in ([Collections.IDictionary].GetProperty('Keys')).GetValue($SidNames, $null)) {
                 $known[$key] = $SidNames[$key]
@@ -1177,6 +1214,9 @@ class ADAnalyzerGpoXmlWriter {
                 if ($settings.Count) {
                     $body = $writer.OpenExtension($side, 'Security')
                     foreach ($setting in $settings) {
+                        if ($ProjectSecretInput) {
+                            $setting = ConvertTo-ADAnalyzerSecretRecord -Record $setting
+                        }
                         # A failed native assignment under Continue can leave an earlier value.
                         $node = $null
                         $node = & $appendSourceNode $doc $body $setting.Kind
@@ -1192,7 +1232,9 @@ class ADAnalyzerGpoXmlWriter {
                         if ($null -ne $setting.PSObject.Properties['SecretPresent']) {
                             $null = & $appendSourceNode $doc $node 'Name' $setting.Name
                             $null = & $appendSourceNode $doc $node 'SecretPresent' ([string]$setting.SecretPresent).ToLowerInvariant()
-                            if ($setting.Source) {
+                            $canReadSource = -not $ProjectSecretInput -or
+                                (Test-ADAnalyzerOptionalSecretRecordMember @{ Record = $setting } 'Source')
+                            if ($canReadSource -and $setting.Source) {
                                 $null = & $appendSourceNode $doc $node 'Source' $setting.Source
                             }
                             continue
@@ -1270,6 +1312,9 @@ class ADAnalyzerGpoXmlWriter {
 
                     $body = $writer.OpenExtension($side, $kind)
                     foreach ($row in $rows) {
+                        if ($ProjectSecretInput -and $kind -in 'Registry', 'Ini') {
+                            $row = ConvertTo-ADAnalyzerSecretRecord -Record $row
+                        }
                         # A failed native read must leave this record's field empty.
                         $label = $null
                         $value = $null
@@ -1298,7 +1343,12 @@ class ADAnalyzerGpoXmlWriter {
                         }
                         else {
                             $label = $row.Path
-                            $value = $row.Xml
+                            if ($ProjectSecretInput) {
+                                $value = $writer.ProjectEmbeddedXml($row.Xml)
+                            }
+                            else {
+                                $value = $row.Xml
+                            }
                         }
 
                         $null = & $appendSourceNode $doc $record 'Name' $label
@@ -1352,7 +1402,7 @@ function ConvertTo-AnalyzerGpoXml {
     $writer = [ADAnalyzerGpoXmlWriter]::new()
     $appendSourceNode = 'Add-AnalyzerGpoXmlNode'
     $observeSource = $writer.SourceObservationSteps()
-    & $observeSource
+    & $observeSource $false
 }
 
 function Get-ADAnalyzerGpoReport {

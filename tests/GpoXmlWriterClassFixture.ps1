@@ -1,12 +1,19 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('Contracts', 'Direct', 'Uncaught')][string]$Case = 'Contracts',
+    [ValidateSet('Contracts', 'Direct', 'Uncaught', 'DirectStandalone', 'DirectXmlFault')][string]$Case = 'Contracts',
     [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
-    [switch]$Original
+    [switch]$Original,
+    [ValidateSet('Malformed', 'Dtd')][string]$XmlFault = 'Malformed',
+    [switch]$Standalone
 )
 
 $ErrorActionPreference = 'Stop'
-. (Join-Path $RepositoryRoot 'bin/ADAnalyzer.ps1')
+if ($Case -eq 'DirectStandalone' -or $Standalone) {
+    . (Join-Path $RepositoryRoot 'bin/ADGpo.ps1')
+}
+else {
+    . (Join-Path $RepositoryRoot 'bin/ADAnalyzer.ps1')
+}
 
 # Exact accepted U-103 functions, before the renderer migration.
 $script:HelperSource = @'
@@ -494,6 +501,215 @@ function New-WriterInput([string]$Name) {
     $result
 }
 
+function New-WriterSafetyInput([string]$Marker) {
+    $data = New-WriterInput Empty
+    $data.Policy | Add-Member -NotePropertyMembers @{
+        Path = 'Fixture'
+        UnparsedFiles = @()
+    }
+    $data.Policy.SecuritySettings = @(
+        [pscustomobject]@{
+            Scope = 'Computer'
+            Kind = 'SecurityOptions'
+            Name = 'DefaultPassword'
+            Value = $Marker
+            Source = 'fixture.inf'
+        }
+        New-WriterSecurity Account Password ''
+    )
+    $data.Policy.RegistrySettings = @(
+        New-WriterRegistry Password 3 ([Text.Encoding]::UTF8.GetBytes($Marker))
+        New-WriterRegistry DefaultPassword 3 ([byte[]]@())
+    )
+    $data.Policy.IniSettings = @(
+        [pscustomobject]@{
+            Scope = 'Computer'
+            Name = 'Password'
+            Analyzed = $false
+            Source = 'fixture.ini'
+            Section = 'Fixture'
+            Value = $Marker
+        }
+        [pscustomobject]@{
+            Scope = 'Computer'
+            Name = 'DefaultPassword'
+            Analyzed = $false
+            Source = 'fixture.ini'
+            Section = 'Fixture'
+            Value = ''
+        }
+    )
+    $data.Policy.XmlFiles = @(
+        [pscustomobject]@{
+            Scope = 'Computer'
+            Kind = 'Preferences'
+            Path = 'Machine/preferences.xml'
+            Xml = "<Fixture><Properties cpassword='$Marker' /></Fixture>"
+        }
+        [pscustomobject]@{
+            Scope = 'Computer'
+            Kind = 'Xml'
+            Path = 'Machine/generic.xml'
+            Xml = "<Fixture><Properties name='Passw&#111;rd' value='$Marker' /></Fixture>"
+        }
+        [pscustomobject]@{
+            Scope = 'Computer'
+            Kind = 'Xml'
+            Path = 'Machine/empty.xml'
+            Xml = '<Fixture><Properties cpassword="" /></Fixture>'
+        }
+    )
+    $data
+}
+
+function Test-WriterPresenceOnly([string]$Text, [string]$Marker) {
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Marker))
+    if ($Text.Contains($Marker) -or $Text.Contains($encoded)) {
+        return $false
+    }
+
+    $doc = [xml]$Text
+    foreach ($extension in @('Registry', 'Ini', 'Security')) {
+        $rows = @($doc.SelectNodes("//ExtensionData[Name='$extension']/Extension/*"))
+        if ($rows.Count -ne 2 -or $null -eq $rows[0].SelectSingleNode("SecretPresent[.='true']") -or
+            $null -eq $rows[1].SelectSingleNode("SecretPresent[.='false']")) {
+            return $false
+        }
+        foreach ($row in $rows) {
+            if ($null -ne $row.SelectSingleNode('Value|Display|SettingString|SettingBoolean|SettingNumber|Member')) {
+                return $false
+            }
+        }
+    }
+    $security = "//ExtensionData[Name='Security']/Extension"
+    if ($null -eq $doc.SelectSingleNode("$security/SecurityOptions/Source[.='fixture.inf']") -or
+        $null -ne $doc.SelectSingleNode("$security/Account/Source")) {
+        return $false
+    }
+
+    $expected = @(
+        @{
+            Extension = 'Preferences'
+            Attribute = 'cpassword'
+            Presence = 'true'
+        }
+        @{
+            Extension = 'Xml'
+            Attribute = 'value'
+            Presence = 'true'
+        }
+        @{
+            Extension = 'Xml'
+            Attribute = 'cpassword'
+            Presence = 'false'
+        }
+    )
+    $cells = @($doc.SelectNodes("//ExtensionData[Name='Preferences' or Name='Xml']/Extension/Record/Value"))
+    if ($cells.Count -ne $expected.Count) {
+        return $false
+    }
+    for ($index = 0; $index -lt $cells.Count; $index++) {
+        $cell = $cells[$index]
+        $spec = $expected[$index]
+        $properties = ([xml]$cell.InnerText).SelectSingleNode('/Fixture/Properties')
+        if ($null -eq $properties) {
+            return $false
+        }
+        $presence = @($properties.PSBase.Attributes | Where-Object LocalName -like '*Present')
+        if ($cell.SelectSingleNode('../../../Name').InnerText -cne $spec.Extension -or
+            $properties.HasAttribute($spec.Attribute) -or $presence.Count -ne 1 -or
+            $presence[0].PSBase.Value -cne $spec.Presence) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-WriterOrdinarySource($Service, [scriptblock]$Compatibility) {
+    $data = New-WriterInput Empty
+    $bytes = [byte[]]@(19, 42)
+    $data.Policy.RegistrySettings = @(
+        New-WriterRegistry NativeBytes 3 $bytes
+        New-WriterRegistry RawArray 3 ([object[]]@(19, 42))
+        New-WriterRegistry ExplicitNull 3 $null
+    )
+    $formatted = "<Fixture>`n  <Child Name='Password policy explanation' />`n</Fixture>"
+    $data.Policy.XmlFiles = @(
+        [pscustomobject]@{
+            Scope = 'Computer'
+            Kind = 'Preferences'
+            Path = 'Machine/formatted.xml'
+            Xml = $formatted
+        }
+    )
+    $before = ConvertTo-Json -InputObject $data -Depth 16 -Compress
+    $json = ConvertFrom-Json -InputObject $before
+    $native = Get-WriterXml ($Service.Render($data.Gpo, $data.Policy))
+    $restored = Get-WriterXml ($Service.Render($json.Gpo, $json.Policy, @{}, @{}))
+    $nativeLegacy = Get-WriterXml (& $Compatibility $data.Gpo $data.Policy)
+    $restoredLegacy = Get-WriterXml (& $Compatibility $json.Gpo $json.Policy)
+    $registry = "//ExtensionData[Name='Registry']/Extension/Record/Value"
+    $xml = "//ExtensionData[Name='Preferences']/Extension/Record/Value"
+    $nativeDoc = [xml]$native
+    $restoredDoc = [xml]$restored
+    $nativeValues = @($nativeDoc.SelectNodes($registry) | ForEach-Object InnerText)
+    $restoredValues = @($restoredDoc.SelectNodes($registry) | ForEach-Object InnerText)
+    return $native -ceq $nativeLegacy -and $restored -ceq $restoredLegacy -and
+        $nativeValues.Count -eq 3 -and $restoredValues.Count -eq 3 -and
+        $nativeValues[0] -ceq [Convert]::ToBase64String($bytes) -and
+        $nativeValues[1] -ceq '[19,42]' -and $restoredValues[0] -ceq '[19,42]' -and
+        $nativeDoc.SelectSingleNode($xml).InnerText -ceq $formatted -and
+        $restoredDoc.SelectSingleNode($xml).InnerText -ceq $formatted -and
+        [object]::ReferenceEquals($bytes, $data.Policy.RegistrySettings[0].Value) -and
+        $before -ceq (ConvertTo-Json -InputObject $data -Depth 16 -Compress)
+}
+
+function Get-WriterDirectSafetyChecks($Service, [scriptblock]$Compatibility) {
+    Set-StrictMode -Version Latest
+    $marker = 'inert-render-presence-fixture'
+    $data = New-WriterSafetyInput $marker
+    $before = ConvertTo-Json -InputObject $data -Depth 16 -Compress
+    $ProjectSecretInput = $false
+    $implicit = Get-WriterXml ($Service.Render($data.Gpo, $data.Policy))
+    $explicit = Get-WriterXml ($Service.Render($data.Gpo, $data.Policy, @{}, @{}))
+    $inputModeUnchanged = -not $ProjectSecretInput
+    $normalized = [ADAnalyzerGpoSourceNormalizer]::new().Normalize($data.Policy)
+    $safe = $null
+    try {
+        $safe = Get-WriterXml ($Service.Render($data.Gpo, $normalized))
+    }
+    catch {
+        if ($_.FullyQualifiedErrorId -ne 'PropertyNotFoundStrict' -or
+            -not $_.Exception.Message.Contains("'Source'")) {
+            throw
+        }
+    }
+
+    $ProjectSecretInput = $true
+    $legacy = Get-WriterXml (& $Compatibility $data.Gpo $data.Policy)
+    . ([scriptblock]::Create($script:Oracle))
+    $frozen = Get-WriterXml (ConvertTo-AnalyzerGpoXml $data.Gpo $data.Policy)
+    $beforeOrdinary = Test-WriterOrdinarySource $Service $Compatibility
+    return [ordered]@{
+        'Ordinary native, JSON and formatted XML' = $beforeOrdinary
+        'Implicit overload Boolean-only' = (Test-WriterPresenceOnly $implicit $marker)
+        'Explicit overload Boolean-only' = (Test-WriterPresenceOnly $explicit $marker)
+        'Raw and normalized direct equality' = ($null -ne $safe -and $implicit -ceq $safe -and $explicit -ceq $safe)
+        'Unmodified inputs and caller mode' = ($inputModeUnchanged -and $ProjectSecretInput -and
+            $before -ceq (ConvertTo-Json -InputObject $data -Depth 16 -Compress))
+        'Raw compatibility remains frozen' = ($frozen -ceq $legacy -and $legacy.Contains($marker))
+    }
+}
+
+function Assert-WriterDirectSafetyChecks([Collections.IDictionary]$Checks) {
+    $failed = @(foreach ($name in $Checks.Keys) {
+            if (-not $Checks[$name]) {
+                $name
+            }
+        })
+    Assert-WriterFixture ($failed.Count -eq 0) ('Direct writer failed checks: ' + ($failed -join ', ') + '.')
+}
+
 function Get-WriterFixtureError([Management.Automation.ErrorRecord]$Item) {
     $cause = $Item.Exception.GetBaseException()
     [pscustomobject]@{
@@ -623,7 +839,7 @@ function Invoke-WriterHelper([bool]$Frozen, [string]$Mode) {
     }
 }
 
-if ($Case -ne 'Direct') {
+if ($Case -in 'Contracts', 'Uncaught') {
     Add-Type @'
 public sealed class WriterFixtureBadScalar
 {
@@ -670,11 +886,73 @@ function Invoke-WriterChild([bool]$Frozen) {
     ConvertFrom-Json -InputObject ([string]$lines[0])
 }
 
+function Start-WriterDirectChild([string]$Mode, [string]$Fault, [bool]$LoadStandalone) {
+    $exe = (Get-Process -Id $PID).Path
+    $arguments = @(
+        '-NoLogo'
+        '-NoProfile'
+        '-NonInteractive'
+        '-File'
+        $PSCommandPath
+        '-Case'
+        $Mode
+        '-RepositoryRoot'
+        $RepositoryRoot
+        '-XmlFault'
+        $Fault
+    )
+    if ($LoadStandalone) {
+        $arguments += '-Standalone'
+    }
+    $ErrorActionPreference = 'Continue'
+    $PSNativeCommandUseErrorActionPreference = $false
+    $lines = @(& $exe @arguments 2>&1)
+    [pscustomobject]@{
+        ExitCode = $LASTEXITCODE
+        Lines = $lines
+    }
+}
+
+if ($Case -eq 'DirectXmlFault') {
+    Set-StrictMode -Version Latest
+    $data = New-WriterInput IniXml
+    $xml = '<Fixture><Properties name="Password" value="inert-unreadable-fixture" />'
+    if ($XmlFault -eq 'Dtd') {
+        $xml = '<!DOCTYPE Fixture [<!ELEMENT Fixture EMPTY>]><Fixture />'
+    }
+    $data.Policy.XmlFiles = @($data.Policy.XmlFiles[0], [pscustomobject]@{
+            Scope = 'Computer'
+            Kind = 'Preferences'
+            Path = 'Machine/unreadable.xml'
+            Xml = $xml
+        }, $data.Policy.XmlFiles[1])
+    $service = [ADAnalyzerGpoXmlWriter]::new()
+    $ErrorActionPreference = 'Continue'
+    Write-Output 'START direct writer XML'
+    $results = @($service.Render($data.Gpo, $data.Policy))
+    Write-Output "RETURN direct writer XML $($results.Count)"
+    exit
+}
+
+if ($Case -eq 'DirectStandalone') {
+    Assert-WriterFixtureBinding
+    $compatibility = (Get-Command ConvertTo-AnalyzerGpoXml -CommandType Function).ScriptBlock
+    function ConvertTo-AnalyzerGpoXml {
+        throw 'The standalone object renderer called its compatibility writer.'
+    }
+    $service = [ADAnalyzerGpoXmlWriter]::new()
+    $checks = Get-WriterDirectSafetyChecks $service $compatibility
+    Assert-WriterDirectSafetyChecks $checks
+    Write-Host "PASS GPO XML writer DirectStandalone $($checks.Count)"
+    exit
+}
+
 Assert-WriterFixtureBinding
 $count = 1
 $route = 'Command'
 $service = $null
 if ($Case -eq 'Direct') {
+    $compatibility = (Get-Command ConvertTo-AnalyzerGpoXml -CommandType Function).ScriptBlock
 
     function ConvertTo-AnalyzerGpoXml {
         throw 'The object renderer called its compatibility writer.'
@@ -760,5 +1038,25 @@ else {
     Assert-WriterFixture ($explicit.Contains('Fixture resolved') -and -not $defaults.Contains('Fixture resolved') -and
         $defaults.Contains('Administrators') -and $fresh -ceq $defaults) 'A prior SID map changed default or independent rendering.'
     $count++
+
+    $checks = Get-WriterDirectSafetyChecks $service $compatibility
+    $standaloneResult = Start-WriterDirectChild DirectStandalone Malformed $false
+    $checks['Fresh standalone direct coverage'] = $standaloneResult.ExitCode -eq 0 -and
+        $standaloneResult.Lines.Count -eq 1 -and
+        [string]$standaloneResult.Lines[0] -ceq "PASS GPO XML writer DirectStandalone $($checks.Count)"
+    foreach ($loader in @('Full', 'Standalone')) {
+        foreach ($fault in @('Malformed', 'Dtd')) {
+            $child = Start-WriterDirectChild DirectXmlFault $fault ($loader -eq 'Standalone')
+            $transcript = $child.Lines -join "`n"
+            $checks["$loader/$fault rejects XML under uncaught Continue"] = $child.ExitCode -ne 0 -and
+                $transcript.Contains('START direct writer XML') -and
+                $transcript.Contains('Provided policy XML is unreadable.') -and
+                -not $transcript.Contains('RETURN direct writer XML') -and
+                -not $transcript.Contains('<GPO>') -and
+                -not $transcript.Contains('inert-unreadable-fixture')
+        }
+    }
+    Assert-WriterDirectSafetyChecks $checks
+    $count += $checks.Count
 }
 Write-Host "PASS GPO XML writer $Case $count"
