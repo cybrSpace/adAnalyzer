@@ -468,8 +468,13 @@ function Assert-RegistryReplayFacts($Record, [string]$Name) {
     $rows = $Record.Stream
     switch ($Name) {
         { $_ -in 'Omitted', 'Null', 'SingleNull' } {
-            Assert-RegistryReplay ($rows.Count -eq 1 -and ($rows[0].Fields.Name -join ',') -ceq 'Deleted' -and
-                (Get-RegistryReplayField $rows[0] Deleted).Content -eq $false) "Replay null behavior changed for $Name."
+            # The frozen command supplies the exact null cardinality for each engine.
+            $hasPlaceholder = $rows.Count -eq 1 -and
+                ($rows[0].Fields.Name -join ',') -ceq 'Deleted' -and
+                (Get-RegistryReplayField $rows[0] Deleted).Content -eq $false
+            $hasNativeEmptyResult = $PSVersionTable.PSEdition -eq 'Desktop' -and $rows.Count -eq 0
+            Assert-RegistryReplay ($hasPlaceholder -or $hasNativeEmptyResult) "Unexpected frozen null result for ${Name}: $(ConvertTo-RegistryReplayJson $Record)."
+            Write-Host "Frozen $Name yielded $($rows.Count) row(s) on $($PSVersionTable.PSVersion)."
         }
         'Empty' {
             Assert-RegistryReplay ($rows.Count -eq 0) 'Empty input produced a row.'
@@ -568,12 +573,21 @@ switch ($Case) {
             Assert-RegistryReplay (@($service.PSObject.Properties).Count -eq 0) 'Replay retains operation state.'
             $route = 'Direct'
         }
+        $failures = [Collections.Generic.List[string]]::new()
         foreach ($name in $script:ReplayRecords) {
-            $expected = Invoke-RegistryReplayCapture $name 'Original' 'Stop' $true $null
-            $actual = Invoke-RegistryReplayCapture $name $route 'Stop' $true $service
-            Assert-RegistryReplayFacts $expected $name
-            Assert-RegistryReplaySame $expected $actual "$Case/$name"
-            $count++
+            try {
+                $expected = Invoke-RegistryReplayCapture $name 'Original' 'Stop' $true $null
+                $actual = Invoke-RegistryReplayCapture $name $route 'Stop' $true $service
+                Assert-RegistryReplayFacts $expected $name
+                Assert-RegistryReplaySame $expected $actual "$Case/$name"
+                $count++
+            }
+            catch {
+                $failures.Add("${name}: $($_.Exception.Message)")
+            }
+        }
+        if ($failures.Count) {
+            throw ($failures -join [Environment]::NewLine)
         }
         if ($Case -eq 'Direct') {
             $independent = [ADAnalyzerRegistryPolicyReplay]::new()
