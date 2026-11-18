@@ -874,6 +874,240 @@ function ConvertTo-ADAnalyzerProvidedGpoPolicy {
     })
 }
 
+class ADAnalyzerGpoCatalog {
+    ADAnalyzerGpoCatalog() {
+    }
+
+    [object[]] GetAll([string]$Domain) {
+        return $this.GetAll($Domain, $Domain, [pscredential]::Empty)
+    }
+
+    [object[]] GetAll([string]$Domain, [string]$Server) {
+        return $this.GetAll($Domain, $Server, [pscredential]::Empty)
+    }
+
+    [object[]] GetAll([string]$Domain, [string]$Server, [pscredential]$Credential) {
+        return $this.Discover($Domain, $Server, $Credential, 'All', [guid]::Empty, '')
+    }
+
+    [object[]] FindById([guid]$Guid, [string]$Domain) {
+        return $this.FindById($Guid, $Domain, $Domain, [pscredential]::Empty)
+    }
+
+    [object[]] FindById([guid]$Guid, [string]$Domain, [string]$Server) {
+        return $this.FindById($Guid, $Domain, $Server, [pscredential]::Empty)
+    }
+
+    [object[]] FindById([guid]$Guid, [string]$Domain, [string]$Server, [pscredential]$Credential) {
+        return $this.Discover($Domain, $Server, $Credential, 'Guid', $Guid, '')
+    }
+
+    [object[]] FindByName([string]$Name, [string]$Domain) {
+        return $this.FindByName($Name, $Domain, $Domain, [pscredential]::Empty)
+    }
+
+    [object[]] FindByName([string]$Name, [string]$Domain, [string]$Server) {
+        return $this.FindByName($Name, $Domain, $Server, [pscredential]::Empty)
+    }
+
+    [object[]] FindByName([string]$Name, [string]$Domain, [string]$Server, [pscredential]$Credential) {
+        return $this.Discover($Domain, $Server, $Credential, 'Name', [guid]::Empty, $Name)
+    }
+
+    hidden [bool] IsHostName([hashtable]$Observed) {
+        return -not ($Observed.Value -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$')
+    }
+
+    hidden [hashtable] NewConnection([string]$Server, [pscredential]$Credential) {
+        $connection = @{
+            Server = $Server
+            ErrorAction = 'Stop'
+        }
+        if ($Credential -and $Credential -ne [pscredential]::Empty) {
+            $connection.Credential = $Credential
+        }
+        return $connection
+    }
+
+    hidden [hashtable] QueryDefinitions() {
+        return @{
+            PolicyBasePrefix = 'CN=Policies,CN=System,'
+            SiteBasePrefix = 'CN=Sites,'
+            LinkPattern = '(?i)\[LDAP://(?<dn>[^;]+);(?<flags>\d+)\]'
+            Policies = @{
+                LDAPFilter = '(objectClass=groupPolicyContainer)'
+                Properties = @(
+                    'displayName'
+                    'gPCFileSysPath'
+                    'flags'
+                    'whenCreated'
+                    'whenChanged'
+                    'versionNumber'
+                    'gPCWQLFilter'
+                    'gPCMachineExtensionNames'
+                    'gPCUserExtensionNames'
+                )
+            }
+            Links = @{
+                LDAPFilter = '(gPLink=*)'
+                Properties = @('gPLink', 'gPOptions', 'distinguishedName')
+            }
+        }
+    }
+
+    hidden [bool] RejectGuid([guid]$Observed, [guid]$Requested) {
+        return $Observed -ne $Requested
+    }
+
+    hidden [bool] RejectName([hashtable]$Observed, [string]$Requested) {
+        return $Observed.Name -ine $Requested
+    }
+
+    hidden [pscustomobject] BuildLink([hashtable]$Observed) {
+        return [pscustomobject]@{
+            SOMPath = $Observed.SOMPath
+            Enabled = ($Observed.Options -band 1) -eq 0
+            Enforced = ($Observed.Options -band 2) -ne 0
+            StoredLinkIndex = $Observed.Index
+            BlockInheritance = ($Observed.InheritanceOptions -band 1) -ne 0
+        }
+    }
+
+    hidden [pscustomobject] BuildPolicy([hashtable]$Observed) {
+        $statusNames = @(
+            'AllSettingsEnabled'
+            'UserSettingsDisabled'
+            'ComputerSettingsDisabled'
+            'AllSettingsDisabled'
+        )
+        return [pscustomobject]@{
+            Id = $Observed.Id
+            DisplayName = $Observed.DisplayName
+            CreationTime = $Observed.CreationTime
+            ModificationTime = $Observed.ModificationTime
+            GPOStatus = $statusNames[$Observed.Flags -band 3]
+            Flags = $Observed.Flags
+            Version = $Observed.Version
+            Domain = $Observed.Domain
+            Server = $Observed.Server
+            RequestedServer = $Observed.RequestedServer
+            DistinguishedName = $Observed.DistinguishedName
+            DirectoryFilePath = $Observed.DirectoryFilePath
+            PolicyPath = ('\\{0}\SYSVOL\{1}\Policies\{2}' -f $Observed.Server, $Observed.Domain, $Observed.Id.ToString('B'))
+            Links = $Observed.Links
+            WmiFilter = $Observed.WmiFilter
+            MachineExtensions = $Observed.MachineExtensions
+            UserExtensions = $Observed.UserExtensions
+        }
+    }
+
+    hidden [object[]] Discover(
+        [string]$Domain, [string]$Server, [pscredential]$Credential,
+        [string]$Selection, [guid]$Guid, [string]$Name
+    ) {
+        $ErrorActionPreference = 'Stop'
+        $catalog = $this
+        if (-not $catalog.IsHostName(@{ Value = $Server })) {
+            throw 'Server must be a DNS or NetBIOS host name'
+        }
+        if ([string]::IsNullOrWhiteSpace($Domain)) {
+            throw [ArgumentException]::new('Domain must be supplied.', 'Domain')
+        }
+        if ($Selection -eq 'Guid' -and $Guid -eq [guid]::Empty) {
+            throw [ArgumentException]::new('GPO GUID must be supplied.', 'Guid')
+        }
+        if ($Selection -eq 'Name' -and [string]::IsNullOrWhiteSpace($Name)) {
+            throw [ArgumentException]::new('GPO name must be supplied.', 'Name')
+        }
+
+        $providerPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'lib/Microsoft.ActiveDirectory.Management.dll'
+        $provider = Import-Module -Name $providerPath -Scope Local -PassThru -ErrorAction Stop
+        $cmdlets = $provider.ExportedCmdlets
+        $rootCommand = $cmdlets['Get-ADRootDSE']
+        $domainCommand = $cmdlets['Get-ADDomain']
+        $objectCommand = $cmdlets['Get-ADObject']
+        if ($null -eq $rootCommand -or $null -eq $domainCommand -or $null -eq $objectCommand) {
+            throw 'Bundled AD assembly does not provide the required catalog commands'
+        }
+
+        $connection = $catalog.NewConnection($Server, $Credential)
+        $requestedServer = $Server
+        $rootDse = & $rootCommand @connection
+        if (-not $catalog.IsHostName(@{ Value = $rootDse.DnsHostName })) {
+            throw 'The directory server did not return a valid DC host name'
+        }
+        $Server = [string]$rootDse.DnsHostName
+        if (-not $catalog.IsHostName(@{ Value = $Server })) {
+            throw 'The directory server did not return a valid DC host name'
+        }
+        $connection.Server = $Server
+        $domainInfo = & $domainCommand -Identity $Domain @connection
+        $dns = [string]$domainInfo.DNSRoot
+        if (-not $catalog.IsHostName(@{ Value = $dns })) {
+            throw 'Invalid domain DNS name'
+        }
+
+        $queries = $catalog.QueryDefinitions()
+        $policyQuery = $queries.Policies
+        $linkQuery = $queries.Links
+        $linkPattern = $queries.LinkPattern
+        $base = $queries.PolicyBasePrefix + $domainInfo.DistinguishedName
+        $objects = @(& $objectCommand -SearchBase $base @policyQuery @connection)
+        $links = @(& $objectCommand -SearchBase $domainInfo.DistinguishedName @linkQuery @connection)
+        if ($rootDse.ConfigurationNamingContext) {
+            $links += @(& $objectCommand -SearchBase ($queries.SiteBasePrefix + $rootDse.ConfigurationNamingContext) @linkQuery @connection)
+        }
+
+        $policies = [Collections.Generic.List[object]]::new()
+        foreach ($object in $objects) {
+            $id = [guid]([string]$object.Name).Trim('{}')
+            if ($selection -eq 'Guid' -and $catalog.RejectGuid($id, $Guid)) {
+                continue
+            }
+            if ($selection -eq 'Name' -and $catalog.RejectName(@{ Name = $object.displayName }, $Name)) {
+                continue
+            }
+
+            $policyLinks = [Collections.ArrayList]::new()
+            foreach ($container in $links) {
+                $storedIndex = 0
+                foreach ($match in [regex]::Matches([string]$container.gPLink, $linkPattern)) {
+                    if ($match.Groups['dn'].Value -ieq $object.DistinguishedName) {
+                        $options = [int]$match.Groups['flags'].Value
+                        $null = $policyLinks.Add($catalog.BuildLink(@{
+                                SOMPath = $container.DistinguishedName
+                                Options = $options
+                                Index = $storedIndex
+                                InheritanceOptions = ([int]$container.gPOptions)
+                            }))
+                    }
+                    $storedIndex++
+                }
+            }
+
+            $flags = [int]$object.flags
+            $policies.Add($catalog.BuildPolicy(@{
+                    Id = $id
+                    DisplayName = $object.displayName
+                    CreationTime = $object.whenCreated
+                    ModificationTime = $object.whenChanged
+                    Flags = $flags
+                    Version = $object.versionNumber
+                    Domain = $dns
+                    Server = $Server
+                    RequestedServer = $requestedServer
+                    DistinguishedName = $object.DistinguishedName
+                    DirectoryFilePath = $object.gPCFileSysPath
+                    Links = $policyLinks.ToArray()
+                    WmiFilter = $object.gPCWQLFilter
+                    MachineExtensions = $object.gPCMachineExtensionNames
+                    UserExtensions = $object.gPCUserExtensionNames
+                }))
+        }
+        return $policies.ToArray()
+    }
+}
+
 function Get-ADAnalyzerGpo {
     [CmdletBinding(DefaultParameterSetName = 'All')]
     param(
@@ -885,55 +1119,38 @@ function Get-ADAnalyzerGpo {
         [pscredential]$Credential = [pscredential]::Empty
 
     )
-    if ($Server -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+    $catalog = [ADAnalyzerGpoCatalog]::new()
+    $selection = $PSCmdlet.ParameterSetName
+    if (-not $catalog.IsHostName(@{ Value = $Server })) {
         throw 'Server must be a DNS or NetBIOS host name'
     }
-    $connection = @{
-        Server = $Server
-        ErrorAction = 'Stop'
-    }
-    if ($Credential -and $Credential -ne [pscredential]::Empty) {
-        $connection.Credential = $Credential
-    }
+
+    # Keep provider calls and raw reads in native scope for command error capture.
+    $connection = $catalog.NewConnection($Server, $Credential)
     $requestedServer = $Server
     $rootDse = Get-ADRootDSE @connection
-    if ($rootDse.DnsHostName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+    if (-not $catalog.IsHostName(@{ Value = $rootDse.DnsHostName })) {
         throw 'The directory server did not return a valid DC host name'
     }
     $Server = [string]$rootDse.DnsHostName
     $connection.Server = $Server
     $domainInfo = Get-ADDomain -Identity $Domain @connection
     $dns = [string]$domainInfo.DNSRoot
-    if ($dns -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+    if (-not $catalog.IsHostName(@{ Value = $dns })) {
         throw 'Invalid domain DNS name'
     }
-    $base = 'CN=Policies,CN=System,' + $domainInfo.DistinguishedName
-    $objects = @(Get-ADObject `
-            -LDAPFilter '(objectClass=groupPolicyContainer)' `
-            -SearchBase $base `
-            -Properties displayName,
-        gPCFileSysPath,
-        flags,
-        whenCreated,
-        whenChanged,
-        versionNumber,
-        gPCWQLFilter,
-        gPCMachineExtensionNames,
-        gPCUserExtensionNames @connection)
-    $links = @(Get-ADObject `
-            -LDAPFilter '(gPLink=*)' `
-            -SearchBase $domainInfo.DistinguishedName `
-            -Properties gPLink,
-        gPOptions,
-        distinguishedName @connection)
+
+    $queries = $catalog.QueryDefinitions()
+    $policyQuery = $queries.Policies
+    $linkQuery = $queries.Links
+    $linkPattern = $queries.LinkPattern
+    $base = $queries.PolicyBasePrefix + $domainInfo.DistinguishedName
+    $objects = @(Get-ADObject -SearchBase $base @policyQuery @connection)
+    $links = @(Get-ADObject -SearchBase $domainInfo.DistinguishedName @linkQuery @connection)
     if ($rootDse.ConfigurationNamingContext) {
-        $links += @(Get-ADObject `
-                -LDAPFilter '(gPLink=*)' `
-                -SearchBase ('CN=Sites,' + $rootDse.ConfigurationNamingContext) `
-                -Properties gPLink,
-            gPOptions,
-            distinguishedName @connection)
+        $links += @(Get-ADObject -SearchBase ($queries.SiteBasePrefix + $rootDse.ConfigurationNamingContext) @linkQuery @connection)
     }
+
     foreach ($object in $objects) {
         # A failed native cast under Continue leaves the variable unchanged.
         $id = $null
@@ -941,56 +1158,56 @@ function Get-ADAnalyzerGpo {
         if ($null -eq $id) {
             continue
         }
-        if ($PSCmdlet.ParameterSetName -eq 'Guid' -and $id -ne $Guid) {
+        if ($selection -eq 'Guid' -and $catalog.RejectGuid($id, $Guid)) {
             continue
         }
-        if ($PSCmdlet.ParameterSetName -eq 'Name' -and $object.displayName -ine $Name) {
+        if ($selection -eq 'Name' -and $catalog.RejectName(@{ Name = $object.displayName }, $Name)) {
             continue
         }
+
         $policyLinks = [Collections.ArrayList]::new()
         foreach ($container in $links) {
             $storedIndex = 0
-            foreach ($match in [regex]::Matches([string]$container.gPLink, '(?i)\[LDAP://(?<dn>[^;]+);(?<flags>\d+)\]')) {
+            foreach ($match in [regex]::Matches([string]$container.gPLink, $linkPattern)) {
                 if ($match.Groups['dn'].Value -ieq $object.DistinguishedName) {
                     $options = $null
                     $options = [int]$match.Groups['flags'].Value
                     if ($null -ne $options) {
-                        $null = $policyLinks.Add([pscustomobject]@{
+                        $null = $policyLinks.Add($catalog.BuildLink(@{
                                 SOMPath = $container.DistinguishedName
-                                Enabled = ($options -band 1) -eq 0
-                                Enforced = ($options -band 2) -ne 0
-                                StoredLinkIndex = $storedIndex
-                                BlockInheritance = ([int]$container.gPOptions -band 1) -ne 0
-                            })
+                                Options = $options
+                                Index = $storedIndex
+                                InheritanceOptions = ([int]$container.gPOptions)
+                            }))
                     }
                 }
                 $storedIndex++
             }
         }
+
         $flags = $null
         $flags = [int]$object.flags
         if ($null -eq $flags) {
             continue
         }
-        [pscustomobject]@{
-            Id = $id
-            DisplayName = $object.displayName
-            CreationTime = $object.whenCreated
-            ModificationTime = $object.whenChanged
-            GPOStatus = @('AllSettingsEnabled', 'UserSettingsDisabled', 'ComputerSettingsDisabled', 'AllSettingsDisabled')[$flags -band 3]
-            Flags = $flags
-            Version = $object.versionNumber
-            Domain = $dns
-            Server = $Server
-            RequestedServer = $requestedServer
-            DistinguishedName = $object.DistinguishedName
-            DirectoryFilePath = $object.gPCFileSysPath
-            PolicyPath = ('\\{0}\SYSVOL\{1}\Policies\{2}' -f $Server, $dns, $id.ToString('B'))
-            Links = $policyLinks.ToArray()
-            WmiFilter = $object.gPCWQLFilter
-            MachineExtensions = $object.gPCMachineExtensionNames
-            UserExtensions = $object.gPCUserExtensionNames
-        }
+
+        $catalog.BuildPolicy(@{
+                Id = $id
+                DisplayName = $object.displayName
+                CreationTime = $object.whenCreated
+                ModificationTime = $object.whenChanged
+                Flags = $flags
+                Version = $object.versionNumber
+                Domain = $dns
+                Server = $Server
+                RequestedServer = $requestedServer
+                DistinguishedName = $object.DistinguishedName
+                DirectoryFilePath = $object.gPCFileSysPath
+                Links = $policyLinks.ToArray()
+                WmiFilter = $object.gPCWQLFilter
+                MachineExtensions = $object.gPCMachineExtensionNames
+                UserExtensions = $object.gPCUserExtensionNames
+            })
     }
 }
 

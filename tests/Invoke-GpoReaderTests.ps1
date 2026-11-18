@@ -253,6 +253,12 @@ try {
             RequireExactCaseCount = $true
         }
         [pscustomobject]@{
+            Name = 'GPO catalog class'
+            Script = 'GpoCatalogClassFixture.ps1'
+            Cases = $constructorCases
+            RequireExactCaseCount = $false
+        }
+        [pscustomobject]@{
             Name = 'GPO report drive failure'
             Script = 'GpoReportDriveFailureFixture.ps1'
             Cases = [ordered]@{

@@ -131,6 +131,9 @@ $offlineEngine = [ADAnalyzerAssessmentEngine]::new()
 $scan = $offlineEngine.Evaluate($directorySnapshot)
 $reader = [ADAnalyzerGpoReader]::new()
 $policy = $reader.Read('C:\PolicyCopies\{GPO-GUID}')
+$catalog = [ADAnalyzerGpoCatalog]::new()
+# The explicit lookup uses the packaged Windows directory provider.
+$policies = $catalog.GetAll($domain)
 $normalizer = [ADAnalyzerGpoSourceNormalizer]::new()
 $normalizedPolicy = $normalizer.Normalize($providedReport.Policy)
 $xmlWriter = [ADAnalyzerGpoXmlWriter]::new()
@@ -164,6 +167,8 @@ $rawValue = $projector.GetValue($record, @('Primary', 'Fallback'), $null)
 The constructor validates and copies its in-memory profile without importing native modules or connecting to AD. Instance methods own assessment composition, policy/version evidence, suppression, duplicate detection, coverage, state, and safe report projection. Reports retain the existing detached assessment shape; the engine stores no credentials or collected records. A bundled C# configuration holder uses a private field, so serializing an engine does not serialize its profile. The built-in `Add-Type` loads that small source component; no separate build tool or external package is required. Each instance owns its configuration, and evaluating again does not retain earlier results. Direct methods throw on evaluation errors. The existing `Invoke-ADAnalyzerAssessment` command is a thin compatibility adapter with its original parameters and a transient command context for PowerShell error-stream/common-parameter behavior. Other engine components are being converted in separate verified units.
 
 `ADAnalyzerGpoReader` owns the actual folder reader and INI, CSV, Registry.pol, XML, INF-flag, and security-option parsers. It retains no scan data or handles. `Read(path)` returns the existing policy DTO, and `ReadRegistryPolicy(path, scope)` returns typed registry records. Raw INI/XML and scalar parsing methods are internal implementation helpers; their compatibility functions retain the original source-parser contracts. Direct registry parsing buffers records and throws on invalid content; the compatibility `Read-AnalyzerRegistryPolicy` command preserves its earlier record streaming before a late parse failure. Existing reader commands delegate to the class; their consumer boundaries remain available. Reader construction is inert, and file/reader resources are closed before a successful direct return or after failure.
+
+`ADAnalyzerGpoCatalog` owns GPO lookup, server selection, link interpretation, and catalog record assembly. Its constructor is inert. Call `GetAll(domain)`, `FindById(guid, domain)`, or `FindByName(name, domain)`. Each method also accepts a server and an optional credential as trailing arguments. The server defaults to the domain, and ID lookups require a nonempty GUID. Explicit lookups use the bundled Windows Active Directory provider. Each call validates the requested host, pins the returned domain controller, and returns fresh catalog records with domain and site links. The compatibility command retains native PowerShell binding, streaming, and error capture.
 
 `ADAnalyzerGpoSourceNormalizer` validates and normalizes the policy from a prefetched package report, including its JSON round-trip. Construction performs no collection or file access. `Normalize(policy)` parses XML with DTD processing prohibited, restores ordinary binary registry values, and retains Boolean presence for identified secrets. It returns a fresh root, independent XML and registry rows, and shallow references to other ordinary input rows and values. Direct normalization throws on invalid input. The compatibility command preserves native PowerShell error and continuation behavior.
 
