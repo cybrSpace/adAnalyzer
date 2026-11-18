@@ -2484,200 +2484,254 @@ function Test-ADAnalyzerGpoPolicy {
     $evaluator.EvaluateForCommand($Gpo, $Policy, $Profile, $PSCmdlet, $preference)
 }
 
-function Get-ADAnalyzerAdmxValue {
-    param([Xml.XmlNode]$Node)
-    if (-not $Node) {
-        return [pscustomobject]@{
-            Valid = $false
-            Value = $null
-            Deleted = $false
-        }
+class ADAnalyzerAdmxResolver {
+    ADAnalyzerAdmxResolver() {
     }
-    $value = $Node.SelectSingleNode('./*[1]')
-    if (-not $value) {
-        return [pscustomobject]@{
-            Valid = $false
-            Value = $null
-            Deleted = $false
-        }
-    }
-    switch ($value.PSBase.LocalName) {
-        'decimal' {
-            $n = ConvertTo-ADAnalyzerPolicyNumber (Get-ADAnalyzerXmlAttribute $value value)
+
+    [pscustomobject] ReadValue([Xml.XmlNode]$Node) {
+        if (-not $Node) {
             return [pscustomobject]@{
-                Valid = $n.Valid
-                Value = $n.Value
-                Deleted = $false
-            }
-        }
-        'longDecimal' {
-            $n = ConvertTo-ADAnalyzerPolicyNumber (Get-ADAnalyzerXmlAttribute $value value)
-            return [pscustomobject]@{
-                Valid = $n.Valid
-                Value = $n.Value
-                Deleted = $false
-            }
-        }
-        'string' {
-            return [pscustomobject]@{
-                Valid = $true
-                Value = $value.PSBase.InnerText
-                Deleted = $false
-            }
-        }
-        'delete' {
-            return [pscustomobject]@{
-                Valid = $true
+                Valid = $false
                 Value = $null
-                Deleted = $true
+                Deleted = $false
             }
         }
-    }
-    [pscustomobject]@{
-        Valid = $false
-        Value = $null
-        Deleted = $false
-    }
-}
-
-function Test-ADAnalyzerAdmxOptionalField {
-    param(
-        $Record,
-        [string]$Name
-    )
-    if ($Record -is [Collections.IDictionary]) {
-        $type = $Record.GetType()
-        $isGenericDictionary = $type.IsGenericType -and
-            $type.GetGenericTypeDefinition() -eq [Collections.Generic.Dictionary[string, object]].GetGenericTypeDefinition()
-        if ($type -notin [hashtable], [Collections.Specialized.OrderedDictionary] -and
-            -not $isGenericDictionary) {
-            # Let PowerShell perform the only lookup on custom dictionary implementations.
-            return $true
+        $value = $Node.SelectSingleNode('./*[1]')
+        if (-not $value) {
+            return [pscustomobject]@{
+                Valid = $false
+                Value = $null
+                Deleted = $false
+            }
         }
-        if (([Collections.IDictionary]$Record).Contains($Name)) {
-            return $true
+        switch ($value.PSBase.LocalName) {
+            'decimal' {
+                $n = [ADAnalyzerPolicyValueSemantics]::new().ParseNumber((Get-ADAnalyzerXmlAttribute $value value))
+                return [pscustomobject]@{
+                    Valid = $n.Valid
+                    Value = $n.Value
+                    Deleted = $false
+                }
+            }
+            'longDecimal' {
+                $n = [ADAnalyzerPolicyValueSemantics]::new().ParseNumber((Get-ADAnalyzerXmlAttribute $value value))
+                return [pscustomobject]@{
+                    Valid = $n.Valid
+                    Value = $n.Value
+                    Deleted = $false
+                }
+            }
+            'string' {
+                return [pscustomobject]@{
+                    Valid = $true
+                    Value = $value.PSBase.InnerText
+                    Deleted = $false
+                }
+            }
+            'delete' {
+                return [pscustomobject]@{
+                    Valid = $true
+                    Value = $null
+                    Deleted = $true
+                }
+            }
+        }
+        return [pscustomobject]@{
+            Valid = $false
+            Value = $null
+            Deleted = $false
         }
     }
-    elseif ($Record -is [Collections.IEnumerable] -and $Record -isnot [string]) {
-        # Let PowerShell enumerate members of collection-shaped records.
-        return $true
+
+    [object[]] Resolve([object[]]$RegistrySettings) {
+        return $this.Resolve($RegistrySettings, '', 'en-US')
     }
-    return $null -ne $Record.PSObject.Properties[$Name]
-}
 
-function Resolve-ADAnalyzerRegistryPolicy {
-    <# .SYNOPSIS Adds optional offline ADMX/ADML metadata while preserving raw policy records.
-       .DESCRIPTION Supports policy enabled/disabled values and boolean, enum and list elements.
-       Complex multi-key definitions retain explicit Unknown state; no template is required for parsing.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$RegistrySettings,
-        [string]$TemplatePath,
-        [string]$Language = 'en-US'
+    [object[]] Resolve([object[]]$RegistrySettings, [string]$TemplatePath) {
+        return $this.Resolve($RegistrySettings, $TemplatePath, 'en-US')
+    }
 
-    )
-    $definitions = @()
-    $errors = @()
-    $unresolvedDefinition = @{
-        Common = @{
-            PolicyId = $null
-            PolicyNamespace = $null
-            DisplayName = $null
+    [object[]] Resolve([object[]]$RegistrySettings, [string]$TemplatePath, [string]$Language) {
+        if ($null -eq $RegistrySettings -or $RegistrySettings -contains $null) {
+            throw [ArgumentException]::new('Registry records must be supplied and cannot contain null entries.', 'RegistrySettings')
         }
-        Kind = $null
-        ElementId = $null
-    }
-    $templateMissing = -not $TemplatePath -or -not (Test-Path -LiteralPath $TemplatePath -PathType Container)
-    if (-not $templateMissing) {
-        foreach ($file in @(Get-ChildItem -LiteralPath $TemplatePath -Filter '*.admx' -File -ErrorAction Stop)) {
-            try {
-                $xml = Read-AnalyzerPolicyXml $file.FullName
-                $resources = @{}
-                $resourceFileMissing = $false
-                $resourcePath = Join-Path (Join-Path $TemplatePath $Language) ($file.BaseName + '.adml')
-                if (Test-Path -LiteralPath $resourcePath -PathType Leaf) {
-                    $adml = Read-AnalyzerPolicyXml $resourcePath
-                    foreach ($resource in @($adml.SelectNodes('//*[local-name()="stringTable"]/*[local-name()="string"]'))) {
-                        $resources[(Get-ADAnalyzerXmlAttribute $resource id)] = $resource.PSBase.InnerText
-                    }
+
+        $catalogue = $this.LoadCatalogue($TemplatePath, $Language)
+        $results = [Collections.Generic.List[object]]::new()
+        foreach ($row in $RegistrySettings) {
+            $selection = $this.SelectResolution(@{ Record = $row }, $catalogue)
+            if ($null -ne $selection.PresenceRecord) {
+                $results.Add($selection.PresenceRecord)
+                continue
+            }
+
+            $results.Add($this.BuildRecord(@{
+                Scope = $row.Scope
+                Hive = $row.Hive
+                Key = $row.Key
+                ValueName = $row.ValueName
+                Type = $row.Type
+                Value = $row.Value
+                RawData = $(if (Test-ADAnalyzerAdmxOptionalField $row RawData) {
+                    , $row.RawData
                 }
                 else {
-                    $resourceFileMissing = $true
+                    $null
+                })
+                Source = $row.Source
+                KeyOnly = $(if (Test-ADAnalyzerAdmxOptionalField $row KeyOnly) {
+                    , $row.KeyOnly
                 }
-                $namespace = Get-ADAnalyzerXmlAttribute ($xml.SelectSingleNode('//*[local-name()="policyNamespaces"]/*[local-name()="target"]')) namespace
-                foreach ($policy in @($xml.SelectNodes('//*[local-name()="policies"]/*[local-name()="policy"]'))) {
-                    $languageMissing = $resourceFileMissing
-                    $key = Get-ADAnalyzerXmlAttribute $policy key
-                    $valueName = Get-ADAnalyzerXmlAttribute $policy valueName
-                    $name = Get-ADAnalyzerXmlAttribute $policy name
-                    $display = Get-ADAnalyzerXmlAttribute $policy displayName
-                    if ($display -match '^\$\(string\.(.+)\)$') {
-                        if ($resources.ContainsKey($Matches[1])) {
-                            $display = $resources[$Matches[1]]
-                        }
-                        else {
-                            $languageMissing = $true
-                            $display = $name
+                else {
+                    $null
+                })
+                DeletionDirective = $(if (Test-ADAnalyzerAdmxOptionalField $row DeletionDirective) {
+                    , $row.DeletionDirective
+                }
+                else {
+                    $null
+                })
+                Deleted = $(if (Test-ADAnalyzerAdmxOptionalField $row Deleted) {
+                    , $row.Deleted
+                }
+                else {
+                    $null
+                })
+            }, $selection))
+        }
+        return $results.ToArray()
+    }
+
+    hidden [hashtable] LoadCatalogue([string]$TemplatePath, [string]$Language) {
+        $templateMissing = -not $TemplatePath -or -not (Test-Path -LiteralPath $TemplatePath -PathType Container)
+        $files = @()
+        if (-not $templateMissing) {
+            $files = @(Get-ChildItem -LiteralPath $TemplatePath -Filter '*.admx' -File -ErrorAction Stop)
+        }
+        return $this.BuildCatalogue($TemplatePath, $Language, $templateMissing, $files)
+    }
+
+    hidden [hashtable] BuildCatalogue(
+        [string]$TemplatePath,
+        [string]$Language,
+        [bool]$TemplateMissing,
+        [object[]]$Files
+    ) {
+        $definitions = @()
+        $errors = @()
+        $unresolvedDefinition = @{
+            Common = @{
+                PolicyId = $null
+                PolicyNamespace = $null
+                DisplayName = $null
+            }
+            Kind = $null
+            ElementId = $null
+        }
+        if (-not $TemplateMissing) {
+            foreach ($file in $Files) {
+                try {
+                    $xml = Read-AnalyzerPolicyXml $file.FullName
+                    $resources = @{}
+                    $resourceFileMissing = $false
+                    $resourcePath = Join-Path (Join-Path $TemplatePath $Language) ($file.BaseName + '.adml')
+                    if (Test-Path -LiteralPath $resourcePath -PathType Leaf) {
+                        $adml = Read-AnalyzerPolicyXml $resourcePath
+                        foreach ($resource in @($adml.SelectNodes('//*[local-name()="stringTable"]/*[local-name()="string"]'))) {
+                            $resources[(Get-ADAnalyzerXmlAttribute $resource id)] = $resource.PSBase.InnerText
                         }
                     }
-                    $common = @{
-                        PolicyId = $name
-                        PolicyNamespace = $namespace
-                        DisplayName = $display
-                        Class = (Get-ADAnalyzerXmlAttribute $policy class)
-                        Template = $file.Name
-                        LanguageMissing = $languageMissing
-                        Resources = $resources
+                    else {
+                        $resourceFileMissing = $true
                     }
-                    if ($valueName) {
-                        $definitions += [pscustomobject]@{
-                            Common = $common
-                            Kind = 'Policy'
-                            Key = $key
-                            ValueName = $valueName
-                            ElementId = $null
-                            Node = $policy
+                    $namespace = Get-ADAnalyzerXmlAttribute ($xml.SelectSingleNode('//*[local-name()="policyNamespaces"]/*[local-name()="target"]')) namespace
+                    foreach ($policy in @($xml.SelectNodes('//*[local-name()="policies"]/*[local-name()="policy"]'))) {
+                        $languageMissing = $resourceFileMissing
+                        $key = Get-ADAnalyzerXmlAttribute $policy key
+                        $valueName = Get-ADAnalyzerXmlAttribute $policy valueName
+                        $name = Get-ADAnalyzerXmlAttribute $policy name
+                        $display = Get-ADAnalyzerXmlAttribute $policy displayName
+                        if ($display -match '^\$\(string\.(.+)\)$') {
+                            if ($resources.ContainsKey($Matches[1])) {
+                                $display = $resources[$Matches[1]]
+                            }
+                            else {
+                                $languageMissing = $true
+                                $display = $name
+                            }
                         }
-                    }
-                    foreach ($element in @($policy.SelectNodes('./*[local-name()="elements"]/*'))) {
-                        $elementKey = Get-ADAnalyzerXmlAttribute $element key $key
-                        $elementName = Get-ADAnalyzerXmlAttribute $element valueName
-                        $definitions += [pscustomobject]@{
-                            Common = $common
-                            Kind = $element.PSBase.LocalName
-                            Key = $elementKey
-                            ValueName = $elementName
-                            ElementId = (Get-ADAnalyzerXmlAttribute $element id)
-                            Node = $element
+                        $common = @{
+                            PolicyId = $name
+                            PolicyNamespace = $namespace
+                            DisplayName = $display
+                            Class = (Get-ADAnalyzerXmlAttribute $policy class)
+                            Template = $file.Name
+                            LanguageMissing = $languageMissing
+                            Resources = $resources
                         }
-                    }
-                    foreach ($list in @($policy.SelectNodes('./*[local-name()="enabledList" or local-name()="disabledList"]'))) {
-                        foreach ($item in @($list.SelectNodes('./*[local-name()="item"]'))) {
+                        if ($valueName) {
                             $definitions += [pscustomobject]@{
                                 Common = $common
-                                Kind = 'PolicyValueList'
-                                Key = (Get-ADAnalyzerXmlAttribute $item key $key)
-                                ValueName = (Get-ADAnalyzerXmlAttribute $item valueName)
+                                Kind = 'Policy'
+                                Key = $key
+                                ValueName = $valueName
                                 ElementId = $null
-                                Node = $item
+                                Node = $policy
+                            }
+                        }
+                        foreach ($element in @($policy.SelectNodes('./*[local-name()="elements"]/*'))) {
+                            $elementKey = Get-ADAnalyzerXmlAttribute $element key $key
+                            $elementName = Get-ADAnalyzerXmlAttribute $element valueName
+                            $definitions += [pscustomobject]@{
+                                Common = $common
+                                Kind = $element.PSBase.LocalName
+                                Key = $elementKey
+                                ValueName = $elementName
+                                ElementId = (Get-ADAnalyzerXmlAttribute $element id)
+                                Node = $element
+                            }
+                        }
+                        foreach ($list in @($policy.SelectNodes('./*[local-name()="enabledList" or local-name()="disabledList"]'))) {
+                            foreach ($item in @($list.SelectNodes('./*[local-name()="item"]'))) {
+                                $definitions += [pscustomobject]@{
+                                    Common = $common
+                                    Kind = 'PolicyValueList'
+                                    Key = (Get-ADAnalyzerXmlAttribute $item key $key)
+                                    ValueName = (Get-ADAnalyzerXmlAttribute $item valueName)
+                                    ElementId = $null
+                                    Node = $item
+                                }
                             }
                         }
                     }
                 }
-            }
-            catch {
-                $errors += $file.Name
+                catch {
+                    $errors += $file.Name
+                }
             }
         }
+        return @{
+            Definitions = $definitions
+            Errors = $errors
+            TemplateMissing = $TemplateMissing
+            UnresolvedDefinition = $unresolvedDefinition
+        }
     }
-    foreach ($row in @($RegistrySettings)) {
+
+    hidden [hashtable] SelectResolution([hashtable]$InputFrame, [hashtable]$Catalogue) {
+        $row = $InputFrame.Record
+        $definitions = $Catalogue.Definitions
+        $errors = $Catalogue.Errors
+        $templateMissing = $Catalogue.TemplateMissing
+        $unresolvedDefinition = $Catalogue.UnresolvedDefinition
+
         if (Test-ADAnalyzerSecretName $row.ValueName) {
             $safe = ConvertTo-ADAnalyzerSecretRecord $row
             $safe | Add-Member NoteProperty MetadataStatus 'PresenceOnly' -Force
             $safe | Add-Member NoteProperty State 'Unknown' -Force
-            $safe
-            continue
+            return @{
+                PresenceRecord = $safe
+            }
         }
         $class = if ($row.Hive -ieq 'HKCU') {
             'User'
@@ -2718,7 +2772,7 @@ function Resolve-ADAnalyzerRegistryPolicy {
             switch ($definition.Kind) {
                 'Policy' {
                     foreach ($pair in @(@('enabledValue', 'Enabled'), @('disabledValue', 'Disabled'))) {
-                        $value = Get-ADAnalyzerAdmxValue ($definition.Node.SelectSingleNode('./*[local-name()="' + $pair[0] + '"]'))
+                        $value = $this.ReadValue($definition.Node.SelectSingleNode('./*[local-name()="' + $pair[0] + '"]'))
                         if ($value.Valid -and
                             (($value.Deleted -and
                                 (Test-ADAnalyzerAdmxOptionalField $row Deleted) -and
@@ -2731,7 +2785,7 @@ function Resolve-ADAnalyzerRegistryPolicy {
                 }
                 'boolean' {
                     foreach ($pair in @(@('trueValue', 'True'), @('falseValue', 'False'))) {
-                        $value = Get-ADAnalyzerAdmxValue ($definition.Node.SelectSingleNode('./*[local-name()="' + $pair[0] + '"]'))
+                        $value = $this.ReadValue($definition.Node.SelectSingleNode('./*[local-name()="' + $pair[0] + '"]'))
                         if ($value.Valid -and $row.Value -eq $value.Value) {
                             $state = $pair[1]
                         }
@@ -2739,7 +2793,7 @@ function Resolve-ADAnalyzerRegistryPolicy {
                 }
                 'enum' {
                     foreach ($item in @($definition.Node.SelectNodes('./*[local-name()="item"]'))) {
-                        $value = Get-ADAnalyzerAdmxValue ($item.SelectSingleNode('./*[local-name()="value"]'))
+                        $value = $this.ReadValue($item.SelectSingleNode('./*[local-name()="value"]'))
                         $label = Get-ADAnalyzerXmlAttribute $item displayName
                         if ($label -match '^\$\(string\.(.+)\)$') {
                             if ($definition.Common.Resources.ContainsKey($Matches[1])) {
@@ -2773,47 +2827,140 @@ function Resolve-ADAnalyzerRegistryPolicy {
         if ($null -eq $reportDefinition) {
             $reportDefinition = $unresolvedDefinition
         }
-        [pscustomobject]@{
+        return @{
+            PresenceRecord = $null
+            Status = $status
+            State = $state
+            Definition = $reportDefinition
+            Options = $options
+            Errors = $errors
+        }
+    }
+
+    hidden [pscustomobject] BuildRecord([hashtable]$Raw, [hashtable]$Selection) {
+        return [pscustomobject]@{
+            Scope = $Raw.Scope
+            Hive = $Raw.Hive
+            Key = $Raw.Key
+            ValueName = $Raw.ValueName
+            Type = $Raw.Type
+            Value = $Raw.Value
+            RawData = $Raw.RawData
+            Source = $Raw.Source
+            KeyOnly = $Raw.KeyOnly
+            DeletionDirective = $Raw.DeletionDirective
+            Deleted = $Raw.Deleted
+            MetadataStatus = $Selection.Status
+            State = $Selection.State
+            PolicyId = $Selection.Definition.Common.PolicyId
+            PolicyNamespace = $Selection.Definition.Common.PolicyNamespace
+            DisplayName = $Selection.Definition.Common.DisplayName
+            DefinitionType = $Selection.Definition.Kind
+            ElementId = $Selection.Definition.ElementId
+            Options = $Selection.Options
+            TemplateErrors = $Selection.Errors
+        }
+    }
+}
+
+function Get-ADAnalyzerAdmxValue {
+    param([Xml.XmlNode]$Node)
+    return [ADAnalyzerAdmxResolver]::new().ReadValue($Node)
+}
+
+function Test-ADAnalyzerAdmxOptionalField {
+    param(
+        $Record,
+        [string]$Name
+    )
+    if ($Record -is [Collections.IDictionary]) {
+        $type = $Record.GetType()
+        $isGenericDictionary = $type.IsGenericType -and
+            $type.GetGenericTypeDefinition() -eq [Collections.Generic.Dictionary[string, object]].GetGenericTypeDefinition()
+        if ($type -notin [hashtable], [Collections.Specialized.OrderedDictionary] -and
+            -not $isGenericDictionary) {
+            # Let PowerShell perform the only lookup on custom dictionary implementations.
+            return $true
+        }
+        if (([Collections.IDictionary]$Record).Contains($Name)) {
+            return $true
+        }
+    }
+    elseif ($Record -is [Collections.IEnumerable] -and $Record -isnot [string]) {
+        # Let PowerShell enumerate members of collection-shaped records.
+        return $true
+    }
+    return $null -ne $Record.PSObject.Properties[$Name]
+}
+
+function Resolve-ADAnalyzerRegistryPolicy {
+    <# .SYNOPSIS Adds optional offline ADMX/ADML metadata while preserving raw policy records.
+       .DESCRIPTION Supports policy enabled/disabled values and boolean, enum and list elements.
+       Complex multi-key definitions retain explicit Unknown state; no template is required for parsing.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$RegistrySettings,
+        [string]$TemplatePath,
+        [string]$Language = 'en-US'
+
+    )
+    $resolver = [ADAnalyzerAdmxResolver]::new()
+    $templateMissing = -not $TemplatePath -or -not (Test-Path -LiteralPath $TemplatePath -PathType Container)
+    $files = @()
+    if (-not $templateMissing) {
+        $files = @(Get-ChildItem -LiteralPath $TemplatePath -Filter '*.admx' -File -ErrorAction Stop)
+    }
+    $catalogue = $null
+    $catalogue = $resolver.BuildCatalogue($TemplatePath, $Language, $templateMissing, $files)
+    if ($null -eq $catalogue) {
+        return
+    }
+
+    foreach ($row in @($RegistrySettings)) {
+        $selection = $null
+        $selection = $resolver.SelectResolution(@{ Record = $row }, $catalogue)
+        if ($null -eq $selection) {
+            continue
+        }
+        if ($null -ne $selection.PresenceRecord) {
+            $selection.PresenceRecord
+            continue
+        }
+
+        # Observe source properties in their original native row scope.
+        $resolver.BuildRecord(@{
             Scope = $row.Scope
             Hive = $row.Hive
             Key = $row.Key
             ValueName = $row.ValueName
             Type = $row.Type
             Value = $row.Value
-            RawData = if (Test-ADAnalyzerAdmxOptionalField $row RawData) {
+            RawData = $(if (Test-ADAnalyzerAdmxOptionalField $row RawData) {
                 , $row.RawData
             }
             else {
                 $null
-            }
+            })
             Source = $row.Source
-            KeyOnly = if (Test-ADAnalyzerAdmxOptionalField $row KeyOnly) {
+            KeyOnly = $(if (Test-ADAnalyzerAdmxOptionalField $row KeyOnly) {
                 , $row.KeyOnly
             }
             else {
                 $null
-            }
-            DeletionDirective = if (Test-ADAnalyzerAdmxOptionalField $row DeletionDirective) {
+            })
+            DeletionDirective = $(if (Test-ADAnalyzerAdmxOptionalField $row DeletionDirective) {
                 , $row.DeletionDirective
             }
             else {
                 $null
-            }
-            Deleted = if (Test-ADAnalyzerAdmxOptionalField $row Deleted) {
+            })
+            Deleted = $(if (Test-ADAnalyzerAdmxOptionalField $row Deleted) {
                 , $row.Deleted
             }
             else {
                 $null
-            }
-            MetadataStatus = $status
-            State = $state
-            PolicyId = $reportDefinition.Common.PolicyId
-            PolicyNamespace = $reportDefinition.Common.PolicyNamespace
-            DisplayName = $reportDefinition.Common.DisplayName
-            DefinitionType = $reportDefinition.Kind
-            ElementId = $reportDefinition.ElementId
-            Options = $options
-            TemplateErrors = $errors
-        }
+            })
+        }, $selection)
     }
 }

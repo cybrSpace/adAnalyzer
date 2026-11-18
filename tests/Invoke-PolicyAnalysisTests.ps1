@@ -1623,6 +1623,25 @@ foreach ($case in $policyValueCases.Keys) {
     }
 }
 
+$admxResolverCases = [ordered]@{
+    Records = 16
+    Stream = 2
+    Faults = 8
+    Direct = 18
+}
+foreach ($case in $admxResolverCases.Keys) {
+    Test-Policy ('ADMX resolver API: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'AdmxResolverClassFixture.ps1'
+        $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -Case $case 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw ($output -join [Environment]::NewLine)
+        }
+        $marker = 'PASS ADMX resolver ' + $case + ' ' + $admxResolverCases[$case]
+        Assert-Policy ($marker -cin @($output)) 'Fresh process did not execute every ADMX resolver API case.'
+    }
+}
+
 $securityCatalogueCases = [ordered]@{
     Records = 9
     Stream = 4

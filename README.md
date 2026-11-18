@@ -246,6 +246,17 @@ $effectiveRecords = $replay.Replay($registrySettings)
 
 Each call returns fresh rows for the supplied sequence, including tombstones marked `Deleted`. Nested values retain their original references. A runtime error in the direct call can terminate replay before results are returned. The compatibility command retains PowerShell's native error handling and continuation.
 
+Use `ADAnalyzerAdmxResolver` for optional offline registry metadata. The constructor is inert. `Resolve` reads template files only when given a template path. Omitting the language uses `en-US`.
+
+```powershell
+$resolver = [ADAnalyzerAdmxResolver]::new()
+$unresolved = $resolver.Resolve($registrySettings)
+$resolved = $resolver.Resolve($registrySettings, 'C:\PolicyDefinitions', 'en-US')
+$typedValue = $resolver.ReadValue($admxValueNode)
+```
+
+Resolution returns the existing ordered raw and metadata fields, including explicit unresolved states. The command retains native per-record streaming. The direct method returns the complete result or surfaces an error.
+
 ## Profiles and assessment coverage
 
 `Import-ADAnalyzerProfile` merges a JSON or restricted PSD1 data file with fresh defaults, validates input, and rejects unknown settings. External JSON profiles, saved assessment/plan/journal documents, and SAML configuration files are read as UTF-8 unless a Unicode BOM identifies another encoding. UTF-8 without a BOM is supported consistently on Windows PowerShell 5.1 and PowerShell 7. BOM-marked UTF-8, UTF-16, and UTF-32 remain supported. Convert legacy non-BOM ANSI JSON to UTF-8; its code page is ambiguous. The shared writer continues to emit a UTF-8 BOM for compatibility with 5.1 default readers. `Get-ADAnalyzerDefaultProfile` shows every supported key. Profiles control account/password/lockout thresholds, account-role evidence, approved SIDs, custom registry expectations, OS lifecycle/build rules, and remediation approvals. `profiles/default.psd1` is inert; `profiles/example.psd1` documents customization. Profile files are data and cannot contain executable PowerShell scripts.
