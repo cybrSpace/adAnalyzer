@@ -2495,7 +2495,7 @@ function Resolve-ADAnalyzerRegistryPolicy {
             try {
                 $xml = Read-AnalyzerPolicyXml $file.FullName
                 $resources = @{}
-                $languageMissing = $false
+                $resourceFileMissing = $false
                 $resourcePath = Join-Path (Join-Path $TemplatePath $Language) ($file.BaseName + '.adml')
                 if (Test-Path -LiteralPath $resourcePath -PathType Leaf) {
                     $adml = Read-AnalyzerPolicyXml $resourcePath
@@ -2504,10 +2504,11 @@ function Resolve-ADAnalyzerRegistryPolicy {
                     }
                 }
                 else {
-                    $languageMissing = $true
+                    $resourceFileMissing = $true
                 }
                 $namespace = Get-ADAnalyzerXmlAttribute ($xml.SelectSingleNode('//*[local-name()="policyNamespaces"]/*[local-name()="target"]')) namespace
                 foreach ($policy in @($xml.SelectNodes('//*[local-name()="policies"]/*[local-name()="policy"]'))) {
+                    $languageMissing = $resourceFileMissing
                     $key = Get-ADAnalyzerXmlAttribute $policy key
                     $valueName = Get-ADAnalyzerXmlAttribute $policy valueName
                     $name = Get-ADAnalyzerXmlAttribute $policy name

@@ -1371,6 +1371,63 @@ try {
             -Language xx-XX
         Assert-Policy ($language.MetadataStatus -eq 'LanguageResourceMissing') 'Missing language was not identified'
     }
+    Test-Policy 'an absent ADML label affects only its own policy' {
+        $templateName = 'fixture-localization'
+        [IO.File]::WriteAllText((Join-Path $taskTemp ($templateName + '.admx')), @'
+<policyDefinitions revision="1.0" schemaVersion="1.0">
+  <policyNamespaces>
+    <target prefix="localization" namespace="Fixture.Localization" />
+  </policyNamespaces>
+  <policies>
+    <policy name="FirstPolicy" class="Machine" displayName="$(string.FirstLabel)"
+            key="Software\Fixture\Localization" valueName="FirstSetting">
+      <enabledValue><decimal value="1" /></enabledValue>
+    </policy>
+    <policy name="MiddlePolicy" class="Machine" displayName="$(string.MissingLabel)"
+            key="Software\Fixture\Localization" valueName="MiddleSetting">
+      <enabledValue><decimal value="2" /></enabledValue>
+    </policy>
+    <policy name="LastPolicy" class="Machine" displayName="$(string.LastLabel)"
+            key="Software\Fixture\Localization" valueName="LastSetting">
+      <enabledValue><decimal value="3" /></enabledValue>
+    </policy>
+  </policies>
+</policyDefinitions>
+'@)
+        [IO.File]::WriteAllText((Join-Path $taskTemp ('en-US/' + $templateName + '.adml')), @'
+<policyDefinitionResources revision="1.0" schemaVersion="1.0">
+  <resources>
+    <stringTable>
+      <string id="FirstLabel">First localized label</string>
+      <string id="LastLabel">Last localized label</string>
+    </stringTable>
+  </resources>
+</policyDefinitionResources>
+'@)
+        $key = 'Software\Fixture\Localization'
+        $rows = @(
+            New-RegistryFixture $key FirstSetting 1
+            New-RegistryFixture $key MiddleSetting 2
+            New-RegistryFixture $key LastSetting 3
+        )
+        $parameters = @{
+            RegistrySettings = $rows
+            TemplatePath = $taskTemp
+            Language = 'en-US'
+        }
+        $resolved = @(Resolve-ADAnalyzerRegistryPolicy @parameters)
+        $statuses = $resolved.MetadataStatus -join ','
+        Assert-Policy ($statuses -ceq 'Resolved,LanguageResourceMissing,Resolved') "Unexpected localization statuses $statuses."
+        Assert-Policy (($resolved.DisplayName -join ',') -ceq 'First localized label,MiddlePolicy,Last localized label') 'Localized and fallback labels were not preserved.'
+        Assert-Policy (($resolved.PolicyId -join ',') -ceq 'FirstPolicy,MiddlePolicy,LastPolicy' -and
+            ($resolved.State -join ',') -ceq 'Enabled,Enabled,Enabled' -and
+            ($resolved.Value -join ',') -ceq '1,2,3') 'Localization changed policy order, state, or raw values.'
+
+        $parameters.Language = 'xx-XX'
+        $missing = @(Resolve-ADAnalyzerRegistryPolicy @parameters)
+        Assert-Policy (($missing.MetadataStatus -join ',') -ceq 'LanguageResourceMissing,LanguageResourceMissing,LanguageResourceMissing') 'A missing ADML file did not mark every policy.'
+        Assert-Policy (($missing.DisplayName -join ',') -ceq 'FirstPolicy,MiddlePolicy,LastPolicy') 'A missing ADML file did not preserve fallback labels.'
+    }
 }
 finally {
     Remove-Item -LiteralPath $taskTemp -Recurse -Force
