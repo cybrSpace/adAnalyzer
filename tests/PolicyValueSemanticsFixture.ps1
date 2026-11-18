@@ -1057,7 +1057,6 @@ switch ($Case) {
                 }
                 $cause = @{
                     NullEquality = '(?i)null'
-                    InvalidBound = 'invalid-bound'
                     NumberStringCast = 'fixture policy string conversion failure'
                     BooleanStringCast = 'fixture policy string conversion failure'
                     UnsupportedOperator = 'unsupported.*operator|operator.*unsupported'
@@ -1066,8 +1065,25 @@ switch ($Case) {
                     SidListMoveNext = 'fixture policy enumeration MoveNext'
                     SidListCurrent = 'fixture policy enumeration Current'
                 }[$name]
-                Assert-Semantics ($null -ne $failure -and
-                    $failure.Message -match $cause) "Direct failure did not surface its expected cause for $name."
+                if ($name -eq 'InvalidBound') {
+                    # Compare the exact native cast cause on this runtime.
+                    $nativeFailure = (Invoke-SemanticsFault $name 'Stop' $true $true).Caught
+                    Assert-Semantics ($null -ne $nativeFailure -and
+                        $nativeFailure.Id -like 'InvalidCastFromStringToInteger*') 'Frozen bound conversion did not exercise the native integer cast.'
+                    $actualType = if ($null -eq $failure) {
+                        '<null>'
+                    }
+                    else {
+                        $failure.GetType().FullName
+                    }
+                    Assert-Semantics ($null -ne $failure -and
+                        $actualType -ceq $nativeFailure.Cause -and
+                        $failure.Message -ceq $nativeFailure.CauseMessage) "Direct bound failure differs from native cast. Expected [$($nativeFailure.Cause)] $($nativeFailure.CauseMessage); received [$actualType] $($failure.Message)."
+                }
+                else {
+                    Assert-Semantics ($null -ne $failure -and
+                        $failure.Message -match $cause) "Direct failure did not surface its expected cause for $name."
+                }
                 if ($null -ne $sample.Probe) {
                     Assert-Semantics ($failure -is [InvalidOperationException] -and
                         $failure.Message -ceq $cause) "Direct enumeration lost its injected CLR cause for $name."
