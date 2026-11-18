@@ -1660,6 +1660,51 @@ try {
             Assert-True (($output -join ' ') -like ('*' + $marker + '*')) 'Fresh process did not execute every required evidence scenario.'
         }
     }
+
+    $dictionaryMetadataCases = [ordered]@{
+        Controls = 8
+        Projection = 4
+        Maps = 230
+        Getter = 6
+        Faults = 24
+        Profiles = 28
+        Exports = 13
+        Loading = 3
+        Uncaught = 6
+        Consumers = 5
+        Legacy = 4
+    }
+    foreach ($case in $dictionaryMetadataCases.Keys) {
+        Invoke-Test ('Native dictionary metadata: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $arguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                (Join-Path $PSScriptRoot 'DictionaryMetadataFixture.ps1')
+                '-Case'
+                $case
+            )
+            $fixtureErrorPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $output = & $executable @arguments 2>&1
+                $fixtureExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $fixtureErrorPreference
+            }
+            if ($fixtureExitCode -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw 'Fresh dictionary metadata fixture failed.'
+            }
+            $marker = 'PASS dictionary metadata ' + $case + ' ' + $dictionaryMetadataCases[$case]
+            Assert-True (($output -join ' ') -like ('*' + $marker + '*')) 'Fresh process did not execute every required dictionary metadata scenario.'
+        }
+    }
 }
 finally {
     Remove-Item -LiteralPath $script:Temporary -Recurse -Force -WhatIf:$false -Confirm:$false

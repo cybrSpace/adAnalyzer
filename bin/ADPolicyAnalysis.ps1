@@ -1536,7 +1536,7 @@ class ADAnalyzerGpoPolicyEvaluator {
             })
         }
         if ($rights -is [Collections.IDictionary]) {
-            foreach ($name in $rights.Keys) {
+            foreach ($name in ([Collections.IDictionary].GetProperty('Keys')).GetValue($rights, $null)) {
                 if (-not @($Policy.SecuritySettings | Where-Object { $_.Kind -eq 'UserRightsAssignment' -and $_.Name -eq $name }).Count) {
                     $this.Emit($state, @{
                         RuleId = ('GPO.UserRights.' + $name)

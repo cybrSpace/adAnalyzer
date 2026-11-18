@@ -2380,7 +2380,7 @@ class ADAnalyzerDirectoryPolicyEvaluator {
                 }
             }
         }
-        foreach ($key in $spns.Keys) {
+        foreach ($key in ([Collections.IDictionary].GetProperty('Keys')).GetValue($spns, $null)) {
             $owners = @($spns[$key] | ForEach-Object { Get-ADAnalyzerDirectoryTarget $_ } | Select-Object -Unique)
             if ($owners.Count -gt 1) {
                 $this.Emit($Evaluation, @{
@@ -2560,7 +2560,7 @@ class ADAnalyzerDirectoryPolicyEvaluator {
                 })
             }
         }
-        foreach ($sid in $replication.Keys) {
+        foreach ($sid in ([Collections.IDictionary].GetProperty('Keys')).GetValue($replication, $null)) {
             $grant = $replication[$sid]
             if ($grant.Changes -and $grant.All) {
                 $this.Emit($Evaluation, @{

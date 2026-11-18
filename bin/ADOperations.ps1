@@ -318,7 +318,7 @@ class ADAnalyzerEvidenceProjector {
                             $State.LabelIndex = 0
                             $State.Stage = 'Labels'
                             $properties = if ($InputObject -is [Collections.IDictionary]) {
-                                @($InputObject.Keys)
+                                @(([Collections.IDictionary].GetProperty('Keys')).GetValue($InputObject, $null))
                             }
                             else {
                                 @($InputObject.PSObject.Properties.Name)
@@ -689,7 +689,7 @@ function ConvertTo-ADAnalyzerAssessmentHtml {
     $directory = Get-ADAnalyzerOperationValue $data @('Directory')
     $coverage = Get-ADAnalyzerOperationValue $directory @('Coverage') (Get-ADAnalyzerOperationValue $Assessment @('Coverage'))
     $names = if ($coverage -is [Collections.IDictionary]) {
-        @($coverage.Keys)
+        @(([Collections.IDictionary].GetProperty('Keys')).GetValue($coverage, $null))
     }
     elseif ($coverage) {
         @($coverage.PSObject.Properties.Name)
@@ -845,7 +845,7 @@ function ConvertTo-ADAnalyzerComparableValue {
     }
     $output = [ordered]@{}
     $names = if ($Value -is [Collections.IDictionary]) {
-        @($Value.Keys)
+        @(([Collections.IDictionary].GetProperty('Keys')).GetValue($Value, $null))
     }
     else {
         @($Value.PSObject.Properties.Name)

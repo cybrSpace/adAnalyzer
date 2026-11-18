@@ -432,7 +432,7 @@ class ADAnalyzerGpoReader {
                     else {
                         $this.ReadIni($file.FullName)
                     }
-                    foreach ($section in $ini.Keys) {
+                    foreach ($section in ([Collections.IDictionary].GetProperty('Keys')).GetValue($ini, $null)) {
                         foreach ($entry in $ini[$section].GetEnumerator()) {
                             $iniValue = $entry.Value
                             if ($section -eq 'Registry Values' -and (Test-ADAnalyzerSecretName $entry.Key)) {
@@ -865,7 +865,7 @@ function ConvertTo-AnalyzerGpoXml {
         'S-1-5-19' = 'LOCAL SERVICE'
         'S-1-5-20' = 'NETWORK SERVICE'
     }
-    foreach ($key in $SidNames.Keys) {
+    foreach ($key in ([Collections.IDictionary].GetProperty('Keys')).GetValue($SidNames, $null)) {
         $known[$key] = $SidNames[$key]
     }
     $doc = [xml]::new()

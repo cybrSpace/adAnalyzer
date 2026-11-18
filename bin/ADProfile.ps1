@@ -22,7 +22,7 @@ function ConvertTo-ADAnalyzerHashtable {
     }
     if ($InputObject -is [Collections.IDictionary]) {
         $result = @{}
-        foreach ($key in $InputObject.Keys) {
+        foreach ($key in ([Collections.IDictionary].GetProperty('Keys')).GetValue($InputObject, $null)) {
             $result[[string]$key] = ConvertTo-ADAnalyzerHashtable $InputObject[$key]
         }
         return $result
@@ -166,7 +166,7 @@ class ADAnalyzerProfile {
         [hashtable]$Overrides,
         [string]$Prefix
     ) {
-        foreach ($key in $Overrides.Keys) {
+        foreach ($key in ([Collections.IDictionary].GetProperty('Keys')).GetValue($Overrides, $null)) {
             if (-not $Defaults.ContainsKey($key)) {
                 throw "Unknown profile setting: $Prefix$key"
             }

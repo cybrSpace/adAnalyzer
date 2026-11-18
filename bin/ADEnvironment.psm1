@@ -145,7 +145,9 @@ Class Convert {
         }
 
         if ($value -is [OrderedDictionary] -or $value -is [Hashtable] -or $value.GetType().Name -in ([EnvironmentObjects].GetEnumNames())) {
-            $value.Keys | ForEach-Object { $object[$_] = $value[$_] }
+            ([Collections.IDictionary].GetProperty('Keys')).GetValue($value, $null) | ForEach-Object {
+                $object[$_] = $value[$_]
+            }
         }
         elseif ($value -is [PSCustomObject]) {
             $value.PSObject.Properties | ForEach-Object { $object[$_.Name] = $_.Value }
@@ -466,7 +468,7 @@ class Property {
     }
 
     [ArrayList]GetNames() {
-        return $this.Names.Keys
+        return ([Collections.IDictionary].GetProperty('Keys')).GetValue($this.Names, $null)
     }
 
     hidden [OrderedDictionary]$Names = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
@@ -502,7 +504,11 @@ class Table : Hashtable {
 
         $key = $this.Properties.Key
 
-        $list = $this.Values.Keys | Sort-Object -Unique | Where-Object { $_ -notin $this.Properties.Exclude }
+        $list = $this.Values | ForEach-Object {
+            ([Collections.IDictionary].GetProperty('Keys')).GetValue($_, $null)
+        } | Sort-Object -Unique | Where-Object {
+            $_ -notin $this.Properties.Exclude
+        }
 
         $this.Values | ForEach-Object {
 
