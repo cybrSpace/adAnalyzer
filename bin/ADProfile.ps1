@@ -374,7 +374,7 @@ class ADAnalyzerProfile {
                 throw 'Duplicate host audit subcategory identity; combine required flags in one rule'
             }
         }
-        foreach ($hash in $result.DependencyHashes.Values) {
+        foreach ($hash in ([Collections.IDictionary].GetProperty('Values')).GetValue($result.DependencyHashes, $null)) {
             if ([string]$hash -notmatch '^[a-fA-F0-9]{64}$') {
                 throw 'DependencyHashes values must be SHA256 hex strings'
             }

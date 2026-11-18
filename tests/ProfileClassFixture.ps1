@@ -10,7 +10,8 @@ param(
         'Isolation',
         'Serialization',
         'Ownership',
-        'ProfileOnly')]
+        'ProfileOnly',
+        'NativeValues')]
     [string]$Case = 'Construction'
 )
 
@@ -554,6 +555,190 @@ switch ($Case) {
         $configuration = [ADAnalyzerProfile]::new((New-ProfileOverrides))
         Assert-Profile ((Get-TypeRowsJson ($configuration.ToHashtable())) -ceq $baseline.PartialMemory) 'Constructor delegates to old processors or performs I/O.'
         Assert-Profile ((Get-TypeRowsJson ([ADAnalyzerProfile]::DefaultSnapshot())) -ceq $baseline.Raw) 'Class defaults delegate to the old processor.'
+    }
+
+    'NativeValues' {
+        $script:NativeHashScenarios = 0
+        $validLower = 'a' * 64
+        $validUpper = 'F' * 64
+        $coercible = [Numerics.BigInteger]::Parse(('1' * 64))
+        $guard = [ADAnalyzerProfile]::new(@{
+                Name = 'independent-guard'
+            })
+        $guardBefore = ConvertTo-Json -InputObject ($guard.ToHashtable()) -Depth 40 -Compress
+
+        function Get-Content {
+            throw 'In-memory profile validation must not read files.'
+        }
+
+        function Import-PowerShellDataFile {
+            throw 'In-memory profile validation must not load data files.'
+        }
+
+        function Import-Module {
+            throw 'In-memory profile validation must not load native modules.'
+        }
+
+        function Get-FileHash {
+            throw 'In-memory profile validation must not inspect files.'
+        }
+
+        function New-NativeHashMap([string]$Kind, [object[]]$Entries) {
+            $map = switch ($Kind) {
+                Hashtable {
+                    @{}
+                }
+                Ordered {
+                    [Collections.Specialized.OrderedDictionary]::new([StringComparer]::OrdinalIgnoreCase)
+                }
+                Ordinal {
+                    [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+                }
+                IgnoreCase {
+                    [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+                }
+            }
+            foreach ($entry in $Entries) {
+                $map.Add($entry.Name, $entry.Value)
+            }
+            return , $map
+        }
+
+        function Assert-NativeHashCase($Map, [bool]$Accepted, [string]$Api, $Guard, [string]$GuardBefore) {
+            $inputProfile = @{
+                DependencyHashes = $Map
+            }
+            $before = ConvertTo-Json -InputObject $inputProfile -Depth 30 -Compress
+            $profileFailure = $null
+            $configuration = $null
+            $normalized = $null
+            try {
+                if ($Api -eq 'Direct') {
+                    $configuration = [ADAnalyzerProfile]::new($inputProfile)
+                    $normalized = $configuration.ToHashtable()
+                }
+                else {
+                    $normalized = Import-ADAnalyzerProfile -Profile $inputProfile
+                }
+            }
+            catch {
+                $profileFailure = $_
+            }
+            if ($Accepted) {
+                Assert-Profile ($null -eq $profileFailure -and $null -ne $normalized) 'A valid native hash map was rejected.'
+                $expectedNames = @(([Collections.IDictionary].GetProperty('Keys')).GetValue($Map, $null))
+                $actualNames = @(([Collections.IDictionary].GetProperty('Keys')).GetValue($normalized.DependencyHashes, $null))
+                Assert-Profile ($expectedNames.Count -eq $actualNames.Count) 'Normalization omitted hash entries.'
+                foreach ($name in $expectedNames) {
+                    $expected = $Map[$name]
+                    $actual = $normalized.DependencyHashes[$name]
+                    Assert-Profile ($actual.GetType() -eq $expected.GetType() -and
+                        [string]$actual -ceq [string]$expected -and
+                        $normalized.DependencyHashes.ContainsKey($name)) 'A hash value or established coercion changed.'
+                }
+                if ($actualNames.Count -gt 0) {
+                    $name = $actualNames[0]
+                    $original = $normalized.DependencyHashes[$name]
+                    $normalized.DependencyHashes[$name] = 'changed'
+                    if ($null -ne $configuration) {
+                        Assert-Profile ([string]$configuration.ToHashtable().DependencyHashes[$name] -ceq
+                            [string]$original) 'A returned hash snapshot aliased its configuration.'
+                    }
+                }
+            }
+            else {
+                Assert-Profile ($null -ne $profileFailure -and
+                    $profileFailure.Exception.Message.Contains('DependencyHashes values must be SHA256 hex strings')) 'An invalid native hash entry was accepted or lost its diagnostic.'
+                Assert-Profile ($null -eq $normalized) 'Invalid construction emitted a profile.'
+            }
+            Assert-Profile ((ConvertTo-Json -InputObject $inputProfile -Depth 30 -Compress) -ceq
+                $before) 'Hash validation changed caller input.'
+            Assert-Profile ((ConvertTo-Json -InputObject ($Guard.ToHashtable()) -Depth 40 -Compress) -ceq
+                $GuardBefore) 'Hash construction changed an independent existing instance.'
+            $script:NativeHashScenarios++
+        }
+
+        $samples = @(
+            @{
+                Value = $validLower
+                Sibling = 'invalid'
+                Accepted = $false
+            },
+            @{
+                Value = $null
+                Sibling = $validLower
+                Accepted = $false
+            },
+            @{
+                Value = 'invalid'
+                Sibling = $validLower
+                Accepted = $false
+            },
+            @{
+                Value = ''
+                Sibling = $validLower
+                Accepted = $false
+            },
+            @{
+                Value = $false
+                Sibling = $validLower
+                Accepted = $false
+            },
+            @{
+                Value = [object[]]@()
+                Sibling = $validLower
+                Accepted = $false
+            },
+            @{
+                Value = $validLower
+                Sibling = ''
+                Accepted = $false
+            },
+            @{
+                Value = $validLower
+                Sibling = $validLower
+                Accepted = $true
+            },
+            @{
+                Value = $validUpper
+                Sibling = $validLower
+                Accepted = $true
+            },
+            @{
+                Value = $coercible
+                Sibling = $validLower
+                Accepted = $true
+            }
+        )
+        foreach ($kind in @('Hashtable', 'Ordered', 'Ordinal', 'IgnoreCase')) {
+            foreach ($keyName in @('Values', 'values', 'vAlUeS')) {
+                foreach ($sample in $samples) {
+                    $map = New-NativeHashMap $kind @(
+                        @{
+                            Name = $keyName
+                            Value = $sample.Value
+                        },
+                        @{
+                            Name = 'Microsoft.ActiveDirectory.Management.dll'
+                            Value = $sample.Sibling
+                        }
+                    )
+                    foreach ($api in @('Direct', 'Command')) {
+                        Assert-NativeHashCase $map $sample.Accepted $api $guard $guardBefore
+                    }
+                }
+            }
+            foreach ($api in @('Direct', 'Command')) {
+                Assert-NativeHashCase (New-NativeHashMap $kind @()) $true $api $guard $guardBefore
+                $bad = New-NativeHashMap $kind @(@{
+                        Name = 'ordinary.dll'
+                        Value = 'invalid'
+                    })
+                Assert-NativeHashCase $bad $false $api $guard $guardBefore
+            }
+        }
+        Assert-Profile ($script:NativeHashScenarios -eq 256) 'Native hash scenario discovery mismatch.'
+        Write-Output ('PASS native hash scenarios ' + $script:NativeHashScenarios)
     }
 
     'ProfileOnly' {

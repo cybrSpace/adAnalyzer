@@ -1124,7 +1124,8 @@ foreach ($case in @(
         'Isolation',
         'Serialization',
         'Ownership',
-        'ProfileOnly'
+        'ProfileOnly',
+        'NativeValues'
     )) {
     Test-Assessment ('constructor profile API: ' + $case) {
         $executable = (Get-Process -Id $PID).Path
@@ -1138,6 +1139,9 @@ foreach ($case in @(
             throw ($output -join [Environment]::NewLine)
         }
         Assert-True (($output -join ' ') -like ('*PASS profile class ' + $case + '*')) 'Fresh process did not execute the selected profile case.'
+        if ($case -eq 'NativeValues') {
+            Assert-True (($output -join ' ') -like '*PASS native hash scenarios 256*') 'Fresh process did not execute every native hash scenario.'
+        }
     }
 }
 Write-Host ("{0} assessment-integration tests passed; {1} failed" -f $script:Passed, $script:Failed)
