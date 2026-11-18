@@ -852,6 +852,161 @@ try {
         Assert-Equal 'NotConfigured' ($result.Checks | Where-Object RuleId -eq GPO.Account.PasswordComplexity).Status
         Assert-Equal 0 @($result.Checks | Where-Object { $_.RuleId -like 'GPO.Expected.*' -and $_.Status -ne 'Pass' }).Count
     }
+
+    $firstRegistryRow = @{
+        Key = 'Software\Fixture\Alpha|Beta'
+        Name = 'Gamma'
+        Type = 4
+        Bytes = [BitConverter]::GetBytes([uint32]9)
+    }
+    $secondRegistryRow = @{
+        Key = 'Software\Fixture\Alpha'
+        Name = 'Beta|Gamma'
+        Type = 4
+        Bytes = [BitConverter]::GetBytes([uint32]9)
+    }
+    $secondDifferent = $secondRegistryRow.Clone()
+    $secondDifferent.Bytes = [BitConverter]::GetBytes([uint32]13)
+    $secondText = $secondRegistryRow.Clone()
+    $secondText.Type = 1
+    $secondText.Bytes = [Text.Encoding]::Unicode.GetBytes("fixture text`0")
+    $firstCaseVariant = $firstRegistryRow.Clone()
+    $firstCaseVariant.Key = $firstRegistryRow.Key.ToUpperInvariant()
+    $firstCaseVariant.Name = $firstRegistryRow.Name.ToLowerInvariant()
+    $firstConflict = $firstRegistryRow.Clone()
+    $firstConflict.Bytes = [BitConverter]::GetBytes([uint32]99)
+    $ordinaryRegistryRow = @{
+        Key = 'Software\Fixture\Ordinary'
+        Name = 'Setting'
+        Type = 4
+        Bytes = [BitConverter]::GetBytes([uint32]7)
+    }
+
+    $registryBackups = [ordered]@{
+        SameEqual = @($firstRegistryRow, $secondRegistryRow)
+        SameDifferent = @($firstRegistryRow, $secondDifferent)
+        SameTyped = @($firstRegistryRow, $secondText)
+        First = @($firstRegistryRow)
+        Second = @($secondRegistryRow)
+        SecondText = @($secondText)
+        CaseVariant = @($firstCaseVariant)
+        Conflict = @($firstConflict)
+        Ordinary = @($ordinaryRegistryRow)
+    }
+    $registryRoots = @{}
+    foreach ($name in $registryBackups.Keys) {
+        $registryRoots[$name] = Join-Path $temp ('registry-baseline-' + $name + '/DomainSysvol/GPO')
+        Write-AssessmentPol (Join-Path $registryRoots[$name] 'Machine/Registry.pol') $registryBackups[$name]
+        [IO.File]::WriteAllText((Join-Path $registryRoots[$name] 'GPT.INI'), "[General]`nVersion=1")
+    }
+
+    $collisionCases = @(
+        @{
+            Name = 'equal values in one backup'
+            Paths = @($registryRoots.SameEqual)
+            Evaluate = $registryRoots.SameEqual
+            SecondType = 4
+            SecondExpected = [uint32]9
+        }
+        @{
+            Name = 'different values in one backup'
+            Paths = @($registryRoots.SameDifferent)
+            Evaluate = $registryRoots.SameDifferent
+            SecondType = 4
+            SecondExpected = [uint32]13
+        }
+        @{
+            Name = 'equal values from separate backups'
+            Paths = @($registryRoots.First, $registryRoots.Second)
+            Evaluate = $registryRoots.SameEqual
+            SecondType = 4
+            SecondExpected = [uint32]9
+        }
+        @{
+            Name = 'different typed values from separate backups'
+            Paths = @($registryRoots.First, $registryRoots.SecondText)
+            Evaluate = $registryRoots.SameTyped
+            SecondType = 1
+            SecondExpected = 'fixture text'
+        }
+    )
+    foreach ($case in $collisionCases) {
+        Test-Assessment ('registry baseline keeps pipe-bearing identities distinct for ' + $case.Name) {
+            $profile = Import-ADAnalyzerBaseline -GpoPath $case.Paths -Version identity
+            Assert-Equal 2 $profile.RegistryRules.Count
+            $firstRule = @($profile.RegistryRules | Where-Object Key -CEQ $firstRegistryRow.Key)
+            $secondRule = @($profile.RegistryRules | Where-Object Key -CEQ $secondRegistryRow.Key)
+            Assert-True ($firstRule.Count -eq 1 -and $secondRule.Count -eq 1) 'The rules lost their separate registry keys.'
+            Assert-True ($firstRule[0].Id -ne $secondRule[0].Id -and
+                $firstRule[0].Hive -ceq 'HKLM' -and $secondRule[0].Hive -ceq 'HKLM' -and
+                $firstRule[0].ValueName -ceq $firstRegistryRow.Name -and $secondRule[0].ValueName -ceq $secondRegistryRow.Name -and
+                $firstRule[0].Type -eq 4 -and $secondRule[0].Type -eq $case.SecondType -and
+                $firstRule[0].Expected -is [uint32] -and $firstRule[0].Expected -eq 9 -and
+                $secondRule[0].Expected.GetType() -eq $case.SecondExpected.GetType() -and
+                $secondRule[0].Expected -ceq $case.SecondExpected -and
+                $firstRule[0].Source -ceq $case.Paths[0] -and $secondRule[0].Source -ceq $case.Paths[-1]) 'The rules lost their IDs, original names, typed values, or provenance.'
+
+            $gpo = [pscustomobject]@{
+                Id = [guid]::Empty
+                Flags = 0
+                Version = 1
+                Links = @()
+            }
+            $ruleIds = @(
+                'GPO.Expected.' + $firstRule[0].Id
+                'GPO.Expected.' + $secondRule[0].Id
+            )
+            $parsed = Read-ADAnalyzerGpo -Path $case.Evaluate
+            $checks = @(Test-ADAnalyzerGpoPolicy -Gpo $gpo -Policy $parsed -Profile $profile |
+                Where-Object { $_.RuleId -in $ruleIds })
+            Assert-True ($checks.Count -eq 2 -and @($checks.RuleId | Sort-Object -Unique).Count -eq 2 -and
+                @($checks.CheckId | Sort-Object -Unique).Count -eq 2 -and
+                @($checks | Where-Object Status -NE Pass).Count -eq 0) 'The offline evaluator did not return two independent passing checks.'
+            if ($case.Evaluate -eq $registryRoots.SameDifferent) {
+                $changed = Read-ADAnalyzerGpo -Path $registryRoots.SameEqual
+                $checks = @(Test-ADAnalyzerGpoPolicy -Gpo $gpo -Policy $changed -Profile $profile |
+                    Where-Object { $_.RuleId -in $ruleIds })
+                Assert-Equal Pass ($checks | Where-Object RuleId -EQ $ruleIds[0]).Status
+                Assert-Equal Fail ($checks | Where-Object RuleId -EQ $ruleIds[1]).Status
+            }
+        }
+    }
+
+    Test-Assessment 'registry baseline assigns stable independent IDs to imported pipe-bearing tuples' {
+        $first = (Import-ADAnalyzerBaseline -GpoPath $registryRoots.First -Version identity).RegistryRules[0]
+        $second = (Import-ADAnalyzerBaseline -GpoPath $registryRoots.Second -Version identity).RegistryRules[0]
+        $secondText = (Import-ADAnalyzerBaseline -GpoPath $registryRoots.SecondText -Version identity).RegistryRules[0]
+        $equivalent = (Import-ADAnalyzerBaseline -GpoPath $registryRoots.CaseVariant -Version identity).RegistryRules[0]
+        Assert-True ($first.Id -ne $second.Id) 'Independent imports assigned both distinct tuples the same public ID.'
+        Assert-Equal $first.Id $equivalent.Id
+        Assert-Equal $second.Id $secondText.Id
+        $together = Import-ADAnalyzerBaseline -GpoPath $registryRoots.SameEqual -Version identity
+        Assert-Equal $first.Id ($together.RegistryRules | Where-Object Key -EQ $firstRegistryRow.Key).Id
+        Assert-Equal $second.Id ($together.RegistryRules | Where-Object Key -EQ $secondRegistryRow.Key).Id
+    }
+
+    Test-Assessment 'registry baseline preserves ordinary legacy IDs and true duplicate provenance' {
+        $ordinary = (Import-ADAnalyzerBaseline -GpoPath $registryRoots.Ordinary -Version identity).RegistryRules[0]
+        $legacyCheck = New-ADAnalyzerCheck -RuleId BASELINE.REGISTRY -Target 'hklm|software\fixture\ordinary|setting' -Status Pass
+        Assert-Equal ('BASELINE.REGISTRY.' + $legacyCheck.CheckId.Substring(0, 16)) $ordinary.Id
+        foreach ($order in @(@('First', 'CaseVariant'), @('CaseVariant', 'First'))) {
+            $profile = Import-ADAnalyzerBaseline -GpoPath @($registryRoots[$order[0]], $registryRoots[$order[1]]) -Version identity
+            Assert-Equal 1 $profile.RegistryRules.Count
+            Assert-Equal $registryRoots[$order[0]] $profile.RegistryRules[0].Source
+            Assert-Equal ([uint32]9) $profile.RegistryRules[0].Expected
+        }
+    }
+
+    Test-Assessment 'registry baseline preserves the true pipe-bearing conflict diagnostic' {
+        $failure = $null
+        try {
+            $null = Import-ADAnalyzerBaseline -GpoPath @($registryRoots.First, $registryRoots.Conflict) -Version identity
+        }
+        catch {
+            $failure = $_.Exception.Message
+        }
+        Assert-Equal 'Conflicting baseline registry setting: hklm|software\fixture\alpha|beta|gamma' $failure
+    }
     Test-Assessment 'conflicting baseline inputs are rejected without silently overwriting' {
         $a = Join-Path $temp 'baseline/DomainSysvol/GPO'
         $b = Join-Path $temp 'conflict'

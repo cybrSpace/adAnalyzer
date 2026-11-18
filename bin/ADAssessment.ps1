@@ -423,19 +423,26 @@ function Import-ADAnalyzerBaseline {
             if ($row.Deleted -or $row.DeletionDirective -or $row.KeyOnly -or (Test-ADAnalyzerSecretName $row.ValueName)) {
                 continue
             }
-            $key = ('{0}|{1}|{2}' -f $row.Hive, $row.Key, $row.ValueName).ToLowerInvariant()
+            $parts = @($row.Hive, $row.Key, $row.ValueName)
+            $key = ('{0}|{1}|{2}' -f $parts).ToLowerInvariant()
+            $identity = (Join-ADAnalyzerPolicyIdentity $parts).ToLowerInvariant()
             $value = ConvertTo-Json -InputObject ([ordered]@{
                     Type = [int]$row.Type
                     Value = $row.Value
                 }) -Compress -Depth 20
-            if ($seen.ContainsKey($key)) {
-                if ($seen[$key] -ne $value) {
+            if ($seen.ContainsKey($identity)) {
+                if ($seen[$identity] -ne $value) {
                     throw "Conflicting baseline registry setting: $key"
                 }
                 continue
             }
-            $seen[$key] = $value
-            $stable = (New-ADAnalyzerCheck -RuleId 'BASELINE.REGISTRY' -Target $key -Status Pass).CheckId.Substring(0, 16)
+            $seen[$identity] = $value
+            # Keep the established hash seed when the components contain no literal pipe.
+            $hashTarget = $key
+            if ($key.Split('|').Count -gt 3) {
+                $hashTarget = $identity
+            }
+            $stable = (New-ADAnalyzerCheck -RuleId 'BASELINE.REGISTRY' -Target $hashTarget -Status Pass).CheckId.Substring(0, 16)
             $null = $registry.Add(@{
                     Id = 'BASELINE.REGISTRY.' + $stable
                     Hive = $row.Hive

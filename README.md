@@ -295,6 +295,8 @@ Profiles reject duplicate audit subcategory GUIDs and equivalent certificate end
 
 Extract a matching Microsoft Security Compliance Toolkit GPO backup and pass its `DomainSysvol/GPO` root (containing Machine/User) to `Import-ADAnalyzerBaseline -GpoPath <root> -Name <name> -Version <version>`. The importer replays Registry.pol directives, retains types, aggregates multi-value security settings and rejects conflicting inputs. Its returned profile can be saved as JSON. Policy Analyzer/LGPO remain optional reference tools; neither is required by the runtime. Download baselines from the [Microsoft Security Compliance Toolkit](https://www.microsoft.com/en-us/download/details.aspx?id=55319).
 
+New imports use unambiguous registry identities when keys or value names contain a literal pipe. IDs for those rules can differ from IDs in older imported profiles.
+
 ## Reviewed remediation
 
 Automatic finding-label disable/delete is retired. `Set-ADEnvironment` now creates an inert plan by default; `Start-ADAnalyzer -Operation remediate` is a plan alias. Legacy direct mutation methods reject execution. Existing `Get-ADEnvironment` class reports remain available, but independent new scans should use `Get-ADAnalyzerAssessment`; a stale legacy class instance cannot analyze another instance's target. Legacy `Get-ADEnvironment -Help` and no-class help calls return normally to the caller without directory collection. Owned AD drives are removed even if restoring the caller location fails. A failed removal retains ownership for retry; cleanup errors propagate with the original restoration cause and any secondary removal diagnostic.
