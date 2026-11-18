@@ -115,15 +115,17 @@ function Get-ReplayConversionObservation([object[]]$Items, [object[]]$Global) {
         Rows = @(
             foreach ($item in $Items) {
                 if ($item -isnot [Management.Automation.ErrorRecord]) {
+                    $valueType = $null
+                    if ($null -ne $item.Value) {
+                        $valueType = $item.Value.GetType().FullName
+                    }
                     [pscustomobject][ordered]@{
                         Fields = $item.PSObject.Properties.Name -join ','
                         Key = $item.Key
                         Name = $item.ValueName
                         Source = $item.Source
                         Value = $item.Value
-                        ValueType = if ($null -ne $item.Value) {
-                            $item.Value.GetType().FullName
-                        }
+                        ValueType = $valueType
                         Deleted = $item.Deleted
                         Present = $item.SecretPresent
                     }
