@@ -833,6 +833,123 @@ if((`$rows -join ',') -ne 'Display One,Display Two'){throw 'Explicit name CLI fa
             Assert-Equal $before (ConvertTo-Json -InputObject $provided -Depth 50 -Compress)
         }
     }
+    $binaryPolicyRoot = Join-Path $script:Temporary 'offline-binary-presence'
+    $binaryPolicyFile = Join-Path $binaryPolicyRoot 'Machine/Registry.pol'
+    $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($binaryPolicyFile))
+    $fixtureBytes = [Text.Encoding]::ASCII.GetBytes('AUXILIARY_FIXTURE_SECRET_8')
+    $registryWriter = [IO.BinaryWriter]::new([IO.File]::Create($binaryPolicyFile))
+    try {
+        $registryWriter.Write([Text.Encoding]::ASCII.GetBytes('PReg'))
+        $registryWriter.Write([uint32]1)
+        $registryWriter.Write([uint16][char]'[')
+        $registryWriter.Write([Text.Encoding]::Unicode.GetBytes('Software\Fixture' + [char]0))
+        $registryWriter.Write([uint16][char]';')
+        $registryWriter.Write([Text.Encoding]::Unicode.GetBytes('DefaultPassword' + [char]0))
+        $registryWriter.Write([uint16][char]';')
+        $registryWriter.Write([uint32]3)
+        $registryWriter.Write([uint16][char]';')
+        $registryWriter.Write([uint32]$fixtureBytes.Length)
+        $registryWriter.Write([uint16][char]';')
+        $registryWriter.Write($fixtureBytes)
+        $registryWriter.Write([uint16][char]']')
+    }
+    finally {
+        $registryWriter.Dispose()
+    }
+    $nativeBinaryReport = [pscustomobject]@{
+        Gpo = $script:ReportA.Gpo.PSObject.Copy()
+        Policy = [ADAnalyzerGpoReader]::new().Read($binaryPolicyRoot)
+    }
+    $binaryReports = [ordered]@{
+        Native = $nativeBinaryReport
+        Json = ConvertTo-Json -InputObject $nativeBinaryReport -Depth 20 | ConvertFrom-Json
+    }
+    foreach ($inputKind in $binaryReports.Keys) {
+        foreach ($entryPoint in @('Command', 'Standalone')) {
+            Invoke-AuxiliaryTest ('strict offline GPO XML Type 3 presence via {0} with {1} input' -f $entryPoint, $inputKind) {
+                Set-StrictMode -Version Latest
+                $provided = $binaryReports[$inputKind]
+                Assert-Equal 1 $provided.Policy.RegistrySettings.Count
+                $inputRow = $provided.Policy.RegistrySettings[0]
+                Assert-True (
+                    $inputRow.Type -eq 3 -and
+                    $inputRow.SecretPresent -is [bool] -and
+                    $inputRow.SecretPresent -and
+                    $null -eq $inputRow.PSObject.Properties['Value']
+                ) 'The reader fixture did not supply a Type 3 presence-only row.'
+                $before = ConvertTo-Json -InputObject $provided -Depth 20 -Compress
+
+                $text = if ($entryPoint -ceq 'Command') {
+                    Get-ADAnalyzerGpoXml -InputObject $provided
+                }
+                else {
+                    & (Join-Path $RepositoryRoot 'etc/Get-GPOXML.ps1') -InputObject $provided
+                }
+                $xml = [xml]$text
+                $xpath = '/GPO/Computer/ExtensionData[Name="Registry"]/Extension/Record'
+                $records = $xml.SelectNodes($xpath)
+                Assert-Equal 1 $records.Count
+                $record = $records[0]
+                Assert-True ($record.GetAttribute('SecretPresent') -ceq 'true') 'XML lost the positive presence indicator.'
+                Assert-True ($null -eq $record.SelectSingleNode('./Value')) 'XML retained a Value for a secret.'
+                Assert-Equal '3' $record.SelectSingleNode('./Type').PSBase.InnerText
+                Assert-Equal 'HKLM\Software\Fixture\DefaultPassword' $record.SelectSingleNode('./Name').PSBase.InnerText
+                Assert-NoSecret $text
+                Assert-True (
+                    -not $text.Contains([Convert]::ToBase64String($fixtureBytes))
+                ) 'XML contained the encoded fixture data.'
+
+                $after = ConvertTo-Json -InputObject $provided -Depth 20 -Compress
+                Assert-True ($after -ceq $before) 'Offline XML changed the caller report.'
+                Assert-Equal 0 $script:Imports.Count
+                Assert-Equal 0 $script:LookupCalls.Count
+                Assert-Equal 0 $script:ReportCalls.Count
+            }
+        }
+    }
+
+    Invoke-AuxiliaryTest 'strict standalone GPO XML retains offline INI secret presence' {
+        $iniPolicyRoot = Join-Path $script:Temporary 'offline-ini-presence'
+        $iniPolicyFile = Join-Path $iniPolicyRoot 'Machine/fixture.ini'
+        Write-FixtureText $iniPolicyFile ("[Fixture]" + [Environment]::NewLine + 'Password=AUXILIARY_FIXTURE_SECRET_8')
+        $provided = [pscustomobject]@{
+            Gpo = $script:ReportA.Gpo.PSObject.Copy()
+            Policy = [ADAnalyzerGpoReader]::new().Read($iniPolicyRoot)
+        }
+
+        Set-StrictMode -Version Latest
+        Assert-Equal 0 $provided.Policy.RegistrySettings.Count
+        Assert-Equal 1 $provided.Policy.IniSettings.Count
+        $inputRow = $provided.Policy.IniSettings[0]
+        Assert-True (
+            -not $inputRow.Analyzed -and
+            $inputRow.SecretPresent -is [bool] -and
+            $inputRow.SecretPresent -and
+            $null -eq $inputRow.PSObject.Properties['Value']
+        ) 'The reader fixture did not supply an INI presence-only row.'
+        $before = ConvertTo-Json -InputObject $provided -Depth 20 -Compress
+
+        $text = & (Join-Path $RepositoryRoot 'etc/Get-GPOXML.ps1') -InputObject $provided
+        $xml = [xml]$text
+        $xpath = '/GPO/Computer/ExtensionData[Name="Ini"]/Extension/Record'
+        $records = $xml.SelectNodes($xpath)
+        Assert-Equal 1 $records.Count
+        $record = $records[0]
+        $presence = $record.SelectSingleNode('./SecretPresent')
+        Assert-True (
+            $null -ne $presence -and $presence.PSBase.InnerText -ceq 'true'
+        ) 'INI XML lost the positive presence indicator.'
+        Assert-True ($null -eq $record.SelectSingleNode('./Value')) 'INI XML retained a Value for a secret.'
+        Assert-Equal ($inputRow.Source + ': [Fixture] Password') $record.SelectSingleNode('./Name').PSBase.InnerText
+        Assert-NoSecret $text
+
+        $after = ConvertTo-Json -InputObject $provided -Depth 20 -Compress
+        Assert-True ($after -ceq $before) 'Offline INI XML changed the caller report.'
+        Assert-Equal 0 $script:Imports.Count
+        Assert-Equal 0 $script:LookupCalls.Count
+        Assert-Equal 0 $script:ReportCalls.Count
+    }
+
     Invoke-AuxiliaryTest 'XML retains actual identity and Unicode metadata without fabricating optional fields' {
         $metadata = $script:ReportA.Gpo.PSObject.Copy()
         $metadata.PSObject.Properties.Remove('Domain')

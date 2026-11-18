@@ -712,7 +712,10 @@ function ConvertTo-ADAnalyzerProvidedGpoPolicy {
         SecuritySettings = @($Policy.SecuritySettings | Where-Object { $null -ne $_ } | ForEach-Object { ConvertTo-ADAnalyzerSecretRecord $_ })
         RegistrySettings = @($Policy.RegistrySettings | Where-Object { $null -ne $_ } | ForEach-Object {
                 $record = ConvertTo-ADAnalyzerSecretRecord $_.PSObject.Copy()
-                if ($record.Type -notin @(1, 2, 4, 5, 7, 11) -and $record.Value -is [array]) {
+                if ($record.Type -notin @(1, 2, 4, 5, 7, 11) -and
+                    ($null -ne $record.PSObject.Properties['Value'] -or
+                        $null -eq $record.PSObject.Properties['SecretPresent']) -and
+                    $record.Value -is [array]) {
                     $record.Value = [byte[]]$record.Value
                 }
                 $record
@@ -983,7 +986,11 @@ function ConvertTo-AnalyzerGpoXml {
                 $record = Add-AnalyzerGpoXmlNode $doc $body 'Record'
                 if ($kind -eq 'Registry') {
                     $label = '{0}\{1}\{2}' -f $row.Hive, $row.Key, $row.ValueName
-                    $value = if ($row.Value -is [byte[]]) {
+                    $value = if ($null -eq $row.PSObject.Properties['Value'] -and
+                        $null -ne $row.PSObject.Properties['SecretPresent']) {
+                        $null
+                    }
+                    elseif ($row.Value -is [byte[]]) {
                         [System.Convert]::ToBase64String($row.Value)
                     }
                     elseif ($row.Value -is [array]) {
@@ -996,7 +1003,13 @@ function ConvertTo-AnalyzerGpoXml {
                 }
                 elseif ($kind -eq 'Ini') {
                     $label = '{0}: [{1}] {2}' -f $row.Source, $row.Section, $row.Name
-                    $value = $row.Value
+                    $value = if ($null -eq $row.PSObject.Properties['Value'] -and
+                        $null -ne $row.PSObject.Properties['SecretPresent']) {
+                        $null
+                    }
+                    else {
+                        $row.Value
+                    }
                 }
                 else {
                     $label = $row.Path

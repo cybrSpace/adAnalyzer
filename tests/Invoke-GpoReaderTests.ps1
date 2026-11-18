@@ -449,6 +449,161 @@ try {
             $report -notmatch 'fixture-(xml|ini|inf|pol)-secret|REDACTED') 'Compatibility report lost presence or retained values'
     }
 
+    $type3Root = Join-Path $temp 'strict-binary-presence'
+    Write-Pol (Join-Path $type3Root 'Machine/Registry.pol') @(
+        @{
+            Key = 'Software\Fixture'
+            Name = 'DefaultPassword'
+            Type = 3
+            Bytes = [byte[]]@(11, 12)
+        }
+        @{
+            Key = 'Software\Fixture'
+            Name = 'Password'
+            Type = 3
+            Bytes = [byte[]]@()
+        }
+        @{
+            Key = 'Software\Fixture'
+            Name = 'FixtureBinary'
+            Type = 3
+            Bytes = [byte[]]@(19, 42)
+        }
+    )
+    Write-Text (Join-Path $type3Root 'GPT.INI') "[General]`nVersion=1"
+    $type3Policy = [ADAnalyzerGpoReader]::new().Read($type3Root)
+    $type3Gpo = [pscustomobject]@{
+        Id = [guid]::Empty
+        Flags = 0
+        Version = 1
+        Links = @()
+    }
+    $type3Json = ConvertTo-Json -InputObject $type3Policy -Depth 20 -Compress
+
+    function Get-Type3SourcePolicy([string]$SourceShape) {
+        if ($SourceShape -eq 'Json') {
+            return (ConvertFrom-Json -InputObject $type3Json)
+        }
+        return $type3Policy
+    }
+
+    foreach ($sourceShape in @('Native', 'Json')) {
+        Test-Gpo ('strict provided policy retains Type 3 Boolean presence from ' + $sourceShape) {
+            Set-StrictMode -Version Latest
+            $inputPolicy = Get-Type3SourcePolicy $sourceShape
+            $before = ConvertTo-Json -InputObject $inputPolicy -Depth 20 -Compress
+            $output = ConvertTo-ADAnalyzerProvidedGpoPolicy -Policy $inputPolicy
+            Assert-Equal 3 $output.RegistrySettings.Count
+            foreach ($index in 0, 1) {
+                $source = $inputPolicy.RegistrySettings[$index]
+                $row = $output.RegistrySettings[$index]
+                $expected = $index -eq 0
+                Assert-True ($source.Type -eq 3 -and $source.SecretPresent -is [bool] -and
+                    $source.SecretPresent -eq $expected -and $null -eq $source.PSObject.Properties['Value']) 'The reader did not provide a real Type 3 presence-only row.'
+                Assert-True ($row.Type -eq 3 -and $row.SecretPresent -is [bool] -and
+                    $row.SecretPresent -eq $expected -and $row.Hive -ceq $source.Hive -and
+                    $row.Key -ceq $source.Key -and $row.ValueName -ceq $source.ValueName) 'Provided policy changed Boolean presence or its identity.'
+                foreach ($field in @('Value', 'RawData', 'Data', 'Bytes')) {
+                    Assert-True ($null -eq $row.PSObject.Properties[$field]) 'Provided policy retained a secret payload field.'
+                }
+            }
+            Assert-True ($output.RegistrySettings[2].Value -is [byte[]] -and
+                ($output.RegistrySettings[2].Value -join ',') -ceq '19,42') 'Provided policy did not restore the ordinary typed bytes.'
+            $after = ConvertTo-Json -InputObject $inputPolicy -Depth 20 -Compress
+            Assert-True ($after -ceq $before) 'Provided policy modified its caller-owned input.'
+        }
+
+        Test-Gpo ('strict canonical XML writes binary Boolean presence from ' + $sourceShape) {
+            Set-StrictMode -Version Latest
+            $inputPolicy = Get-Type3SourcePolicy $sourceShape
+            $report = [xml](ConvertTo-AnalyzerGpoXml -Gpo $type3Gpo -Parsed $inputPolicy)
+            $rows = @($report.SelectNodes("/GPO/Computer/ExtensionData[Name='Registry']/Extension/Record"))
+            Assert-Equal 3 $rows.Count
+            foreach ($index in 0, 1) {
+                $row = $rows[$index]
+                $settingName = $inputPolicy.RegistrySettings[$index].ValueName
+                $expected = ([string]($index -eq 0)).ToLowerInvariant()
+                Assert-True ($row.SelectSingleNode('Type').InnerText -ceq '3' -and
+                    $row.SelectSingleNode('Name').InnerText -ceq ('HKLM\Software\Fixture\' + $settingName) -and
+                    $row.SelectSingleNode('SecretPresent').InnerText -ceq $expected -and
+                    $null -eq $row.SelectSingleNode('Value')) 'Canonical XML lost the identity or exposed a presence-only binary value.'
+            }
+        }
+
+        Test-Gpo ('strict ordinary binary rows distinguish explicit null from missing Value for ' + $sourceShape) {
+            Set-StrictMode -Version Latest
+            $source = Get-Type3SourcePolicy $sourceShape
+            $policy = $source.PSObject.Copy()
+            $bytes = $source.RegistrySettings[2].PSObject.Copy()
+            $nullValue = $bytes.PSObject.Copy()
+            $nullValue.ValueName = 'FixtureNull'
+            $nullValue.Value = $null
+            $policy.RegistrySettings = @($bytes, $nullValue)
+            $normalized = ConvertTo-ADAnalyzerProvidedGpoPolicy -Policy $policy
+            Assert-True ($normalized.RegistrySettings[0].Value -is [byte[]] -and
+                ($normalized.RegistrySettings[0].Value -join ',') -ceq '19,42' -and
+                $null -ne $normalized.RegistrySettings[1].PSObject.Properties['Value'] -and
+                $null -eq $normalized.RegistrySettings[1].Value) 'Normalization collapsed an explicit null or lost the typed binary value.'
+            $report = [xml](ConvertTo-AnalyzerGpoXml -Gpo $type3Gpo -Parsed $normalized)
+            $values = @($report.SelectNodes("/GPO/Computer/ExtensionData[Name='Registry']/Extension/Record/Value"))
+            Assert-True ($values.Count -eq 2 -and
+                $values[0].InnerText -ceq [Convert]::ToBase64String([byte[]]@(19, 42)) -and
+                $values[1].InnerText.Length -eq 0) 'Canonical XML did not preserve a normal Value element and explicit null.'
+
+            $nullValue.PSObject.Properties.Remove('Value')
+            foreach ($route in @('Normalize', 'Writer')) {
+                $failure = $null
+                try {
+                    if ($route -eq 'Normalize') {
+                        $null = ConvertTo-ADAnalyzerProvidedGpoPolicy -Policy $policy
+                    }
+                    else {
+                        $null = ConvertTo-AnalyzerGpoXml -Gpo $type3Gpo -Parsed $policy
+                    }
+                }
+                catch {
+                    $failure = $_
+                }
+                Assert-True ($null -ne $failure -and $failure.FullyQualifiedErrorId -like 'PropertyNotFoundStrict*' -and
+                    $failure.Exception.GetBaseException().Message -match "'Value'") 'An ordinary record missing Value lost its native Strict diagnostic.'
+            }
+        }
+    }
+
+    Test-Gpo 'malformed supplied binary retains the native Continue error and following row' {
+        $child = Join-Path $temp 'binary-continue.ps1'
+        Write-Text $child @'
+param([string]$RepositoryRoot)
+
+$ErrorActionPreference = 'Stop'
+. (Join-Path $RepositoryRoot 'bin/ADGpo.ps1')
+Set-StrictMode -Version Latest
+$policy = ConvertFrom-Json -InputObject '{"Path":"fixture","SysvolVersion":1,"Files":[],"UnparsedFiles":[],"SecuritySettings":[],"XmlFiles":[],"IniSettings":[],"RegistrySettings":[{"ValueName":"InvalidBinary","Type":3,"Value":[0,{}]},{"ValueName":"FollowingBinary","Type":3,"Value":[19,42]}]}'
+$ErrorActionPreference = 'Continue'
+$native = @(& {
+    $value = $policy.RegistrySettings[0].Value
+    $value = [byte[]]$value
+} 2>&1)
+$output = @(ConvertTo-ADAnalyzerProvidedGpoPolicy -Policy $policy 2>&1)
+$ErrorActionPreference = 'Stop'
+if ($native.Count -ne 1 -or $native[0] -isnot [Management.Automation.ErrorRecord] -or
+    $output.Count -ne 2 -or $output[0] -isnot [Management.Automation.ErrorRecord] -or
+    $output[0].FullyQualifiedErrorId -cne $native[0].FullyQualifiedErrorId) {
+    throw 'Native binary conversion diagnostic changed.'
+}
+$rows = $output[1].RegistrySettings
+if ($rows.Count -ne 2 -or $rows[0].ValueName -cne 'InvalidBinary' -or $rows[0].Value -isnot [object[]] -or
+    $rows[1].ValueName -cne 'FollowingBinary' -or $rows[1].Value -isnot [byte[]] -or
+    ($rows[1].Value -join ',') -cne '19,42' -or $policy.RegistrySettings[1].Value -isnot [object[]]) {
+    throw 'Native Continue dropped or changed the registry rows.'
+}
+Write-Host 'PASS binary cast Continue'
+'@
+        $executable = (Get-Process -Id $PID).Path
+        $output = @(& $executable -NoLogo -NoProfile -NonInteractive -File $child -RepositoryRoot $RepositoryRoot 2>&1)
+        Assert-True ($LASTEXITCODE -eq 0 -and $output.Count -eq 1 -and $output[0] -ceq 'PASS binary cast Continue') 'The isolated native Continue comparison failed.'
+    }
+
     $strictPol = Join-Path $temp 'strict-secret-registry/Machine/Registry.pol'
     Write-Pol $strictPol @(
         @{
