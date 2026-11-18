@@ -1144,6 +1144,25 @@ foreach ($case in @(
         }
     }
 }
+
+$checkFactoryCases = [ordered]@{
+    Creation = 17
+    Suppression = 18
+    Failures = 72
+    Direct = 38
+}
+foreach ($case in $checkFactoryCases.Keys) {
+    Test-Assessment ('check factory API: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'CheckFactoryFixture.ps1'
+        $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -Case $case 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw ($output -join [Environment]::NewLine)
+        }
+        $marker = 'PASS check factory ' + $case + ' ' + $checkFactoryCases[$case]
+        Assert-True ($marker -cin @($output)) 'Fresh process did not execute every check factory case.'
+    }
+}
 Write-Host ("{0} assessment-integration tests passed; {1} failed" -f $script:Passed, $script:Failed)
 if ($script:Failed) {
     exit 1

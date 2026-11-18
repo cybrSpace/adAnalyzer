@@ -179,6 +179,25 @@ Projection state, dispatch, property processing, child/depth requests and presen
 
 Use this explicit dot-source entrypoint for literal constructor calls. Importing `ADEnvironment.psd1` remains the supported command interface; it does not promise caller visibility of classes defined in its dot-sourced component files. The constructor entrypoint supports portable offline evaluation; live collection still uses the package manifest and its bundled AD PSDrive/provider.
 
+For check construction and suppression, use the same dot-sourced entrypoint to load the stateless factory. The three-argument overload uses the existing defaults. The specification overload accepts the full set of check fields, including raw observed, expected, and evidence values.
+
+```powershell
+$factory = [ADAnalyzerCheckFactory]::new()
+$check = $factory.Create('FIXTURE', 'Fail', 'fixture')
+$check = $factory.Create(@{
+    RuleId = 'FIXTURE'
+    Status = 'Fail'
+    Target = 'fixture'
+    Severity = 'Medium'
+    Observed = $observed
+    Expected = $expected
+    Evidence = $evidence
+})
+$check = $factory.ApplyException($check, $profile)
+```
+
+The factory owns check IDs, field order, validation, rule selection, expiry checks, and suppression metadata. The full specification preserves borrowed evidence values. Applying an exception changes the supplied check in place and returns that same check. The first matching live exception wins, and the metadata keeps the original expiry value. The compatibility commands retain native PowerShell binding, reads, conversions, and writes where those affect streams, continuation, or caller variables.
+
 ## Profiles and assessment coverage
 
 `Import-ADAnalyzerProfile` merges a JSON or restricted PSD1 data file with fresh defaults, validates input, and rejects unknown settings. External JSON profiles, saved assessment/plan/journal documents, and SAML configuration files are read as UTF-8 unless a Unicode BOM identifies another encoding. UTF-8 without a BOM is supported consistently on Windows PowerShell 5.1 and PowerShell 7. BOM-marked UTF-8, UTF-16, and UTF-32 remain supported. Convert legacy non-BOM ANSI JSON to UTF-8; its code page is ambiguous. The shared writer continues to emit a UTF-8 BOM for compatibility with 5.1 default readers. `Get-ADAnalyzerDefaultProfile` shows every supported key. Profiles control account/password/lockout thresholds, account-role evidence, approved SIDs, custom registry expectations, OS lifecycle/build rules, and remediation approvals. `profiles/default.psd1` is inert; `profiles/example.psd1` documents customization. Profile files are data and cannot contain executable PowerShell scripts.

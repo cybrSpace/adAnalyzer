@@ -527,6 +527,160 @@ function Import-ADAnalyzerProfile {
     $configuration.ToHashtable()
 }
 
+class ADAnalyzerCheckFactory {
+    ADAnalyzerCheckFactory() {
+    }
+
+    [pscustomobject] Create([string]$RuleId, [string]$Status, [string]$Target) {
+        return $this.Create(@{
+            RuleId = $RuleId
+            Status = $Status
+            Target = $Target
+        })
+    }
+
+    [pscustomobject] Create([hashtable]$Specification) {
+        if ($null -eq $Specification) {
+            throw [ArgumentNullException]::new('Specification')
+        }
+
+        $fields = @{
+            RuleId = $this.GetString($Specification, 'RuleId', '')
+            Status = $this.GetString($Specification, 'Status', '')
+            Target = $this.GetString($Specification, 'Target', '')
+            Severity = $this.GetString($Specification, 'Severity', 'Information')
+            Category = $this.GetString($Specification, 'Category', 'General')
+            Observed = $Specification['Observed']
+            Expected = $Specification['Expected']
+            Evidence = $Specification['Evidence']
+            Message = $this.GetString($Specification, 'Message', '')
+            Applicability = $this.GetString($Specification, 'Applicability', 'Unknown')
+        }
+        $this.Validate($fields)
+        $id = $this.CreateId($fields.RuleId, $fields.Target)
+
+        $object = $Specification['Object']
+        $metadata = @{
+            ObjectGuid = $null
+            SID = $null
+            DistinguishedName = $null
+        }
+        # Each getter can change whether the object is still truthy.
+        if ($object) {
+            $metadata.ObjectGuid = [string]$object.ObjectGuid
+        }
+        if ($object) {
+            $metadata.SID = [string]$object.SID
+        }
+        if ($object) {
+            $metadata.DistinguishedName = [string]$object.DistinguishedName
+        }
+        return $this.BuildCheck($id, $fields, $metadata)
+    }
+
+    hidden [string] GetString([hashtable]$Specification, [string]$Name, [string]$Default) {
+        if (-not $Specification.ContainsKey($Name)) {
+            return $Default
+        }
+
+        $value = $Specification[$Name]
+        if ($value -is [array]) {
+            throw [ArgumentException]::new("$Name expects a scalar string.", $Name)
+        }
+        return [string]$value
+    }
+
+    hidden [void] Validate([hashtable]$Fields) {
+        foreach ($name in @('RuleId', 'Target')) {
+            if ([string]::IsNullOrEmpty($Fields[$name])) {
+                throw [ArgumentException]::new("$name is required.", $name)
+            }
+        }
+        if ($Fields.Status -notin @('Pass', 'Fail', 'Unknown', 'Unreadable', 'NotApplicable', 'NotConfigured', 'Invalid')) {
+            throw [ArgumentException]::new('Invalid check status.', 'Status')
+        }
+        if ($Fields.Severity -notin @('Critical', 'High', 'Medium', 'Low', 'Information')) {
+            throw [ArgumentException]::new('Invalid check severity.', 'Severity')
+        }
+        if ($Fields.Applicability -notin @('Configured', 'Applicable', 'Unknown', 'NotApplicable')) {
+            throw [ArgumentException]::new('Invalid check applicability.', 'Applicability')
+        }
+    }
+
+    hidden [string] CreateId([string]$RuleId, [string]$Target) {
+        $identity = $RuleId.ToUpperInvariant() + [char]0 + $Target.ToUpperInvariant()
+        $bytes = [Text.Encoding]::UTF8.GetBytes($identity)
+        $hash = [Security.Cryptography.SHA256]::Create()
+        try {
+            return [BitConverter]::ToString($hash.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+        }
+        finally {
+            $hash.Dispose()
+        }
+    }
+
+    hidden [pscustomobject] BuildCheck([string]$Id, [hashtable]$Fields, [hashtable]$Metadata) {
+        return [pscustomobject][ordered]@{
+            CheckId = $Id
+            RuleId = $Fields.RuleId
+            Status = $Fields.Status
+            Severity = $Fields.Severity
+            Category = $Fields.Category
+            Target = $Fields.Target
+            Observed = $Fields.Observed
+            Expected = $Fields.Expected
+            Evidence = $Fields.Evidence
+            Message = $Fields.Message
+            Applicability = $Fields.Applicability
+            ObjectGuid = $Metadata.ObjectGuid
+            SID = $Metadata.SID
+            DistinguishedName = $Metadata.DistinguishedName
+            Suppressed = $false
+            Exception = $null
+        }
+    }
+
+    [object] ApplyException([object]$Check, [hashtable]$Profile) {
+        if ($null -eq $Check) {
+            throw [ArgumentNullException]::new('Check')
+        }
+
+        foreach ($candidate in @($Profile.Exceptions)) {
+            if ($this.MatchesRule(@{
+                        CheckRule = $Check.RuleId
+                        CandidateRule = $candidate.RuleId
+                    }) -and
+                $Check.Target -like $candidate.Target -and
+                $this.IsFresh([datetimeoffset]$candidate.Expires)) {
+                $Check.Suppressed = $true
+                $Check.Exception = $this.BuildException(@{
+                    Owner = $candidate.Owner
+                    Reason = $candidate.Reason
+                    Expires = $candidate.Expires
+                })
+                break
+            }
+        }
+        return $Check
+    }
+
+    hidden [bool] MatchesRule([hashtable]$Observation) {
+        return [bool]($Observation.CheckRule -eq $Observation.CandidateRule)
+    }
+
+    hidden [bool] IsFresh([datetimeoffset]$Expiration) {
+        return $Expiration -gt [datetimeoffset]::UtcNow
+    }
+
+    hidden [pscustomobject] BuildException([hashtable]$Metadata) {
+        return [pscustomobject]@{
+            Owner = $Metadata.Owner
+            Reason = $Metadata.Reason
+            Expires = $Metadata.Expires
+        }
+    }
+}
+
 function New-ADAnalyzerCheck {
     [CmdletBinding()]
     param(
@@ -549,16 +703,10 @@ function New-ADAnalyzerCheck {
         [AllowNull()]$Object
 
     )
-    $hash = [Security.Cryptography.SHA256]::Create()
-    try {
-        $id = [BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($RuleId.ToUpperInvariant() + [char]0 + $Target.ToUpperInvariant()))).Replace('-',
-            '').ToLowerInvariant()
-    }
-    finally {
-        $hash.Dispose()
-    }
-    [pscustomobject][ordered]@{
-        CheckId = $id
+    $factory = [ADAnalyzerCheckFactory]::new()
+    $id = $factory.CreateId($RuleId, $Target)
+    # Observe metadata in command scope to preserve native conversion errors.
+    $factory.BuildCheck($id, @{
         RuleId = $RuleId
         Status = $Status
         Severity = $Severity
@@ -569,6 +717,7 @@ function New-ADAnalyzerCheck {
         Evidence = $Evidence
         Message = $Message
         Applicability = $Applicability
+    }, @{
         ObjectGuid = $(if ($Object) {
                 [string]$Object.ObjectGuid
             }
@@ -587,9 +736,7 @@ function New-ADAnalyzerCheck {
             else {
                 $null
             })
-        Suppressed = $false
-        Exception = $null
-    }
+    })
 }
 
 function Set-ADAnalyzerCheckException {
@@ -599,16 +746,22 @@ function Set-ADAnalyzerCheckException {
 
     )
     process {
+        $factory = [ADAnalyzerCheckFactory]::new()
+        # Native foreach exposes its enumerator to property getters in this scope.
         foreach ($exception in @($Profile.Exceptions)) {
-            if ($Check.RuleId -eq $exception.RuleId -and
+            if ($factory.MatchesRule(@{
+                        CheckRule = $Check.RuleId
+                        CandidateRule = $exception.RuleId
+                    }) -and
                 $Check.Target -like $exception.Target -and
-                [datetimeoffset]$exception.Expires -gt [datetimeoffset]::UtcNow) {
+                $factory.IsFresh([datetimeoffset]$exception.Expires)) {
+                # Keep the two native writes in order for PowerShell continuation.
                 $Check.Suppressed = $true
-                $Check.Exception = [pscustomobject]@{
+                $Check.Exception = $factory.BuildException(@{
                     Owner = $exception.Owner
                     Reason = $exception.Reason
                     Expires = $exception.Expires
-                }
+                })
                 break
             }
         }
