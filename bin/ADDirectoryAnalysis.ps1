@@ -758,29 +758,130 @@ function ConvertTo-ADAnalyzerDirectoryObject {
     $projector.FinishObject($result, $rawAttributes)
 }
 
-function Get-ADAnalyzerHostData {
-    param(
-        [string[]]$ComputerNames,
-        [pscredential]$Credential = [pscredential]::Empty,
-        $Errors,
-        [ValidateRange(1, 3600)][uint32]$TimeoutSeconds = 30,
-        [hashtable]$Profile
+class ADAnalyzerHostCollector {
+    ADAnalyzerHostCollector() {
+    }
 
-    )
-    $configuration = Import-ADAnalyzerProfile -Profile $Profile
-    $serviceNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    $serviceFilters = [Collections.Generic.List[string]]::new()
-    foreach ($name in @('Spooler', 'W32Time') + @($configuration.Host.Services | ForEach-Object Name)) {
-        if ($serviceNames.Add($name)) {
-            $escaped = $name.Replace('\', '\\').Replace("'", "\'").Replace('"', '\"')
-            $serviceFilters.Add("Name='$escaped'")
+    [pscustomobject] Collect([string[]]$ComputerNames) {
+        return $this.Collect($ComputerNames, [pscredential]::Empty, 30, $null)
+    }
+
+    [pscustomobject] Collect(
+        [string[]]$ComputerNames,
+        [pscredential]$Credential,
+        [uint32]$TimeoutSeconds,
+        [hashtable]$Profile
+    ) {
+        if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 3600) {
+            throw [ArgumentOutOfRangeException]::new('TimeoutSeconds')
+        }
+
+        $profileType = [type]'ADAnalyzerProfile'
+        $configuration = $profileType::new($Profile).ToHashtable()
+        $plan = $this.CreatePlan($configuration)
+        $hosts = [Collections.Generic.List[object]]::new()
+        $errors = [Collections.Generic.List[object]]::new()
+        foreach ($computer in $this.SelectComputers($ComputerNames)) {
+            $hosts.Add($this.CollectHost($computer, $Credential, $TimeoutSeconds, $plan, $errors))
+        }
+        return [pscustomobject][ordered]@{
+            Hosts = $hosts.ToArray()
+            Errors = $errors.ToArray()
         }
     }
-    foreach ($computer in @($ComputerNames | Where-Object { $_ } | Select-Object -Unique)) {
-        $session = $null
-        $initialErrorCount = $Errors.Count
-        $data = [ordered]@{
-            ComputerName = $computer
+
+    hidden [string[]] SelectComputers([string[]]$ComputerNames) {
+        return @($ComputerNames | Where-Object { $_ } | Select-Object -Unique)
+    }
+
+    hidden [pscustomobject] CreatePlan([hashtable]$Configuration) {
+        $serviceNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $serviceFilters = [Collections.Generic.List[string]]::new()
+        foreach ($name in @('Spooler', 'W32Time') + @($Configuration.Host.Services | ForEach-Object Name)) {
+            if ($serviceNames.Add($name)) {
+                $escaped = $name.Replace('\', '\\').Replace("'", "\'").Replace('"', '\"')
+                $serviceFilters.Add("Name='$escaped'")
+            }
+        }
+
+        $queries = @(
+            @{
+                Key = 'Services'
+                ClassName = 'Win32_Service'
+                Filter = ($serviceFilters -join ' OR ')
+            },
+            @{
+                Key = 'OperatingSystem'
+                ClassName = 'Win32_OperatingSystem'
+            },
+            @{
+                Key = 'Patches'
+                ClassName = 'Win32_QuickFixEngineering'
+            },
+            @{
+                Key = 'Dns'
+                ClassName = 'Win32_NetworkAdapterConfiguration'
+                Filter = 'IPEnabled=True'
+            },
+            @{
+                Key = 'Smb'
+                ClassName = 'MSFT_SmbServerConfiguration'
+                Namespace = 'root/Microsoft/Windows/SMB'
+            }
+        )
+        $settings = [Collections.Generic.List[hashtable]]::new()
+        $settings.Add(@{
+                Path = 'SYSTEM\CurrentControlSet\Services\W32Time\Parameters'
+                Name = 'NtpServer'
+                Method = 'GetStringValue'
+                Type = 1
+            })
+        $settings.Add(@{
+                Path = 'SYSTEM\CurrentControlSet\Services\W32Time\Parameters'
+                Name = 'Type'
+                Method = 'GetStringValue'
+                Type = 1
+            })
+        $settings.Add(@{
+                Path = 'SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters'
+                Name = 'SMB1'
+                Method = 'GetDWORDValue'
+                Type = 4
+            })
+        foreach ($version in @('TLS 1.0', 'TLS 1.1', 'TLS 1.2', 'TLS 1.3')) {
+            foreach ($side in @('Client', 'Server')) {
+                $settings.Add(@{
+                        Path = ('SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\' + $version + '\' + $side)
+                        Name = 'Enabled'
+                        Method = 'GetDWORDValue'
+                        Type = 4
+                    })
+            }
+        }
+
+        $seenSettings = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($setting in $settings) {
+            $null = $seenSettings.Add($setting.Path + [char]0 + $setting.Name)
+        }
+        foreach ($rule in @($Configuration.Host.RegistryRules)) {
+            if ($seenSettings.Add($rule.Key + [char]0 + $rule.ValueName)) {
+                $settings.Add(@{
+                        Path = $rule.Key
+                        Name = $rule.ValueName
+                        Type = $rule.Type
+                        Method = $null
+                    })
+            }
+        }
+        return [pscustomobject]@{
+            Queries = $queries
+            RegistrySettings = $settings.ToArray()
+        }
+    }
+
+    hidden [Collections.Specialized.OrderedDictionary] CreateReport([string]$ComputerName) {
+        return [ordered]@{
+            ComputerName = $ComputerName
             Status = 'Unknown'
             Services = @()
             OperatingSystem = $null
@@ -797,134 +898,298 @@ function Get-ADAnalyzerHostData {
                 Reason = 'Certificate validation requires explicit endpoints and trust policy'
             }
         }
+    }
+
+    hidden [hashtable] SessionArguments([string]$ComputerName, [pscredential]$Credential, [uint32]$TimeoutSeconds) {
+        $parameters = @{
+            ComputerName = $ComputerName
+            OperationTimeoutSec = $TimeoutSeconds
+            ErrorAction = 'Stop'
+        }
+        if ($null -ne $Credential -and $Credential -ne [pscredential]::Empty) {
+            $parameters.Credential = $Credential
+        }
+        return $parameters
+    }
+
+    hidden [hashtable] QueryArguments([object]$Session, [hashtable]$Query, [uint32]$TimeoutSeconds) {
+        $parameters = @{
+            CimSession = $Session
+            ClassName = $Query.ClassName
+            OperationTimeoutSec = $TimeoutSeconds
+            ErrorAction = 'Stop'
+        }
+        if ($Query.ContainsKey('Filter')) {
+            $parameters.Filter = $Query.Filter
+        }
+        if ($Query.ContainsKey('Namespace')) {
+            $parameters.Namespace = $Query.Namespace
+        }
+        return $parameters
+    }
+
+    hidden [hashtable] RegistryArguments(
+        [object]$Session,
+        [hashtable]$Setting,
+        [string]$Method,
+        [uint32]$TimeoutSeconds
+    ) {
+        $providerArguments = @{
+            hDefKey = [uint32]2147483650
+            sSubKeyName = $Setting.Path
+        }
+        if ($Method -ne 'EnumValues') {
+            $providerArguments.sValueName = $Setting.Name
+        }
+        return @{
+            CimSession = $Session
+            Namespace = 'root/default'
+            ClassName = 'StdRegProv'
+            MethodName = $Method
+            Arguments = $providerArguments
+            OperationTimeoutSec = $TimeoutSeconds
+            ErrorAction = 'Stop'
+        }
+    }
+
+    hidden [hashtable] RegistryMetadataArguments(
+        [hashtable]$TypeCache,
+        [object]$Session,
+        [hashtable]$Setting,
+        [uint32]$TimeoutSeconds
+    ) {
+        if ($TypeCache.ContainsKey($Setting.Path)) {
+            return $null
+        }
+        return $this.RegistryArguments($Session, $Setting, 'EnumValues', $TimeoutSeconds)
+    }
+
+    hidden [int] FindRegistryValue([object[]]$Names, [int]$TypeCount, [string]$Name) {
+        for ($index = 0; $index -lt $Names.Count; $index++) {
+            if ($Names[$index] -ieq $Name -and $index -lt $TypeCount) {
+                return $index
+            }
+        }
+        return -1
+    }
+
+    hidden [string] RegistryMethod([int]$Type) {
+        switch ($Type) {
+            1 {
+                return 'GetStringValue'
+            }
+            2 {
+                return 'GetExpandedStringValue'
+            }
+            3 {
+                return 'GetBinaryValue'
+            }
+            4 {
+                return 'GetDWORDValue'
+            }
+            7 {
+                return 'GetMultiStringValue'
+            }
+            11 {
+                return 'GetQWORDValue'
+            }
+        }
+        return ''
+    }
+
+    hidden [bool] CanUseDeclaredRegistryType([hashtable]$Setting) {
+        # StdRegProv can omit the metadata arrays when only the default value exists.
+        return $Setting.Name -eq '' -and $null -ne $Setting.Type
+    }
+
+    hidden [string] RegistryValueProperty([object]$Type) {
+        if ($Type -in 1, 2, 7) {
+            return 'sValue'
+        }
+        return 'uValue'
+    }
+
+    hidden [pscustomobject] RegistryObservation(
+        [hashtable]$Setting,
+        [object]$Type,
+        [object]$StatusCode,
+        [object]$ReturnCode
+    ) {
+        $status = if ($StatusCode -eq 0) {
+            'Observed'
+        }
+        else {
+            'Unknown'
+        }
+        return [pscustomobject]@{
+            Path = $Setting.Path
+            Name = $Setting.Name
+            Type = $Type
+            Status = $status
+            Value = $null
+            ReturnValue = $ReturnCode
+        }
+    }
+
+    hidden [pscustomobject] RegistryFailure([hashtable]$Setting, [object]$Type, [string]$Message) {
+        return [pscustomobject]@{
+            Path = $Setting.Path
+            Name = $Setting.Name
+            Type = $Type
+            Status = 'Unknown'
+            Value = $null
+            Message = $Message
+        }
+    }
+
+    hidden [pscustomobject] CollectorFailure([string]$Collector, [string]$ComputerName, [string]$Message) {
+        return [pscustomobject]@{
+            Collector = $Collector
+            Target = $ComputerName
+            Status = 'Unknown'
+            Message = $Message
+        }
+    }
+
+    hidden [void] CompleteReport(
+        [Collections.Specialized.OrderedDictionary]$Report,
+        [object[]]$Registry,
+        [bool]$HasErrors
+    ) {
+        $Report['Registry'] = $Registry
+        $Report['Status'] = if ($HasErrors) {
+            'Partial'
+        }
+        else {
+            'Observed'
+        }
+    }
+
+    hidden [pscustomobject] CollectHost(
+        [string]$ComputerName,
+        [pscredential]$Credential,
+        [uint32]$TimeoutSeconds,
+        [pscustomobject]$Plan,
+        [Collections.Generic.List[object]]$Errors
+    ) {
+        $session = $null
+        $initialErrorCount = $Errors.Count
+        $report = $this.CreateReport($ComputerName)
         try {
-            $arguments = @{
-                ComputerName = $computer
-                OperationTimeoutSec = $TimeoutSeconds
-                ErrorAction = 'Stop'
-            }
-            if ($null -ne $Credential -and $Credential -ne [pscredential]::Empty) {
-                $arguments['Credential'] = $Credential
-            }
+            $arguments = $this.SessionArguments($ComputerName, $Credential, $TimeoutSeconds)
             $session = New-CimSession @arguments
-            foreach ($query in @(
-                    @{
-                        Key = 'Services'
-                        ClassName = 'Win32_Service'
-                        Filter = ($serviceFilters -join ' OR ')
-                    },
-                    @{
-                        Key = 'OperatingSystem'
-                        ClassName = 'Win32_OperatingSystem'
-                    },
-                    @{
-                        Key = 'Patches'
-                        ClassName = 'Win32_QuickFixEngineering'
-                    },
-                    @{
-                        Key = 'Dns'
-                        ClassName = 'Win32_NetworkAdapterConfiguration'
-                        Filter = 'IPEnabled=True'
-                    },
-                    @{
-                        Key = 'Smb'
-                        ClassName = 'MSFT_SmbServerConfiguration'
-                        Namespace = 'root/Microsoft/Windows/SMB'
-                    }
-                )) {
+            foreach ($query in $Plan.Queries) {
                 try {
-                    $splat = @{
-                        CimSession = $session
-                        ClassName = $query.ClassName
-                        OperationTimeoutSec = $TimeoutSeconds
-                        ErrorAction = 'Stop'
+                    $arguments = $this.QueryArguments($session, $query, $TimeoutSeconds)
+                    $report[$query.Key] = @(Get-CimInstance @arguments)
+                }
+                catch {
+                    $Errors.Add($this.CollectorFailure(('Host.' + $query.Key), $ComputerName, $_.Exception.Message))
+                }
+            }
+            $registry = $this.CollectRegistry($session, $Plan.RegistrySettings, $TimeoutSeconds)
+            $this.CompleteReport($report, $registry, ($Errors.Count -gt $initialErrorCount))
+        }
+        catch {
+            $Errors.Add($this.CollectorFailure('Host', $ComputerName, $_.Exception.Message))
+        }
+        finally {
+            if ($null -ne $session) {
+                Remove-CimSession -CimSession $session -ErrorAction SilentlyContinue
+            }
+        }
+        return [pscustomobject]$report
+    }
+
+    hidden [object[]] CollectRegistry([object]$Session, [hashtable[]]$Settings, [uint32]$TimeoutSeconds) {
+        $registry = [Collections.Generic.List[object]]::new()
+        $typeCache = @{}
+        foreach ($setting in $Settings) {
+            $type = $setting.Type
+            $method = $setting.Method
+            try {
+                if (-not $method) {
+                    $arguments = $this.RegistryMetadataArguments($typeCache, $Session, $setting, $TimeoutSeconds)
+                    if ($null -ne $arguments) {
+                        $typeCache[$setting.Path] = Invoke-CimMethod @arguments
                     }
-                    if ($query.ContainsKey('Filter')) {
-                        $splat['Filter'] = $query.Filter
+                    $metadata = $typeCache[$setting.Path]
+                    if ($metadata.ReturnValue -ne 0) {
+                        throw 'Registry value type metadata is unavailable'
                     }
-                    if ($query.ContainsKey('Namespace')) {
-                        $splat['Namespace'] = $query.Namespace
+                    $names = @($metadata.sNames)
+                    $types = @($metadata.Types)
+                    $index = $this.FindRegistryValue($names, $types.Count, $setting.Name)
+                    if ($index -ge 0) {
+                        $type = [int]$types[$index]
                     }
+                    elseif (-not $this.CanUseDeclaredRegistryType($setting)) {
+                        throw 'Registry value type is unavailable'
+                    }
+                    $method = $this.RegistryMethod([int]$type)
+                    if (-not $method) {
+                        throw 'Registry value type is unsupported'
+                    }
+                }
+
+                $arguments = $this.RegistryArguments($Session, $setting, $method, $TimeoutSeconds)
+                $value = Invoke-CimMethod @arguments
+                $record = $this.RegistryObservation($setting, $type, $value.ReturnValue, $value.ReturnValue)
+                if ($value.ReturnValue -eq 0) {
+                    $property = $this.RegistryValueProperty($type)
+                    $record.Value = $value.$property
+                }
+                $registry.Add($record)
+            }
+            catch {
+                $registry.Add($this.RegistryFailure($setting, $type, $_.Exception.Message))
+            }
+        }
+        return $registry.ToArray()
+    }
+}
+
+function Get-ADAnalyzerHostData {
+    param(
+        [string[]]$ComputerNames,
+        [pscredential]$Credential = [pscredential]::Empty,
+        $Errors,
+        [ValidateRange(1, 3600)][uint32]$TimeoutSeconds = 30,
+        [hashtable]$Profile
+
+    )
+    $configuration = Import-ADAnalyzerProfile -Profile $Profile
+    $collector = [ADAnalyzerHostCollector]::new()
+    $plan = $collector.CreatePlan($configuration)
+
+    # Keep the native command sites and foreach scope for streaming and diagnostics.
+    foreach ($computer in $collector.SelectComputers($ComputerNames)) {
+        $session = $null
+        $initialErrorCount = $Errors.Count
+        $data = $collector.CreateReport($computer)
+        try {
+            $arguments = $collector.SessionArguments($computer, $Credential, $TimeoutSeconds)
+            $session = New-CimSession @arguments
+            foreach ($query in $plan.Queries) {
+                try {
+                    $splat = $collector.QueryArguments($session, $query, $TimeoutSeconds)
                     $data[$query.Key] = @(Get-CimInstance @splat)
                 }
                 catch {
-                    $Errors.Add([pscustomobject]@{
-                            Collector = ('Host.' + $query.Key)
-                            Target = $computer
-                            Status = 'Unknown'
-                            Message = $_.Exception.Message
-                        }) > $null
+                    $Errors.Add($collector.CollectorFailure(('Host.' + $query.Key), $computer, $_.Exception.Message)) > $null
                 }
             }
-            $registry = [System.Collections.Generic.List[object]]::new()
-            $settings = @(
-                @{
-                    Path = 'SYSTEM\CurrentControlSet\Services\W32Time\Parameters'
-                    Name = 'NtpServer'
-                    Method = 'GetStringValue'
-                    Type = 1
-                },
-                @{
-                    Path = 'SYSTEM\CurrentControlSet\Services\W32Time\Parameters'
-                    Name = 'Type'
-                    Method = 'GetStringValue'
-                    Type = 1
-                },
-                @{
-                    Path = 'SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters'
-                    Name = 'SMB1'
-                    Method = 'GetDWORDValue'
-                    Type = 4
-                }
-            )
-            foreach ($version in @('TLS 1.0', 'TLS 1.1', 'TLS 1.2', 'TLS 1.3')) {
-                foreach ($side in @('Client', 'Server')) {
-                    $settings += @{
-                        Path = ('SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\' + $version + '\' + $side)
-                        Name = 'Enabled'
-                        Method = 'GetDWORDValue'
-                        Type = 4
-                    }
-                }
-            }
-            foreach ($rule in @($configuration.Host.RegistryRules)) {
-                $settings += @{
-                    Path = $rule.Key
-                    Name = $rule.ValueName
-                    Type = $rule.Type
-                    Method = $null
-                }
-            }
-            $seenSettings = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
+            $registry = [Collections.Generic.List[object]]::new()
             $typeCache = @{}
-            $getters = @{
-                1 = 'GetStringValue'
-                2 = 'GetExpandedStringValue'
-                3 = 'GetBinaryValue'
-                4 = 'GetDWORDValue'
-                7 = 'GetMultiStringValue'
-                11 = 'GetQWORDValue'
-            }
-            foreach ($setting in $settings) {
-                if (-not $seenSettings.Add($setting.Path + [char]0 + $setting.Name)) {
-                    continue
-                }
+            foreach ($setting in $plan.RegistrySettings) {
                 $type = $setting.Type
                 $method = $setting.Method
                 try {
                     if (-not $method) {
-                        if (-not $typeCache.ContainsKey($setting.Path)) {
-                            $typeCache[$setting.Path] = Invoke-CimMethod `
-                                -CimSession $session `
-                                -Namespace root/default `
-                                -ClassName StdRegProv `
-                                -MethodName EnumValues `
-                                -Arguments @{
-                                hDefKey = [uint32]2147483650
-                                sSubKeyName = $setting.Path
-                            } `
-                                -OperationTimeoutSec $TimeoutSeconds `
-                                -ErrorAction Stop
+                        $splat = $collector.RegistryMetadataArguments($typeCache, $session, $setting, $TimeoutSeconds)
+                        if ($null -ne $splat) {
+                            $typeCache[$setting.Path] = Invoke-CimMethod @splat
                         }
                         $metadata = $typeCache[$setting.Path]
                         if ($metadata.ReturnValue -ne 0) {
@@ -932,85 +1197,36 @@ function Get-ADAnalyzerHostData {
                         }
                         $names = @($metadata.sNames)
                         $types = @($metadata.Types)
-                        $found = $false
-                        for ($index = 0; $index -lt $names.Count; $index++) {
-                            if ($names[$index] -ieq $setting.Name -and $index -lt $types.Count) {
-                                $type = [int]$types[$index]
-                                $found = $true
-                                break
-                            }
+                        $index = $collector.FindRegistryValue($names, $types.Count, $setting.Name)
+                        if ($index -ge 0) {
+                            $type = [int]$types[$index]
                         }
-                        # StdRegProv can omit its arrays when only the default
-                        # value exists. A declared type can select its getter.
-                        if (-not $found -and -not ($setting.Name -eq '' -and $null -ne $setting.Type)) {
+                        elseif (-not $collector.CanUseDeclaredRegistryType($setting)) {
                             throw 'Registry value type is unavailable'
                         }
-                        if (-not $getters.ContainsKey([int]$type)) {
+                        $method = $collector.RegistryMethod([int]$type)
+                        if (-not $method) {
                             throw 'Registry value type is unsupported'
                         }
-                        $method = $getters[[int]$type]
                     }
-                    $value = Invoke-CimMethod `
-                        -CimSession $session `
-                        -Namespace root/default `
-                        -ClassName StdRegProv `
-                        -MethodName $method `
-                        -Arguments @{
-                        hDefKey = [uint32]2147483650
-                        sSubKeyName = $setting.Path
-                        sValueName = $setting.Name
-                    } `
-                        -OperationTimeoutSec $TimeoutSeconds `
-                        -ErrorAction Stop
-                    $record = [pscustomobject]@{
-                        Path = $setting.Path
-                        Name = $setting.Name
-                        Type = $type
-                        Status = if ($value.ReturnValue -eq 0) {
-                            'Observed'
-                        }
-                        else {
-                            'Unknown'
-                        }
-                        Value = $null
-                        ReturnValue = $value.ReturnValue
-                    }
+
+                    $splat = $collector.RegistryArguments($session, $setting, $method, $TimeoutSeconds)
+                    $value = Invoke-CimMethod @splat
+                    $record = $collector.RegistryObservation($setting, $type, $value.ReturnValue, $value.ReturnValue)
                     if ($value.ReturnValue -eq 0) {
-                        if ($type -in 1, 2, 7) {
-                            $record.Value = $value.sValue
-                        }
-                        else {
-                            $record.Value = $value.uValue
-                        }
+                        $property = $collector.RegistryValueProperty($type)
+                        $record.Value = $value.$property
                     }
                     $registry.Add($record)
                 }
                 catch {
-                    $registry.Add([pscustomobject]@{
-                            Path = $setting.Path
-                            Name = $setting.Name
-                            Type = $type
-                            Status = 'Unknown'
-                            Value = $null
-                            Message = $_.Exception.Message
-                        })
+                    $registry.Add($collector.RegistryFailure($setting, $type, $_.Exception.Message))
                 }
             }
-            $data['Registry'] = $registry.ToArray()
-            $data['Status'] = if ($Errors.Count -gt $initialErrorCount) {
-                'Partial'
-            }
-            else {
-                'Observed'
-            }
+            $collector.CompleteReport($data, $registry.ToArray(), ($Errors.Count -gt $initialErrorCount))
         }
         catch {
-            $Errors.Add([pscustomobject]@{
-                    Collector = 'Host'
-                    Target = $computer
-                    Status = 'Unknown'
-                    Message = $_.Exception.Message
-                }) > $null
+            $Errors.Add($collector.CollectorFailure('Host', $computer, $_.Exception.Message)) > $null
         }
         finally {
             if ($null -ne $session) {
