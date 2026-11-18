@@ -872,7 +872,7 @@ function Get-EvidenceCommandMetadata([string]$Name) {
     [pscustomobject][ordered]@{
         Name = $Name
         Parameters = if ($body.ParamBlock) {
-            $body.ParamBlock.Extent.Text
+            $body.ParamBlock.Extent.Text.Replace(([string][char]13 + [char]10), [string][char]10)
         }
         else {
             ''
@@ -1558,6 +1558,168 @@ try {
                 [object]::ReferenceEquals($borrowed,
                     $child)) 'Direct deep projection and borrowed lookup contracts differ.'
             $script:EvidenceExecuted++
+            # Nullable object methods must return an actual value on 5.1.
+            # The command still preserves native no-output and array cardinality.
+            $empty = [object[]]@()
+            $one = [object[]]@('one')
+            $many = [object[]]@(1, 2)
+            $nested = [object[]]::new(1)
+            $nested[0] = $many
+            $noOutput = [pscustomobject]@{}
+            $noOutput | Add-Member ScriptProperty Item {}
+            $returnCases = @(
+                @{
+                    Name = 'NullObject'
+                    Value = $null
+                    Arguments = @{
+                        Names = @('Item')
+                    }
+                    Expected = $null
+                },
+                @{
+                    Name = 'Missing'
+                    Value = [ordered]@{
+                        Other = 1
+                    }
+                    Arguments = @{
+                        Names = @('Item')
+                    }
+                    Expected = $null
+                },
+                @{
+                    Name = 'PresentNull'
+                    Value = [ordered]@{
+                        Item = $null
+                    }
+                    Arguments = @{
+                        Names = @('Item')
+                        Default = $one
+                    }
+                    Expected = $null
+                },
+                @{
+                    Name = 'NoOutputGetter'
+                    Value = $noOutput
+                    Arguments = @{
+                        Names = @('Item')
+                        Default = $one
+                    }
+                    Expected = $null
+                },
+                @{
+                    Name = 'EmptyArray'
+                    Value = [ordered]@{
+                        Item = $empty
+                    }
+                    Arguments = @{
+                        Names = @('Item')
+                    }
+                    Expected = $empty
+                },
+                @{
+                    Name = 'EmptyDefault'
+                    Value = [ordered]@{}
+                    Arguments = @{
+                        Names = @('Item')
+                        Default = $empty
+                    }
+                    Expected = $empty
+                },
+                @{
+                    Name = 'Singleton'
+                    Value = [ordered]@{
+                        Item = $one
+                    }
+                    Arguments = @{
+                        Names = @('Item')
+                    }
+                    Expected = $one
+                },
+                @{
+                    Name = 'Many'
+                    Value = [ordered]@{
+                        Item = $many
+                    }
+                    Arguments = @{
+                        Names = @('Item')
+                    }
+                    Expected = $many
+                },
+                @{
+                    Name = 'Nested'
+                    Value = [ordered]@{
+                        Item = $nested
+                    }
+                    Arguments = @{
+                        Names = @('Item')
+                    }
+                    Expected = $nested
+                }
+            )
+            foreach ($item in $returnCases) {
+                $scenario = New-EvidenceScenario $item.Name Lookup Lookup $item.Value $item.Arguments
+                $expected = & {
+                    param(
+                        $Text,
+                        $Scenario
+
+                    )
+                    . ([scriptblock]::Create($Text))
+                    Get-EvidenceCapture $Scenario
+                } (Get-EvidenceOracleSource) $scenario
+                $actual = Get-EvidenceCapture $scenario
+                Assert-Evidence (
+                    (ConvertTo-EvidenceJson (Get-EvidenceComparable $actual)) -ceq
+                    (ConvertTo-EvidenceJson (Get-EvidenceComparable $expected))
+                ) ('Nullable lookup command contract changed: ' + $item.Name)
+                $fallback = $item.Arguments.Default
+                $value = $service.GetValue($item.Value, $item.Arguments.Names, $fallback)
+                Assert-Evidence (
+                    (ConvertTo-EvidenceJson (Get-EvidenceSnapshot $value)) -ceq
+                    (ConvertTo-EvidenceJson (Get-EvidenceSnapshot $item.Expected))
+                ) ('Nullable direct lookup changed: ' + $item.Name)
+                if ($item.Expected -is [array]) {
+                    Assert-Evidence ([object]::ReferenceEquals($item.Expected, $value)) 'Raw lookup copied a borrowed array.'
+                }
+                if (-not $item.Arguments.ContainsKey('Default')) {
+                    $implicit = $service.GetValue($item.Value, $item.Arguments.Names)
+                    Assert-Evidence (
+                        (ConvertTo-EvidenceJson (Get-EvidenceSnapshot $implicit)) -ceq
+                        (ConvertTo-EvidenceJson (Get-EvidenceSnapshot $item.Expected))
+                    ) 'Default lookup overload changed a nullable result.'
+                }
+                $script:EvidenceExecuted++
+            }
+            foreach ($sample in @(
+                    @{
+                        Value = $null
+                    },
+                    @{
+                        Value = $empty
+                    },
+                    @{
+                        Value = $one
+                    },
+                    @{
+                        Value = $many
+                    },
+                    @{
+                        Value = $nested
+                    }
+                )) {
+                $actual = $service.Project($sample.Value)
+                $explicit = $service.Project($sample.Value, 0)
+                $expected = ConvertTo-EvidenceJson (Get-EvidenceSnapshot $sample.Value)
+                Assert-Evidence (
+                    (ConvertTo-EvidenceJson (Get-EvidenceSnapshot $actual)) -ceq $expected -and
+                    (ConvertTo-EvidenceJson (Get-EvidenceSnapshot $explicit)) -ceq $expected
+                ) 'Projection changed null/empty/singleton/multiple/nested array shape.'
+                if ($null -eq $sample.Value) {
+                    Assert-Evidence ($null -eq $service.ProjectPowerShellObject($null) -and
+                        $null -eq $service.ProjectPowerShellObject($null, 0)) 'The wrapper-preserving overload lost null.'
+                }
+                $script:EvidenceExecuted++
+            }
         }
         Errors {
             foreach ($preference in @('Continue', 'Stop')) {
@@ -1906,7 +2068,7 @@ $module = Get-Module ADEnvironment
     $expectedCounts = @{
         Characterization = 122
         Metadata = 2
-        References = 2
+        References = 16
         Errors = 32
         Capabilities = 4
         Construction = 4

@@ -30,6 +30,8 @@ function Invoke-DirectoryTest([string]$Name, [scriptblock]$Body) {
     catch {
         $script:Failed++
         Write-Host "FAIL $Name : $_"
+        Write-Host $_.ScriptStackTrace
+        Write-Host $_.Exception.StackTrace
     }
 }
 $script:Credential = [pscredential]::new('fixture-user', (ConvertTo-SecureString 'fixture-only' -AsPlainText -Force))

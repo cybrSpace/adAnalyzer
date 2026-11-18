@@ -1617,7 +1617,7 @@ try {
     $evidenceProjectorCases = [ordered]@{
         Characterization = 122
         Metadata = 2
-        References = 2
+        References = 16
         Errors = 32
         Capabilities = 4
         Construction = 4

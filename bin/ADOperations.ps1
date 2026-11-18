@@ -8,25 +8,41 @@ class ADAnalyzerEvidenceProjector {
     }
 
     [object] Project([object]$Value) {
-        return $this.Project($Value, 0)
+        $result = $this.Project($Value, 0)
+        if ($null -eq $result) {
+            return $null
+        }
+        return $result
     }
 
     [object] Project([object]$Value, [int]$Depth) {
-        return $this.ProjectBoundFrame(@{
+        $result = $this.ProjectBoundFrame(@{
                 Value = $Value
                 Depth = $Depth
             })
+        if ($null -eq $result) {
+            return $null
+        }
+        return $result
     }
 
     [object] ProjectPowerShellObject([psobject]$Value) {
-        return $this.ProjectPowerShellObject($Value, 0)
+        $result = $this.ProjectPowerShellObject($Value, 0)
+        if ($null -eq $result) {
+            return $null
+        }
+        return $result
     }
 
     [object] ProjectPowerShellObject([psobject]$Value, [int]$Depth) {
-        return $this.ProjectBoundFrame(@{
+        $result = $this.ProjectBoundFrame(@{
                 Value = $Value
                 Depth = $Depth
             })
+        if ($null -eq $result) {
+            return $null
+        }
+        return $result
     }
 
     hidden [object] ProjectBoundFrame([hashtable]$Frame) {
@@ -68,7 +84,11 @@ class ADAnalyzerEvidenceProjector {
                     }
                 }
             }
-            return $state.Result
+            $result = $state.Result
+            if ($null -eq $result) {
+                return $null
+            }
+            return $result
         }
         catch {
             throw
@@ -425,46 +445,74 @@ class ADAnalyzerEvidenceProjector {
                 }
             }
         }
+        if ($State.Done) {
+            return $null
+        }
         return $State.Pending
     }
 
     [object] GetValue([object]$Object, [string[]]$Names) {
-        return $this.GetValue($Object, $Names, $null)
+        $result = $this.GetValue($Object, $Names, $null)
+        if ($null -eq $result) {
+            return $null
+        }
+        return $result
     }
 
     [object] GetValue([object]$Object, [string[]]$Names, [object]$Default) {
-        return $this.GetValueFrame(@{
+        $result = $this.GetValueFrame(@{
                 Object = $Object
                 Names = $Names
                 Default = $Default
             })
+        if ($null -eq $result) {
+            return $null
+        }
+        return $result
     }
 
-    hidden [object] GetValueForCommand([hashtable]$Frame) {
-        return $this.GetValueFrame($Frame)
+    hidden [hashtable] GetValueForCommand([hashtable]$Frame) {
+        return $this.ReadValueFrame($Frame)
     }
 
     hidden [object] GetValueFrame([hashtable]$Frame) {
+        $result = $this.ReadValueFrame($Frame)
+        $value = $result.Value
+        if ($null -eq $value) {
+            return $null
+        }
+        return $value
+    }
+
+    hidden [hashtable] ReadValueFrame([hashtable]$Frame) {
         $Object = $Frame.Object
         [string[]]$Names = $Frame.Names
         $Default = $Frame.Default
         if ($null -eq $Object) {
-            return $Default
+            return @{
+                Value = $Default
+            }
         }
         foreach ($name in $Names) {
             if ($Object -is [Collections.IDictionary]) {
                 if (([Collections.IDictionary]$Object).Contains($name)) {
-                    return $Object[$name]
+                    return @{
+                        Value = $Object[$name]
+                    }
                 }
             }
             else {
                 $property = $Object.PSObject.Properties[$name]
                 if ($null -ne $property) {
-                    return $property.Value
+                    return @{
+                        Value = $property.Value
+                    }
                 }
             }
         }
-        return $Default
+        return @{
+            Value = $Default
+        }
     }
 }
 
@@ -480,11 +528,12 @@ function Get-ADAnalyzerOperationValue {
         [AllowNull()]$Default = $null
 
     )
-    return [ADAnalyzerEvidenceProjector]::new().GetValueForCommand(@{
+    $result = [ADAnalyzerEvidenceProjector]::new().GetValueForCommand(@{
             Object = $Object
             Names = $Names
             Default = $Default
         })
+    return $result.Value
 }
 
 function Get-ADAnalyzerOperationSecretNames {
