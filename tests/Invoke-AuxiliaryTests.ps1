@@ -976,6 +976,38 @@ function Test-Record([Xml.XmlElement]$Record, [string]$Label, [string]$Value) {
     )
 }
 
+function New-OfflinePolicy {
+    return [pscustomobject]@{
+        Path = 'fixture'
+        SysvolVersion = 1
+        SecuritySettings = @()
+        RegistrySettings = @()
+        IniSettings = @()
+        XmlFiles = @()
+        Files = @()
+        UnparsedFiles = @()
+    }
+}
+
+function New-OfflineReport([object]$Policy, [string]$InputShape) {
+    $report = [pscustomobject]@{
+        Gpo = [pscustomobject]@{
+            Id = [guid]'11111111-1111-1111-1111-111111111111'
+            DisplayName = 'Fixture'
+            Domain = 'example.invalid'
+            Server = 'dc.example.invalid'
+            Flags = 0
+            Version = 1
+            Links = @()
+        }
+        Policy = $Policy
+    }
+    if ($InputShape -eq 'Json') {
+        return (ConvertTo-Json -InputObject $report -Depth 16 -Compress | ConvertFrom-Json)
+    }
+    return $report
+}
+
 function Test-OfflineRow(
     [string]$Kind,
     [string]$Missing,
@@ -1012,16 +1044,7 @@ function Test-OfflineRow(
         $tail
     )
 
-    $policy = [pscustomobject]@{
-        Path = 'fixture'
-        SysvolVersion = 1
-        SecuritySettings = @()
-        RegistrySettings = @()
-        IniSettings = @()
-        XmlFiles = @()
-        Files = @()
-        UnparsedFiles = @()
-    }
+    $policy = New-OfflinePolicy
     if ($Kind -eq 'Registry') {
         $policy.RegistrySettings = $rows
         $prefix = 'HKLM\Software\Fixture\'
@@ -1030,21 +1053,7 @@ function Test-OfflineRow(
         $policy.IniSettings = $rows
         $prefix = 'Machine/fixture.ini: [Fixture] '
     }
-    $report = [pscustomobject]@{
-        Gpo = [pscustomobject]@{
-            Id = [guid]'11111111-1111-1111-1111-111111111111'
-            DisplayName = 'Fixture'
-            Domain = 'example.invalid'
-            Server = 'dc.example.invalid'
-            Flags = 0
-            Version = 1
-            Links = @()
-        }
-        Policy = $policy
-    }
-    if ($InputShape -eq 'Json') {
-        $report = ConvertTo-Json -InputObject $report -Depth 16 -Compress | ConvertFrom-Json
-    }
+    $report = New-OfflineReport $policy $InputShape
     $before = ConvertTo-Json -InputObject $report -Depth 16 -Compress
 
     # There must be no enclosing try around the native Continue call.
@@ -1096,6 +1105,106 @@ function Test-OfflineRow(
     }
 }
 
+function Test-OfflineSecurityRow([string]$Position, [string]$InputShape, [string]$EntryPoint) {
+    $prior = [pscustomobject]@{
+        Scope = 'Computer'
+        Kind = 'Account'
+        Name = 'Prior'
+        Value = 'prior-setting'
+    }
+    $malformed = [pscustomobject]@{
+        Scope = 'Computer'
+        Name = 'Malformed'
+        Value = 'malformed-setting'
+        ValueValid = $false
+    }
+    $tail = [pscustomobject]@{
+        Scope = 'Computer'
+        Kind = 'Account'
+        Name = 'Tail'
+        Value = 'tail-setting'
+        ValueValid = $true
+    }
+    $presence = [pscustomobject]@{
+        Scope = 'Computer'
+        Kind = 'Account'
+        Name = 'Fixture\DefaultPassword'
+        Source = 'Machine/fixture.inf'
+        SecretPresent = $true
+    }
+    $policy = New-OfflinePolicy
+    $policy.SecuritySettings = @(
+        if ($Position -eq 'Middle') {
+            $prior
+        }
+        $malformed
+        $tail
+        $presence
+    )
+    $report = New-OfflineReport $policy $InputShape
+    $before = ConvertTo-Json -InputObject $report -Depth 16 -Compress
+
+    $ErrorActionPreference = 'Continue'
+    $stream = @(
+        if ($EntryPoint -eq 'Command') {
+            Get-ADAnalyzerGpoXml -InputObject $report 2>&1
+        }
+        else {
+            & $xmlScript -InputObject $report 2>&1
+        }
+    )
+    $ErrorActionPreference = 'Stop'
+    $scenario = "Security missing Kind $Position $InputShape $EntryPoint"
+    if ((ConvertTo-Json -InputObject $report -Depth 16 -Compress) -cne $before) {
+        throw "$scenario changed its prefetched report."
+    }
+    $reports = @($stream | Where-Object { $_ -is [string] })
+    if ($reports.Count -ne 1) {
+        return "$scenario did not return one XML report."
+    }
+
+    $document = [xml]$reports[0]
+    $extension = $document.SelectSingleNode('/GPO/Computer/ExtensionData[Name="Security"]/Extension')
+    $priorNode = $extension.SelectSingleNode('./Account[Name="Prior"]')
+    if ($null -ne $priorNode -and $null -ne $priorNode.SelectSingleNode('./ValueValid')) {
+        return "$scenario copied invalidity to the prior Account row."
+    }
+    $names = @($extension.SelectNodes('./*/Name') | ForEach-Object { $_.PSBase.InnerText })
+    $expectedNames = @(
+        if ($Position -eq 'Middle') {
+            'Prior'
+        }
+        'Tail'
+        'Fixture\DefaultPassword'
+    )
+    if ($extension.SelectNodes('./*').Count -ne $expectedNames.Count -or
+        ($names -join '|') -cne ($expectedNames -join '|')) {
+        return "$scenario changed the surviving record order or rendered the malformed row."
+    }
+    if ($null -ne $priorNode -and $priorNode.SelectSingleNode('./SettingString').PSBase.InnerText -cne 'prior-setting') {
+        return "$scenario changed the prior Account value."
+    }
+    $tailNode = $extension.SelectSingleNode('./Account[Name="Tail"]')
+    if ($tailNode.SelectSingleNode('./SettingString').PSBase.InnerText -cne 'tail-setting' -or
+        $tailNode.SelectSingleNode('./ValueValid').PSBase.InnerText -cne 'true') {
+        return "$scenario changed the valid tail Account row."
+    }
+    $presenceNode = $extension.SelectSingleNode('./Account[Name="Fixture\DefaultPassword"]')
+    if ($presenceNode.GetAttribute('SecretPresent') -cne 'true' -or
+        $null -ne $presenceNode.SelectSingleNode('./Value|./SettingString') -or
+        $presenceNode.SelectSingleNode('./Source').PSBase.InnerText -cne 'Machine/fixture.inf') {
+        return "$scenario changed the valid presence-only row."
+    }
+
+    if ($stream.Count -ne 2 -or
+        $stream[0] -isnot [Management.Automation.ErrorRecord] -or
+        ($stream[0].FullyQualifiedErrorId -split ',', 2)[0] -cne 'PropertyNotFoundStrict' -or
+        $stream[0].Exception.GetBaseException().Message -notlike "*'Kind'*" -or
+        $stream[1] -isnot [string]) {
+        return "$scenario did not emit just the primary Kind error followed by XML."
+    }
+}
+
 $fields = [ordered]@{
     Registry = @('Value', 'Hive', 'Key', 'ValueName')
     Ini = @('Value', 'Source', 'Section', 'Name')
@@ -1113,8 +1222,16 @@ $mismatches = @(foreach ($kind in $fields.Keys) {
             }
         }
     })
+$mismatches += @(foreach ($position in @('First', 'Middle')) {
+        foreach ($shape in @('Native', 'Json')) {
+            foreach ($entry in @('Command', 'Standalone')) {
+                Test-OfflineSecurityRow $position $shape $entry
+                $count++
+            }
+        }
+    })
 if ($mismatches.Count) {
-    throw ('{0} of {1} offline rows borrowed another row or lost their own fields: {2}' -f
+    throw ('{0} of {1} offline row isolation cases failed: {2}' -f
         $mismatches.Count, $count, ($mismatches -join ', '))
 }
 Write-Output ('PASS offline XML row isolation ' + $count)
@@ -1143,7 +1260,7 @@ Write-Output ('PASS offline XML row isolation ' + $count)
             throw ($output -join [Environment]::NewLine)
         }
         Assert-True (
-            $output.Count -eq 1 -and $output[0] -ceq 'PASS offline XML row isolation 64'
+            $output.Count -eq 1 -and $output[0] -ceq 'PASS offline XML row isolation 72'
         ) 'The isolated process did not execute all offline XML row cases.'
     }
 

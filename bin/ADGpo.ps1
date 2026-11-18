@@ -1051,7 +1051,12 @@ function ConvertTo-AnalyzerGpoXml {
             $null = Add-AnalyzerGpoXmlNode $doc $ext 'Name' 'Security'
             $body = Add-AnalyzerGpoXmlNode $doc $ext 'Extension'
             foreach ($setting in $settings) {
+                # A failed native assignment under Continue can leave an earlier value.
+                $node = $null
                 $node = Add-AnalyzerGpoXmlNode $doc $body $setting.Kind
+                if ($null -eq $node) {
+                    continue
+                }
                 if ($null -ne $setting.PSObject.Properties['ValueValid'] -and $null -ne $setting.ValueValid) {
                     $valid = $setting.ValueValid -is [bool] -and $setting.ValueValid
                     $null = Add-AnalyzerGpoXmlNode $doc $node 'ValueValid' ([string]$valid).ToLowerInvariant()

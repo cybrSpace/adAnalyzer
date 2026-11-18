@@ -1337,6 +1337,153 @@ ConvertTo-Json -InputObject ([ordered]@{
         }
     }
 
+    $securityWriterProbe = Join-Path $temp 'raw-security-node-isolation.ps1'
+    Write-Text $securityWriterProbe @'
+param([string]$RepositoryRoot)
+
+$ErrorActionPreference = 'Stop'
+. (Join-Path $RepositoryRoot 'bin/ADGpo.ps1')
+Set-StrictMode -Version Latest
+
+function Get-SecurityFragment($Report) {
+    ([xml]$Report).SelectSingleNode("/GPO/Computer/ExtensionData[Name='Security']/Extension").OuterXml
+}
+
+function Measure-SecurityWriter([string]$Scenario, [string]$Preference) {
+    $prefix = [pscustomobject]@{
+        Scope = 'Computer'
+        Kind = 'Account'
+        Name = 'Fixture prefix'
+        ValueValid = $true
+        Value = $false
+    }
+    $present = [pscustomobject]@{
+        Scope = 'Computer'
+        Kind = 'SecurityOptions'
+        Name = 'Fixture present'
+        SecretPresent = $true
+        ValueValid = $true
+        Source = 'Machine/fixture.inf'
+    }
+    $absent = $present.PSObject.Copy()
+    $absent.Name = 'Fixture absent'
+    $absent.SecretPresent = $false
+    $absent.ValueValid = $false
+    $malformed = [pscustomobject]@{
+        Scope = 'Computer'
+        Kind = 'Invalid Kind'
+        Name = 'Fixture malformed'
+        Value = [long]18
+        ValueValid = $false
+    }
+    if ($Scenario -ne 'InvalidKind') {
+        $malformed.PSObject.Properties.Remove('Kind')
+    }
+    $policy = [pscustomobject]@{
+        SysvolVersion = 1
+        Files = @()
+        SecuritySettings = @($prefix, $present, $absent)
+        RegistrySettings = @()
+        IniSettings = @()
+        XmlFiles = @()
+    }
+    $gpo = [pscustomobject]@{
+        Version = 1
+        Flags = 0
+        Links = @()
+    }
+    $expected = Get-SecurityFragment (ConvertTo-AnalyzerGpoXml -Gpo $gpo -Parsed $policy)
+    if ($Scenario -eq 'MissingFirst') {
+        $policy.SecuritySettings = @($malformed, $prefix, $present, $absent)
+    }
+    else {
+        $policy.SecuritySettings = @($prefix, $malformed, $present, $absent)
+    }
+    $before = ConvertTo-Json -InputObject $policy -Depth 12 -Compress
+    $caught = $null
+    $ErrorActionPreference = $Preference
+    if ($Preference -eq 'Continue') {
+        $stream = @(ConvertTo-AnalyzerGpoXml -Gpo $gpo -Parsed $policy 2>&1)
+    }
+    else {
+        $stream = @()
+        try {
+            $stream = @(ConvertTo-AnalyzerGpoXml -Gpo $gpo -Parsed $policy 2>&1)
+        }
+        catch {
+            $caught = $_
+        }
+    }
+    $ErrorActionPreference = 'Stop'
+    $reports = @($stream | Where-Object { $_ -is [string] })
+    $errors = @($stream | Where-Object { $_ -is [Management.Automation.ErrorRecord] })
+    if ($null -ne $caught) {
+        $errors = @($caught)
+    }
+    $primary = $errors.Count -gt 0
+    $isolatedErrors = $errors.Count -eq 1
+    if ($primary) {
+        if ($Scenario -eq 'InvalidKind') {
+            $primary = $errors[0].Exception.GetBaseException() -is [Xml.XmlException]
+            # The element helper itself can report another failure before the writer sees no node.
+            if ($Preference -eq 'Continue') {
+                $control = [xml]'<Fixture />'
+                $ErrorActionPreference = 'Continue'
+                $native = @(Add-AnalyzerGpoXmlNode $control $control.DocumentElement 'Invalid Kind' 2>&1)
+                $ErrorActionPreference = 'Stop'
+                $helperErrors = @($native | Where-Object { $_ -is [Management.Automation.ErrorRecord] })
+                $isolatedErrors = (($errors.FullyQualifiedErrorId -join ',') -ceq ($helperErrors.FullyQualifiedErrorId -join ','))
+            }
+        }
+        else {
+            $primary = $errors[0].FullyQualifiedErrorId -like 'PropertyNotFoundStrict*' -and
+                $errors[0].Exception.GetBaseException().Message -match "'Kind'"
+        }
+    }
+    if ($Preference -eq 'Continue') {
+        $primary = $primary -and $stream[0] -is [Management.Automation.ErrorRecord] -and
+            $stream[-1] -is [string] -and $stream.Count -eq ($reports.Count + $errors.Count)
+    }
+    $neighborsMatch = $reports.Count -eq 1 -and (Get-SecurityFragment $reports[0]) -ceq $expected
+    [pscustomobject]@{
+        Scenario = "$Scenario/$Preference"
+        Continue = $Preference -eq 'Continue'
+        Primary = $primary
+        IsolatedErrors = $isolatedErrors
+        NeighborsMatch = $neighborsMatch
+        Reports = $reports.Count
+        Unchanged = $before -ceq (ConvertTo-Json -InputObject $policy -Depth 12 -Compress)
+    }
+}
+
+$observations = @(foreach ($scenario in @('MissingFirst', 'MissingMiddle', 'InvalidKind')) {
+        Measure-SecurityWriter $scenario Continue
+        Measure-SecurityWriter $scenario Stop
+    })
+ConvertTo-Json -InputObject ([ordered]@{
+        Observations = $observations
+    }) -Depth 6 -Compress
+'@
+    $securityWriterOutput = @(& $engine -NoLogo -NoProfile -NonInteractive -File $securityWriterProbe -RepositoryRoot $RepositoryRoot 2>&1)
+    if ($LASTEXITCODE -ne 0 -or $securityWriterOutput.Count -ne 1) {
+        throw 'The isolated security writer fixture did not return its observations.'
+    }
+    $securityWriterReport = ConvertFrom-Json -InputObject ([string]$securityWriterOutput[0])
+    $securityWriterCases = $securityWriterReport.Observations
+    Assert-Equal 6 $securityWriterCases.Count
+    foreach ($observation in $securityWriterCases) {
+        Test-Gpo ('strict raw security writer isolates ' + $observation.Scenario) {
+            Assert-True ($observation.Primary -and $observation.Unchanged) 'The security writer changed the primary error or data source.'
+            if ($observation.Continue) {
+                Assert-True ($observation.Reports -eq 1 -and $observation.NeighborsMatch) 'A malformed security setting altered neighboring XML.'
+            }
+            else {
+                Assert-Equal 0 $observation.Reports
+            }
+            Assert-True $observation.IsolatedErrors 'The writer attempted more property writes after failing to create the security node.'
+        }
+    }
+
     Test-Gpo 'named registry preference secrets are absent from reader and canonical XML values' {
         $namedRoot = Join-Path $temp 'named-xml-secret'
         $path = Join-Path $namedRoot 'Machine/Preferences/Registry/Registry.xml'
