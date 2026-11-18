@@ -226,53 +226,67 @@ try {
             }
         }
     }
-    $sourceNormalizerCases = [ordered]@{
+    $constructorFixtures = @(
+        [pscustomobject]@{
+            Name = 'GPO source normalizer'
+            Script = 'GpoSourceNormalizerClassFixture.ps1'
+        }
+        [pscustomobject]@{
+            Name = 'GPO XML writer'
+            Script = 'GpoXmlWriterClassFixture.ps1'
+        }
+    )
+    $constructorCases = [ordered]@{
         Contracts = 10
         Direct = 10
     }
-    foreach ($case in $sourceNormalizerCases.Keys) {
-        Test-Gpo ('GPO source normalizer API: ' + $case) {
-            $executable = (Get-Process -Id $PID).Path
-            $arguments = @(
-                '-NoLogo'
-                '-NoProfile'
-                '-NonInteractive'
-                '-File'
-                (Join-Path $PSScriptRoot 'GpoSourceNormalizerClassFixture.ps1')
-                '-Case'
-                $case
-                '-RepositoryRoot'
-                $RepositoryRoot
-            )
+    foreach ($fixture in $constructorFixtures) {
+        foreach ($case in $constructorCases.Keys) {
+            Test-Gpo ('{0} API: {1}' -f $fixture.Name, $case) {
+                $executable = (Get-Process -Id $PID).Path
+                $arguments = @(
+                    '-NoLogo'
+                    '-NoProfile'
+                    '-NonInteractive'
+                    '-File'
+                    (Join-Path $PSScriptRoot $fixture.Script)
+                    '-Case'
+                    $case
+                    '-RepositoryRoot'
+                    $RepositoryRoot
+                )
 
-            $fixtureErrorPreference = $ErrorActionPreference
-            try {
-                # Capture native stderr before checking the child exit code on 5.1.
-                $ErrorActionPreference = 'Continue'
-                $output = @(& $executable @arguments 2>&1)
-                $fixtureExitCode = $LASTEXITCODE
-            }
-            finally {
-                $ErrorActionPreference = $fixtureErrorPreference
-            }
+                $fixtureErrorPreference = $ErrorActionPreference
+                try {
+                    # Capture native stderr before checking the child exit code on 5.1.
+                    $ErrorActionPreference = 'Continue'
+                    $output = @(& $executable @arguments 2>&1)
+                    $fixtureExitCode = $LASTEXITCODE
+                }
+                finally {
+                    $ErrorActionPreference = $fixtureErrorPreference
+                }
 
-            if ($fixtureExitCode -ne 0) {
-                throw ("GPO source normalizer fixture exited with code {0}.{1}{2}" -f
-                    $fixtureExitCode, [Environment]::NewLine, ($output -join [Environment]::NewLine))
-            }
+                if ($fixtureExitCode -ne 0) {
+                    throw ("{0} fixture exited with code {1}.{2}{3}" -f
+                        $fixture.Name, $fixtureExitCode, [Environment]::NewLine, ($output -join [Environment]::NewLine))
+                }
 
-            $sentinels = @($output | Where-Object {
-                    $_ -is [string] -and $_ -clike 'PASS GPO source normalizer*'
-                })
-            Assert-Equal 1 $sentinels.Count
-            $summary = [regex]::Match($sentinels[0], ('\APASS GPO source normalizer {0} ([1-9][0-9]*)\z' -f $case))
-            $executed = 0
-            Assert-True (
-                $summary.Success -and
-                [int]::TryParse($summary.Groups[1].Value, [ref]$executed) -and
-                $executed -ge $sourceNormalizerCases[$case]
-            ) ("Fresh process did not report at least {0} GPO source normalizer {1} cases." -f
-                $sourceNormalizerCases[$case], $case)
+                $prefix = 'PASS ' + $fixture.Name
+                $sentinels = @($output | Where-Object {
+                        $_ -is [string] -and $_.StartsWith($prefix, [StringComparison]::Ordinal)
+                    })
+                Assert-Equal 1 $sentinels.Count
+                $summaryPattern = '\A{0} {1} ([1-9][0-9]*)\z' -f [regex]::Escape($prefix), $case
+                $summary = [regex]::Match($sentinels[0], $summaryPattern)
+                $executed = 0
+                Assert-True (
+                    $summary.Success -and
+                    [int]::TryParse($summary.Groups[1].Value, [ref]$executed) -and
+                    $executed -ge $constructorCases[$case]
+                ) ("Fresh process did not report at least {0} {1} {2} cases." -f
+                    $constructorCases[$case], $fixture.Name, $case)
+            }
         }
     }
 

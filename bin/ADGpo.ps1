@@ -982,6 +982,337 @@ function Get-ADAnalyzerGpo {
     }
 }
 
+class ADAnalyzerGpoXmlWriter {
+    ADAnalyzerGpoXmlWriter() {
+    }
+
+    [string] Render([object]$Gpo, [object]$Policy) {
+        return $this.Render($Gpo, $Policy, @{}, @{})
+    }
+
+    [string] Render([object]$Gpo, [object]$Policy, [hashtable]$SidNames, [hashtable]$SidStatus) {
+        $writer = $this
+        $Parsed = $Policy
+        $appendSourceNode = {
+            param([xml]$Document, [Xml.XmlNode]$Parent, [string]$Name, $Value)
+
+            $node = [ADAnalyzerGpoXmlWriter]::PrepareNode($Document, $Name)
+            if ($null -ne $Value) {
+                [ADAnalyzerGpoXmlWriter]::SetText($node, [string]$Value)
+            }
+            [ADAnalyzerGpoXmlWriter]::AttachNode($Parent, $node)
+            return $node
+        }
+        $observeSource = $this.SourceObservationSteps()
+        return & $observeSource
+    }
+
+    hidden [hashtable] NewSidNames() {
+        return @{
+            'S-1-5-32-544' = 'Administrators'
+            'S-1-5-32-545' = 'Users'
+            'S-1-5-32-546' = 'Guests'
+            'S-1-5-32-551' = 'Backup Operators'
+            'S-1-1-0' = 'Everyone'
+            'S-1-5-11' = 'Authenticated Users'
+            'S-1-5-18' = 'SYSTEM'
+            'S-1-5-19' = 'LOCAL SERVICE'
+            'S-1-5-20' = 'NETWORK SERVICE'
+        }
+    }
+
+    hidden [xml] StartDocument() {
+        $document = [xml]::new()
+        $document.XmlResolver = $null
+        $root = $document.CreateElement('GPO')
+        $null = $document.AppendChild($root)
+        $null = $this.Append($root, 'ReadTime', [datetime]::UtcNow.ToString('o'))
+        return $document
+    }
+
+    hidden static [Xml.XmlElement] PrepareNode([xml]$Document, [string]$Name) {
+        return $Document.CreateElement($Name)
+    }
+
+    hidden static [void] SetText([Xml.XmlNode]$Node, [string]$Text) {
+        $Node.PSBase.InnerText = $Text
+    }
+
+    hidden static [void] AttachNode([Xml.XmlNode]$Parent, [Xml.XmlNode]$Node) {
+        $null = $Parent.AppendChild($Node)
+    }
+
+    hidden [Xml.XmlElement] Append([Xml.XmlNode]$Parent, [string]$Name, [object]$Value) {
+        $node = [ADAnalyzerGpoXmlWriter]::PrepareNode($Parent.OwnerDocument, $Name)
+        if ($null -ne $Value) {
+            [ADAnalyzerGpoXmlWriter]::SetText($node, [string]$Value)
+        }
+        [ADAnalyzerGpoXmlWriter]::AttachNode($Parent, $node)
+        return $node
+    }
+
+    hidden [void] AppendBoolean([Xml.XmlNode]$Parent, [string]$Name, [bool]$Value) {
+        $null = $this.Append($Parent, $Name, ([string]$Value).ToLowerInvariant())
+    }
+
+    hidden [bool] VersionsDiffer([hashtable]$Observed, [long]$DirectoryVersion) {
+        return $Observed.SysvolVersion -ne ($DirectoryVersion -band [long]4294967295)
+    }
+
+    hidden [int] ScopeDisabledBit([string]$Scope) {
+        if ($Scope -eq 'Computer') {
+            return 2
+        }
+        return 1
+    }
+
+    hidden [Xml.XmlElement] OpenExtension([Xml.XmlNode]$ScopeNode, [string]$Name) {
+        $section = $this.Append($ScopeNode, 'ExtensionData', $null)
+        $null = $this.Append($section, 'Name', $Name)
+        return $this.Append($section, 'Extension', $null)
+    }
+
+    hidden [string] SecurityValueTag([string]$Kind, [bool]$Boolean, [bool]$Number) {
+        if ($Kind -eq 'SecurityOptions') {
+            if ($Boolean) {
+                return 'DisplayBoolean'
+            }
+            return 'DisplayString'
+        }
+        if ($Boolean) {
+            return 'SettingBoolean'
+        }
+        if ($Number) {
+            return 'SettingNumber'
+        }
+        return 'SettingString'
+    }
+
+    hidden [bool] WriteMemberIdentity([Xml.XmlElement]$Member, [object]$Token) {
+        if ($Token -match '^S-\d-') {
+            $null = $this.Append($Member, 'SID', $Token)
+            return $true
+        }
+        $null = $this.Append($Member, 'Name', $Token)
+        return $false
+    }
+
+    hidden [pscustomobject] ResolveMember([string]$Token, [hashtable]$Names, [hashtable]$Observed) {
+        if ($Names.ContainsKey($Token)) {
+            return [pscustomobject]@{
+                Named = $true
+                Name = $Names[$Token]
+                Status = 'Resolved'
+            }
+        }
+        $status = 'NotAttempted'
+        if ($Observed.HasStatus) {
+            $status = $Observed.Status
+        }
+        return [pscustomobject]@{
+            Named = $false
+            Name = $null
+            Status = $status
+        }
+    }
+
+    hidden [bool] HasValueOrIsOrdinary([hashtable]$InputFrame) {
+        $record = $InputFrame.Record
+        return $null -ne $record.PSObject.Properties['Value'] -or
+            $null -eq $record.PSObject.Properties['SecretPresent']
+    }
+
+    hidden [string] ExtensionValueTag([bool]$HasPresence) {
+        if ($HasPresence) {
+            return 'SecretPresent'
+        }
+        return 'Value'
+    }
+
+    hidden [string] Serialize([xml]$Document) {
+        return $Document.PSBase.OuterXml
+    }
+
+    hidden [scriptblock] SourceObservationSteps() {
+        # Run raw reads and conversions in the caller's PowerShell frame. A
+        # command under Continue can still return its DOM after a bad row.
+        return {
+            $known = $writer.NewSidNames()
+            foreach ($key in ([Collections.IDictionary].GetProperty('Keys')).GetValue($SidNames, $null)) {
+                $known[$key] = $SidNames[$key]
+            }
+            $doc = $writer.StartDocument()
+            $g = $doc.PSBase.DocumentElement
+            $null = & $appendSourceNode $doc $g 'DirectoryVersion' $Gpo.Version
+            $null = & $appendSourceNode $doc $g 'SysvolVersion' $Parsed.SysvolVersion
+            $writer.AppendBoolean($g, 'VersionMismatch', ($null -ne $Parsed.SysvolVersion -and
+                        $null -ne $Gpo.Version -and
+                        $writer.VersionsDiffer(@{ SysvolVersion = $Parsed.SysvolVersion }, [long]$Gpo.Version)))
+
+            foreach ($link in @($Gpo.Links)) {
+                $l = $writer.Append($g, 'LinksTo', $null)
+                $null = & $appendSourceNode $doc $l 'SOMPath' $link.SOMPath
+                $null = & $appendSourceNode $doc $l 'Enabled' ([string]$link.Enabled).ToLowerInvariant()
+                $null = & $appendSourceNode $doc $l 'NoOverride' ([string]$link.Enforced).ToLowerInvariant()
+            }
+
+            foreach ($scope in @('Computer', 'User')) {
+                $side = $writer.Append($g, $scope, $null)
+                $bit = $writer.ScopeDisabledBit($scope)
+                $writer.AppendBoolean($side, 'Enabled', (($Gpo.Flags -band $bit) -eq 0))
+
+                $settings = @($Parsed.SecuritySettings | Where-Object Scope -eq $scope)
+                if ($settings.Count) {
+                    $body = $writer.OpenExtension($side, 'Security')
+                    foreach ($setting in $settings) {
+                        # A failed native assignment under Continue can leave an earlier value.
+                        $node = $null
+                        $node = & $appendSourceNode $doc $body $setting.Kind
+                        if ($null -eq $node) {
+                            continue
+                        }
+
+                        if ($null -ne $setting.PSObject.Properties['ValueValid'] -and $null -ne $setting.ValueValid) {
+                            $valid = $setting.ValueValid -is [bool] -and $setting.ValueValid
+                            $writer.AppendBoolean($node, 'ValueValid', $valid)
+                        }
+
+                        if ($null -ne $setting.PSObject.Properties['SecretPresent']) {
+                            $null = & $appendSourceNode $doc $node 'Name' $setting.Name
+                            $null = & $appendSourceNode $doc $node 'SecretPresent' ([string]$setting.SecretPresent).ToLowerInvariant()
+                            if ($setting.Source) {
+                                $null = & $appendSourceNode $doc $node 'Source' $setting.Source
+                            }
+                            continue
+                        }
+
+                        if ($setting.Kind -eq 'SecurityOptions') {
+                            $display = $writer.Append($node, 'Display', $null)
+                            $null = & $appendSourceNode $doc $display 'Name' $setting.Name
+                            if ($setting.Value -is [bool]) {
+                                $tag = $writer.SecurityValueTag('SecurityOptions', $true, $false)
+                                $null = & $appendSourceNode $doc $display $tag ([string]$setting.Value).ToLowerInvariant()
+                            }
+                            else {
+                                $tag = $writer.SecurityValueTag('SecurityOptions', $false, $false)
+                                $null = & $appendSourceNode $doc $display $tag $setting.Value
+                            }
+                        }
+                        else {
+                            $null = & $appendSourceNode $doc $node 'Name' $setting.Name
+                            if ($setting.Kind -eq 'Account') {
+                                if ($setting.Value -is [bool]) {
+                                    $tag = $writer.SecurityValueTag('Account', $true, $false)
+                                    $null = & $appendSourceNode $doc $node $tag ([string]$setting.Value).ToLowerInvariant()
+                                }
+                                elseif ($setting.Value -is [long]) {
+                                    $tag = $writer.SecurityValueTag('Account', $false, $true)
+                                    $null = & $appendSourceNode $doc $node $tag $setting.Value
+                                }
+                                else {
+                                    $tag = $writer.SecurityValueTag('Account', $false, $false)
+                                    $null = & $appendSourceNode $doc $node $tag $setting.Value
+                                }
+                            }
+                            else {
+                                foreach ($entry in @($setting.Value)) {
+                                    $member = $writer.Append($node, 'Member', $null)
+                                    $token = ([string]$entry).TrimStart('*')
+                                    if ($writer.WriteMemberIdentity($member, $token)) {
+                                        $observed = @{
+                                            HasStatus = $false
+                                            Status = $null
+                                        }
+                                        if (-not $known.ContainsKey($token) -and $SidStatus.ContainsKey($token)) {
+                                            $observed.HasStatus = $true
+                                            $observed.Status = $SidStatus[$token]
+                                        }
+                                        $resolution = $writer.ResolveMember($token, $known, $observed)
+                                        if ($resolution.Named) {
+                                            $null = & $appendSourceNode $doc $member 'Name' $resolution.Name
+                                        }
+                                        $null = & $appendSourceNode $doc $member 'Resolution' $resolution.Status
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                foreach ($kind in @('Registry', 'Preferences', 'Xml', 'Ini')) {
+                    # Windows PowerShell 5.1 unwraps a singleton PSCustomObject.
+                    $rows = @(
+                        if ($kind -eq 'Registry') {
+                            $Parsed.RegistrySettings | Where-Object Scope -eq $scope
+                        }
+                        elseif ($kind -eq 'Ini') {
+                            $Parsed.IniSettings | Where-Object { $_.Scope -eq $scope -and -not $_.Analyzed }
+                        }
+                        else {
+                            $Parsed.XmlFiles | Where-Object { $_.Scope -eq $scope -and $_.Kind -eq $kind }
+                        }
+                    )
+                    if (-not $rows.Count) {
+                        continue
+                    }
+
+                    $body = $writer.OpenExtension($side, $kind)
+                    foreach ($row in $rows) {
+                        # A failed native read must leave this record's field empty.
+                        $label = $null
+                        $value = $null
+                        $record = $writer.Append($body, 'Record', $null)
+                        if ($kind -eq 'Registry') {
+                            $label = '{0}\{1}\{2}' -f $row.Hive, $row.Key, $row.ValueName
+                            $value = if (-not $writer.HasValueOrIsOrdinary(@{ Record = $row })) {
+                                $null
+                            }
+                            elseif ($row.Value -is [byte[]]) {
+                                [System.Convert]::ToBase64String($row.Value)
+                            }
+                            elseif ($row.Value -is [array]) {
+                                ConvertTo-Json -InputObject $row.Value -Compress
+                            }
+                            else {
+                                [string]$row.Value
+                            }
+                            $null = & $appendSourceNode $doc $record 'Type' $row.Type
+                        }
+                        elseif ($kind -eq 'Ini') {
+                            $label = '{0}: [{1}] {2}' -f $row.Source, $row.Section, $row.Name
+                            $value = if ($writer.HasValueOrIsOrdinary(@{ Record = $row })) {
+                                $row.Value
+                            }
+                        }
+                        else {
+                            $label = $row.Path
+                            $value = $row.Xml
+                        }
+
+                        $null = & $appendSourceNode $doc $record 'Name' $label
+                        $hasPresence = $null -ne $row.PSObject.Properties['SecretPresent']
+                        $tag = $writer.ExtensionValueTag($hasPresence)
+                        if ($hasPresence) {
+                            $null = & $appendSourceNode $doc $record $tag ([string]$row.SecretPresent).ToLowerInvariant()
+                        }
+                        else {
+                            $null = & $appendSourceNode $doc $record $tag $value
+                        }
+                    }
+                }
+            }
+
+            $inventory = $writer.Append($g, 'FileInventory', $null)
+            foreach ($file in $Parsed.Files) {
+                $node = $writer.Append($inventory, 'File', $null)
+                $node.SetAttribute('Kind', $file.Kind)
+                $node.PSBase.InnerText = $file.Path
+            }
+            return $writer.Serialize($doc)
+        }
+    }
+}
+
 function Add-AnalyzerGpoXmlNode {
     param(
         [xml]$Document,
@@ -990,11 +1321,11 @@ function Add-AnalyzerGpoXmlNode {
         $Value
 
     )
-    $node = $Document.CreateElement($Name)
+    $node = [ADAnalyzerGpoXmlWriter]::PrepareNode($Document, $Name)
     if ($null -ne $Value) {
-        $node.PSBase.InnerText = [string]$Value
+        [ADAnalyzerGpoXmlWriter]::SetText($node, [string]$Value)
     }
-    $null = $Parent.AppendChild($node)
+    [ADAnalyzerGpoXmlWriter]::AttachNode($Parent, $node)
     return $node
 }
 
@@ -1006,189 +1337,10 @@ function ConvertTo-AnalyzerGpoXml {
         [hashtable]$SidStatus = @{}
 
     )
-    $known = @{
-        'S-1-5-32-544' = 'Administrators'
-        'S-1-5-32-545' = 'Users'
-        'S-1-5-32-546' = 'Guests'
-        'S-1-5-32-551' = 'Backup Operators'
-        'S-1-1-0' = 'Everyone'
-        'S-1-5-11' = 'Authenticated Users'
-        'S-1-5-18' = 'SYSTEM'
-        'S-1-5-19' = 'LOCAL SERVICE'
-        'S-1-5-20' = 'NETWORK SERVICE'
-    }
-    foreach ($key in ([Collections.IDictionary].GetProperty('Keys')).GetValue($SidNames, $null)) {
-        $known[$key] = $SidNames[$key]
-    }
-    $doc = [xml]::new()
-    $doc.XmlResolver = $null
-    $g = $doc.CreateElement('GPO')
-    $null = $doc.AppendChild($g)
-    $null = Add-AnalyzerGpoXmlNode $doc $g 'ReadTime' ([datetime]::UtcNow.ToString('o'))
-    $null = Add-AnalyzerGpoXmlNode $doc $g 'DirectoryVersion' $Gpo.Version
-    $null = Add-AnalyzerGpoXmlNode $doc $g 'SysvolVersion' $Parsed.SysvolVersion
-    $null = Add-AnalyzerGpoXmlNode $doc $g 'VersionMismatch' ([string]($null -ne $Parsed.SysvolVersion -and
-            $null -ne $Gpo.Version -and
-            $Parsed.SysvolVersion -ne ([long]$Gpo.Version -band [long]4294967295))).ToLowerInvariant()
-    foreach ($link in @($Gpo.Links)) {
-        $l = Add-AnalyzerGpoXmlNode $doc $g 'LinksTo'
-        $null = Add-AnalyzerGpoXmlNode $doc $l 'SOMPath' $link.SOMPath
-        $null = Add-AnalyzerGpoXmlNode $doc $l 'Enabled' ([string]$link.Enabled).ToLowerInvariant()
-        $null = Add-AnalyzerGpoXmlNode $doc $l 'NoOverride' ([string]$link.Enforced).ToLowerInvariant()
-    }
-    foreach ($scope in @('Computer', 'User')) {
-        $side = Add-AnalyzerGpoXmlNode $doc $g $scope
-        $bit = if ($scope -eq 'Computer') {
-            2
-        }
-        else {
-            1
-        }
-        $null = Add-AnalyzerGpoXmlNode $doc $side 'Enabled' ([string](($Gpo.Flags -band $bit) -eq 0)).ToLowerInvariant()
-        $settings = @($Parsed.SecuritySettings | Where-Object Scope -eq $scope)
-        if ($settings.Count) {
-            $ext = Add-AnalyzerGpoXmlNode $doc $side 'ExtensionData'
-            $null = Add-AnalyzerGpoXmlNode $doc $ext 'Name' 'Security'
-            $body = Add-AnalyzerGpoXmlNode $doc $ext 'Extension'
-            foreach ($setting in $settings) {
-                # A failed native assignment under Continue can leave an earlier value.
-                $node = $null
-                $node = Add-AnalyzerGpoXmlNode $doc $body $setting.Kind
-                if ($null -eq $node) {
-                    continue
-                }
-                if ($null -ne $setting.PSObject.Properties['ValueValid'] -and $null -ne $setting.ValueValid) {
-                    $valid = $setting.ValueValid -is [bool] -and $setting.ValueValid
-                    $null = Add-AnalyzerGpoXmlNode $doc $node 'ValueValid' ([string]$valid).ToLowerInvariant()
-                }
-                if ($null -ne $setting.PSObject.Properties['SecretPresent']) {
-                    $null = Add-AnalyzerGpoXmlNode $doc $node 'Name' $setting.Name
-                    $null = Add-AnalyzerGpoXmlNode $doc $node 'SecretPresent' ([string]$setting.SecretPresent).ToLowerInvariant()
-                    if ($setting.Source) {
-                        $null = Add-AnalyzerGpoXmlNode $doc $node 'Source' $setting.Source
-                    }
-                    continue
-                }
-                if ($setting.Kind -eq 'SecurityOptions') {
-                    $display = Add-AnalyzerGpoXmlNode $doc $node 'Display'
-                    $null = Add-AnalyzerGpoXmlNode $doc $display 'Name' $setting.Name
-                    if ($setting.Value -is [bool]) {
-                        $null = Add-AnalyzerGpoXmlNode $doc $display 'DisplayBoolean' ([string]$setting.Value).ToLowerInvariant()
-                    }
-                    else {
-                        $null = Add-AnalyzerGpoXmlNode $doc $display 'DisplayString' $setting.Value
-                    }
-                }
-                else {
-                    $null = Add-AnalyzerGpoXmlNode $doc $node 'Name' $setting.Name
-                    if ($setting.Kind -eq 'Account') {
-                        if ($setting.Value -is [bool]) {
-                            $null = Add-AnalyzerGpoXmlNode $doc $node 'SettingBoolean' ([string]$setting.Value).ToLowerInvariant()
-                        }
-                        elseif ($setting.Value -is [long]) {
-                            $null = Add-AnalyzerGpoXmlNode $doc $node 'SettingNumber' $setting.Value
-                        }
-                        else {
-                            $null = Add-AnalyzerGpoXmlNode $doc $node 'SettingString' $setting.Value
-                        }
-                    }
-                    else {
-                        foreach ($entry in @($setting.Value)) {
-                            $member = Add-AnalyzerGpoXmlNode $doc $node 'Member'
-                            $token = ([string]$entry).TrimStart('*')
-                            if ($token -match '^S-\d-') {
-                                $null = Add-AnalyzerGpoXmlNode $doc $member 'SID' $token
-                                $status = 'NotAttempted'
-                                if ($known.ContainsKey($token)) {
-                                    $null = Add-AnalyzerGpoXmlNode $doc $member 'Name' $known[$token]
-                                    $status = 'Resolved'
-                                }
-                                elseif ($SidStatus.ContainsKey($token)) {
-                                    $status = $SidStatus[$token]
-                                }
-                                $null = Add-AnalyzerGpoXmlNode $doc $member 'Resolution' $status
-                            }
-                            else {
-                                $null = Add-AnalyzerGpoXmlNode $doc $member 'Name' $token
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        foreach ($kind in @('Registry', 'Preferences', 'Xml', 'Ini')) {
-            # Wrap the complete conditional: Windows PowerShell 5.1 does not
-            # provide Count on a singleton PSCustomObject after pipeline unwrap.
-            $rows = @(
-                if ($kind -eq 'Registry') {
-                    $Parsed.RegistrySettings | Where-Object Scope -eq $scope
-                }
-                elseif ($kind -eq 'Ini') {
-                    $Parsed.IniSettings | Where-Object { $_.Scope -eq $scope -and -not $_.Analyzed }
-                }
-                else {
-                    $Parsed.XmlFiles | Where-Object { $_.Scope -eq $scope -and $_.Kind -eq $kind }
-                }
-            )
-            if (-not $rows.Count) {
-                continue
-            }
-            $ext = Add-AnalyzerGpoXmlNode $doc $side 'ExtensionData'
-            $null = Add-AnalyzerGpoXmlNode $doc $ext 'Name' $kind
-            $body = Add-AnalyzerGpoXmlNode $doc $ext 'Extension'
-            foreach ($row in $rows) {
-                # A failed native read must leave this record's field empty.
-                $label = $null
-                $value = $null
-                $record = Add-AnalyzerGpoXmlNode $doc $body 'Record'
-                if ($kind -eq 'Registry') {
-                    $label = '{0}\{1}\{2}' -f $row.Hive, $row.Key, $row.ValueName
-                    $value = if ($null -eq $row.PSObject.Properties['Value'] -and
-                        $null -ne $row.PSObject.Properties['SecretPresent']) {
-                        $null
-                    }
-                    elseif ($row.Value -is [byte[]]) {
-                        [System.Convert]::ToBase64String($row.Value)
-                    }
-                    elseif ($row.Value -is [array]) {
-                        ConvertTo-Json -InputObject $row.Value -Compress
-                    }
-                    else {
-                        [string]$row.Value
-                    }
-                    $null = Add-AnalyzerGpoXmlNode $doc $record 'Type' $row.Type
-                }
-                elseif ($kind -eq 'Ini') {
-                    $label = '{0}: [{1}] {2}' -f $row.Source, $row.Section, $row.Name
-                    $value = if ($null -eq $row.PSObject.Properties['Value'] -and
-                        $null -ne $row.PSObject.Properties['SecretPresent']) {
-                        $null
-                    }
-                    else {
-                        $row.Value
-                    }
-                }
-                else {
-                    $label = $row.Path
-                    $value = $row.Xml
-                }
-                $null = Add-AnalyzerGpoXmlNode $doc $record 'Name' $label
-                if ($null -ne $row.PSObject.Properties['SecretPresent']) {
-                    $null = Add-AnalyzerGpoXmlNode $doc $record 'SecretPresent' ([string]$row.SecretPresent).ToLowerInvariant()
-                }
-                else {
-                    $null = Add-AnalyzerGpoXmlNode $doc $record 'Value' $value
-                }
-            }
-        }
-    }
-    $inventory = Add-AnalyzerGpoXmlNode $doc $g 'FileInventory'
-    foreach ($file in $Parsed.Files) {
-        $node = Add-AnalyzerGpoXmlNode $doc $inventory 'File'
-        $node.SetAttribute('Kind', $file.Kind)
-        $node.PSBase.InnerText = $file.Path
-    }
-    return $doc.PSBase.OuterXml
+    $writer = [ADAnalyzerGpoXmlWriter]::new()
+    $appendSourceNode = 'Add-AnalyzerGpoXmlNode'
+    $observeSource = $writer.SourceObservationSteps()
+    & $observeSource
 }
 
 function Get-ADAnalyzerGpoReport {

@@ -133,6 +133,8 @@ $reader = [ADAnalyzerGpoReader]::new()
 $policy = $reader.Read('C:\PolicyCopies\{GPO-GUID}')
 $normalizer = [ADAnalyzerGpoSourceNormalizer]::new()
 $normalizedPolicy = $normalizer.Normalize($providedReport.Policy)
+$xmlWriter = [ADAnalyzerGpoXmlWriter]::new()
+$policyXml = $xmlWriter.Render($gpoMetadata, $normalizedPolicy)
 $policyEvaluator = [ADAnalyzerGpoPolicyEvaluator]::new()
 $checks = $policyEvaluator.Evaluate($gpoMetadata, $policy, $profile)
 $membershipGraph = [ADAnalyzerMembershipGraph]::new($groups)
@@ -164,6 +166,8 @@ The constructor validates and copies its in-memory profile without importing nat
 `ADAnalyzerGpoReader` owns the actual folder reader and INI, CSV, Registry.pol, XML, INF-flag, and security-option parsers. It retains no scan data or handles. `Read(path)` returns the existing policy DTO, and `ReadRegistryPolicy(path, scope)` returns typed registry records. Raw INI/XML and scalar parsing methods are internal implementation helpers; their compatibility functions retain the original source-parser contracts. Direct registry parsing buffers records and throws on invalid content; the compatibility `Read-AnalyzerRegistryPolicy` command preserves its earlier record streaming before a late parse failure. Existing reader commands delegate to the class; their consumer boundaries remain available. Reader construction is inert, and file/reader resources are closed before a successful direct return or after failure.
 
 `ADAnalyzerGpoSourceNormalizer` validates and normalizes the policy from a prefetched package report, including its JSON round-trip. Construction performs no collection or file access. `Normalize(policy)` parses XML with DTD processing prohibited, restores ordinary binary registry values, and retains Boolean presence for identified secrets. It returns a fresh root, independent XML and registry rows, and shallow references to other ordinary input rows and values. Direct normalization throws on invalid input. The compatibility command preserves native PowerShell error and continuation behavior.
+
+`ADAnalyzerGpoXmlWriter` composes the canonical GPO report XML in memory. `Render(gpo, policy)` returns an XML string. `Render(gpo, policy, sidNames, sidStatus)` accepts optional caller-supplied lookup data through the explicit overload. Construction and rendering require no file access or directory queries. Each call creates a fresh document and retains no caller data. Direct calls throw on malformed input. The compatibility writer retains PowerShell’s native error and continuation behavior.
 
 `ADAnalyzerGpoPolicyEvaluator` owns six rule phases: credential exposure, account settings, security options, membership/user rights, custom baselines, and coverage. Its constructor is inert and retains no inputs or results. `Evaluate(gpo, policy, profile)` accepts the same raw profile contract as the compatibility command, including partial profiles, and buffers results with exception semantics. `Test-ADAnalyzerGpoPolicy` retains named/common parameters and streamed checks before a late error. Effective registry records are computed at their original phase boundary and reused only within that call.
 
