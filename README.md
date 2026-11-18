@@ -134,6 +134,9 @@ $policy = $reader.Read('C:\PolicyCopies\{GPO-GUID}')
 $catalog = [ADAnalyzerGpoCatalog]::new()
 # The explicit lookup uses the packaged Windows directory provider.
 $policies = $catalog.GetAll($domain)
+$gpoReports = [ADAnalyzerGpoReportService]::new()
+$report = $gpoReports.Read($gpoMetadata, $credential)
+$reportXml = $gpoReports.RenderXmlById($gpoId, $domain, $server, $credential, $sidNames)
 $normalizer = [ADAnalyzerGpoSourceNormalizer]::new()
 $normalizedPolicy = $normalizer.Normalize($providedReport.Policy)
 $xmlWriter = [ADAnalyzerGpoXmlWriter]::new()
@@ -169,6 +172,10 @@ The constructor validates and copies its in-memory profile without importing nat
 `ADAnalyzerGpoReader` owns the actual folder reader and INI, CSV, Registry.pol, XML, INF-flag, and security-option parsers. It retains no scan data or handles. `Read(path)` returns the existing policy DTO, and `ReadRegistryPolicy(path, scope)` returns typed registry records. Raw INI/XML and scalar parsing methods are internal implementation helpers; their compatibility functions retain the original source-parser contracts. Direct registry parsing buffers records and throws on invalid content; the compatibility `Read-AnalyzerRegistryPolicy` command preserves its earlier record streaming before a late parse failure. Existing reader commands delegate to the class; their consumer boundaries remain available. Reader construction is inert, and file/reader resources are closed before a successful direct return or after failure.
 
 `ADAnalyzerGpoCatalog` owns GPO lookup, server selection, link interpretation, and catalog record assembly. Its constructor is inert. Call `GetAll(domain)`, `FindById(guid, domain)`, or `FindByName(name, domain)`. Each method also accepts a server and an optional credential as trailing arguments. The server defaults to the domain, and ID lookups require a nonempty GUID. Explicit lookups use the bundled Windows Active Directory provider. Each call validates the requested host, pins the returned domain controller, and returns fresh catalog records with domain and site links. The compatibility command retains native PowerShell binding, streaming, and error capture.
+
+`ADAnalyzerGpoReportService` owns policy selection, SYSVOL reading, version comparison, SID lookup and report assembly. Its constructor is inert. `Read(gpo)` accepts a catalog record and returns `Gpo`, `Policy` and `VersionMismatch`. `RenderXml(gpo)` returns the canonical XML report. Both methods accept a trailing credential, and XML rendering also accepts a SID-name hashtable after the credential. `ReadById(guid, domain)` and `RenderXmlById(guid, domain)` look up the policy first. Their optional trailing arguments are server, credential, and, for XML, the SID-name hashtable.
+
+Each operation reconstructs the SYSVOL path from validated catalog metadata. Credentialed reads own a temporary drive for the operation. SID lookup uses the bundled Windows directory provider on the selected controller. Object reports skip SID lookup, and XML rendering from catalog metadata loads the provider only when a SID needs resolution. The service retains no credentials, lookup state, or earlier results. Direct methods return the completed result after cleanup. `Get-ADAnalyzerGpoReport` retains its native parameter binding, warning and error streams, and cleanup diagnostics.
 
 `ADAnalyzerGpoSourceNormalizer` validates and normalizes the policy from a prefetched package report, including its JSON round-trip. Construction performs no collection or file access. `Normalize(policy)` parses XML with DTD processing prohibited, restores ordinary binary registry values, and retains Boolean presence for identified secrets. It returns a fresh root, independent XML and registry rows, and shallow references to other ordinary input rows and values. Direct normalization throws on invalid input. The compatibility command preserves native PowerShell error and continuation behavior.
 

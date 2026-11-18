@@ -1661,6 +1661,240 @@ function ConvertTo-AnalyzerGpoXml {
     & $observeSource $false
 }
 
+class ADAnalyzerGpoReportService {
+    ADAnalyzerGpoReportService() {
+    }
+
+    [object] Read([object]$Gpo) {
+        return $this.Read($Gpo, [pscredential]::Empty)
+    }
+
+    [object] Read([object]$Gpo, [pscredential]$Credential) {
+        return $this.ReadReport($Gpo, $Credential, $false, $null)
+    }
+
+    [object] ReadById([guid]$Guid, [string]$Domain) {
+        return $this.ReadById($Guid, $Domain, $Domain, [pscredential]::Empty)
+    }
+
+    [object] ReadById([guid]$Guid, [string]$Domain, [string]$Server) {
+        return $this.ReadById($Guid, $Domain, $Server, [pscredential]::Empty)
+    }
+
+    [object] ReadById([guid]$Guid, [string]$Domain, [string]$Server, [pscredential]$Credential) {
+        return $this.Read($this.FindPolicy($Guid, $Domain, $Server, $Credential), $Credential)
+    }
+
+    [string] RenderXml([object]$Gpo) {
+        return $this.RenderXml($Gpo, [pscredential]::Empty, $null)
+    }
+
+    [string] RenderXml([object]$Gpo, [pscredential]$Credential) {
+        return $this.RenderXml($Gpo, $Credential, $null)
+    }
+
+    [string] RenderXml([object]$Gpo, [pscredential]$Credential, [hashtable]$SidNames) {
+        return $this.ReadReport($Gpo, $Credential, $true, $SidNames)
+    }
+
+    [string] RenderXmlById([guid]$Guid, [string]$Domain) {
+        return $this.RenderXmlById($Guid, $Domain, $Domain, [pscredential]::Empty, $null)
+    }
+
+    [string] RenderXmlById([guid]$Guid, [string]$Domain, [string]$Server) {
+        return $this.RenderXmlById($Guid, $Domain, $Server, [pscredential]::Empty, $null)
+    }
+
+    [string] RenderXmlById([guid]$Guid, [string]$Domain, [string]$Server, [pscredential]$Credential) {
+        return $this.RenderXmlById($Guid, $Domain, $Server, $Credential, $null)
+    }
+
+    [string] RenderXmlById(
+        [guid]$Guid, [string]$Domain, [string]$Server, [pscredential]$Credential, [hashtable]$SidNames
+    ) {
+        return $this.RenderXml($this.FindPolicy($Guid, $Domain, $Server, $Credential), $Credential, $SidNames)
+    }
+
+    hidden [object] FindPolicy([guid]$Guid, [string]$Domain, [string]$Server, [pscredential]$Credential) {
+        if (-not $this.IsHostName(@{ Value = $Server })) {
+            throw 'Server must be a DNS or NetBIOS host name'
+        }
+        $catalog = [ADAnalyzerGpoCatalog]::new()
+        $policies = $catalog.FindById($Guid, $Domain, $Server, $Credential)
+        if ($policies.Count -ne 1) {
+            throw 'GPO was not found or was ambiguous'
+        }
+        return $policies[0]
+    }
+
+    hidden [bool] IsHostName([hashtable]$Observed) {
+        return $Observed.Value -is [string] -and $Observed.Value -match '\A[A-Za-z0-9][A-Za-z0-9._-]*\z'
+    }
+
+    hidden [hashtable] GetPolicyPaths([string]$Server, [string]$Domain, [guid]$Id) {
+        $relative = '{0}\Policies\{1}' -f $Domain, $Id.ToString('B')
+        $root = '\\{0}\SYSVOL' -f $Server
+        return @{
+            Root = $root
+            Relative = $relative
+            Unc = $root + '\' + $relative
+        }
+    }
+
+    hidden [bool] VersionsDiffer([hashtable]$Observed) {
+        return $Observed.SysvolVersion -ne ($Observed.DirectoryVersion -band [long]4294967295)
+    }
+
+    hidden [string] MismatchMessage([hashtable]$Observed) {
+        return 'GPO {0} directory and SYSVOL versions differ; the policy may be updating or replicating' -f $Observed.Id
+    }
+
+    hidden [object] BuildReport([hashtable]$Observed) {
+        return [pscustomobject]@{
+            Gpo = $Observed.Gpo
+            Policy = $Observed.Policy
+            VersionMismatch = $Observed.VersionMismatch
+        }
+    }
+
+    hidden [bool] IsDirectorySid([string]$Token) {
+        return $Token -match '^S-1-5-21-(\d+-){3}\d+$'
+    }
+
+    hidden [string] RenderPolicy(
+        [object]$Gpo, [object]$Policy, [string]$Server, [pscredential]$Credential, [hashtable]$SidNames
+    ) {
+        $report = $this
+        $names = if ($null -ne $SidNames) {
+            $SidNames.Clone()
+        }
+        else {
+            @{}
+        }
+        $status = @{}
+        $catalog = [ADAnalyzerGpoCatalog]::new()
+        $connection = $catalog.NewConnection($Server, $Credential)
+        $tokens = @(
+            $Policy.SecuritySettings |
+                Where-Object Kind -eq 'UserRightsAssignment' |
+                ForEach-Object { $_.Value } |
+                ForEach-Object { ([string]$_).TrimStart('*') } |
+                Where-Object { $report.IsDirectorySid($_) } |
+                Select-Object -Unique
+        )
+        $objectCommand = $null
+        $providerFailure = $null
+        foreach ($token in $tokens) {
+            if ($names.ContainsKey($token)) {
+                continue
+            }
+            if ($null -eq $objectCommand -and $null -eq $providerFailure) {
+                try {
+                    $providerPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'lib/Microsoft.ActiveDirectory.Management.dll'
+                    $provider = Import-Module -Name $providerPath -Scope Local -PassThru -ErrorAction Stop
+                    $objectCommand = $provider.ExportedCmdlets['Get-ADObject']
+                    if ($null -eq $objectCommand) {
+                        throw 'Bundled AD assembly does not provide the required SID lookup command'
+                    }
+                }
+                catch {
+                    $providerFailure = $_.Exception
+                }
+            }
+            try {
+                if ($null -ne $providerFailure) {
+                    throw $providerFailure
+                }
+                $matches = @(& $objectCommand -Filter "objectSid -eq '$token'" -Properties sAMAccountName @connection)
+                if ($matches.Count -eq 1 -and $matches[0].sAMAccountName) {
+                    $names[$token] = [string]$matches[0].sAMAccountName
+                    $status[$token] = 'Resolved'
+                }
+                else {
+                    $status[$token] = 'NotFound'
+                }
+            }
+            catch {
+                $status[$token] = 'LookupFailed'
+                Write-Warning ('Unable to resolve policy SID {0} on {1}: {2}' -f $token, $Server, $_.Exception.Message)
+            }
+        }
+        $writer = [ADAnalyzerGpoXmlWriter]::new()
+        return $writer.Render($Gpo, $Policy, $names, $status)
+    }
+
+    hidden [object] ReadReport(
+        [object]$Gpo, [pscredential]$Credential, [bool]$AsXml, [hashtable]$SidNames
+    ) {
+        $ErrorActionPreference = 'Stop'
+        $report = $this
+        $server = $null
+        $domain = $null
+        if ($null -eq $Gpo -or
+            -not $report.IsHostName(@{ Value = ($server = $Gpo.Server) }) -or
+            -not $report.IsHostName(@{ Value = ($domain = $Gpo.Domain) })) {
+            throw 'Invalid GPO server/domain'
+        }
+        $id = [guid]$Gpo.Id
+        $paths = $report.GetPolicyPaths($server, $domain, $id)
+        $drive = $null
+        $completed = $false
+        try {
+            $path = $paths.Unc
+            if ($Credential -and $Credential -ne [pscredential]::Empty) {
+                $mount = @{
+                    Name = 'ADGpo' + [guid]::NewGuid().ToString('N')
+                    PSProvider = 'FileSystem'
+                    Root = $paths.Root
+                    Credential = $Credential
+                    Scope = 'Local'
+                    ErrorAction = 'Stop'
+                    WhatIf = $false
+                    Confirm = $false
+                }
+                $drive = New-PSDrive @mount
+                $path = Join-Path ($drive.Name + ':\') $paths.Relative
+            }
+            $reader = [ADAnalyzerGpoReader]::new()
+            $parsed = $reader.Read($path)
+            $mismatch = $null -ne $parsed.SysvolVersion -and
+                $null -ne $Gpo.Version -and
+                $report.VersionsDiffer(@{
+                        SysvolVersion = $parsed.SysvolVersion
+                        DirectoryVersion = [long]$Gpo.Version
+                    })
+            if ($mismatch) {
+                Write-Warning ($report.MismatchMessage(@{ Id = $Gpo.Id }))
+            }
+            if ($AsXml) {
+                $result = $report.RenderPolicy($Gpo, $parsed, $server, $Credential, $SidNames)
+            }
+            else {
+                $result = $report.BuildReport(@{
+                        Gpo = $Gpo
+                        Policy = $parsed
+                        VersionMismatch = $mismatch
+                    })
+            }
+            $completed = $true
+            return $result
+        }
+        finally {
+            if ($drive -and $completed) {
+                Remove-PSDrive -Name $drive.Name -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false
+            }
+            elseif ($drive) {
+                try {
+                    Remove-PSDrive -Name $drive.Name -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false
+                }
+                catch {
+                    # Preserve the pending report error when drive cleanup also fails.
+                }
+            }
+        }
+    }
+}
+
 function Get-ADAnalyzerGpoReport {
     [CmdletBinding(DefaultParameterSetName = 'Gpo')]
     param(
@@ -1673,6 +1907,7 @@ function Get-ADAnalyzerGpoReport {
         [hashtable]$SidNames = @{}
 
     )
+    $report = [ADAnalyzerGpoReportService]::new()
     if ($PSCmdlet.ParameterSetName -eq 'Guid') {
         $Gpo = @(Get-ADAnalyzerGpo -Guid $Guid -Domain $Domain -Server $Server -Credential $Credential)
         if ($Gpo.Count -ne 1) {
@@ -1681,14 +1916,12 @@ function Get-ADAnalyzerGpoReport {
         $Gpo = $Gpo[0]
     }
     # Use only the single validated target for SYSVOL and directory lookups.
-    $hostPattern = '\A[A-Za-z0-9][A-Za-z0-9._-]*\z'
-    if (($reportServer = $Gpo.Server) -isnot [string] -or
-        $reportServer -notmatch $hostPattern -or
-        ($reportDomain = $Gpo.Domain) -isnot [string] -or
-        $reportDomain -notmatch $hostPattern) {
+    if (-not $report.IsHostName(@{ Value = ($reportServer = $Gpo.Server) }) -or
+        -not $report.IsHostName(@{ Value = ($reportDomain = $Gpo.Domain) })) {
         throw 'Invalid GPO server/domain'
     }
     $id = [guid]$Gpo.Id
+    $paths = $report.GetPolicyPaths($reportServer, $reportDomain, $id)
     $drive = $null
     $completed = $false
     try {
@@ -1696,32 +1929,36 @@ function Get-ADAnalyzerGpoReport {
             $drive = New-PSDrive `
                 -Name ('ADGpo' + [guid]::NewGuid().ToString('N')) `
                 -PSProvider FileSystem `
-                -Root ('\\{0}\SYSVOL' -f $reportServer) `
+                -Root $paths.Root `
                 -Credential $Credential `
                 -Scope Local `
                 -ErrorAction Stop `
                 -WhatIf:$false `
                 -Confirm:$false
-            $path = Join-Path ($drive.Name + ':\') ('{0}\Policies\{1}' -f $reportDomain, $id.ToString('B'))
+            $path = Join-Path ($drive.Name + ':\') $paths.Relative
         }
         else {
-            $path = '\\{0}\SYSVOL\{1}\Policies\{2}' -f $reportServer, $reportDomain, $id.ToString('B')
+            $path = $paths.Unc
         }
         $parsed = Read-ADAnalyzerGpo -Path $path
         $mismatch = $null -ne $parsed.SysvolVersion -and
-        $null -ne $Gpo.Version -and
-        $parsed.SysvolVersion -ne ([long]$Gpo.Version -band [long]4294967295)
+            $null -ne $Gpo.Version -and
+            $report.VersionsDiffer(@{
+                    SysvolVersion = $parsed.SysvolVersion
+                    DirectoryVersion = [long]$Gpo.Version
+                })
         if ($mismatch) {
-            Write-Warning ('GPO {0} directory and SYSVOL versions differ; the policy may be updating or replicating' -f $Gpo.Id)
+            Write-Warning ($report.MismatchMessage(@{ Id = $Gpo.Id }))
         }
         if ($AsObject) {
-            [pscustomobject]@{
-                Gpo = $Gpo
-                Policy = $parsed
-                VersionMismatch = $mismatch
-            }
+            $report.BuildReport(@{
+                    Gpo = $Gpo
+                    Policy = $parsed
+                    VersionMismatch = $mismatch
+                })
         }
         else {
+            # Keep the caller's map clone in the native command error scope.
             $names = if ($null -ne $SidNames) {
                 $SidNames.Clone()
             }
@@ -1729,15 +1966,9 @@ function Get-ADAnalyzerGpoReport {
                 @{}
             }
             $status = @{}
-            $connection = @{
-                Server = $reportServer
-                ErrorAction = 'Stop'
-            }
-            if ($Credential -and $Credential -ne [pscredential]::Empty) {
-                $connection.Credential = $Credential
-            }
+            $connection = ([ADAnalyzerGpoCatalog]::new()).NewConnection($reportServer, $Credential)
             $tokens = @($parsed.SecuritySettings | Where-Object Kind `
-                    -eq 'UserRightsAssignment' | ForEach-Object { $_.Value } | ForEach-Object { ([string]$_).TrimStart('*') } | Where-Object { $_ -match '^S-1-5-21-(\d+-){3}\d+$' } | Select-Object `
+                    -eq 'UserRightsAssignment' | ForEach-Object { $_.Value } | ForEach-Object { ([string]$_).TrimStart('*') } | Where-Object { $report.IsDirectorySid($_) } | Select-Object `
                     -Unique)
             foreach ($token in $tokens) {
                 if ($names.ContainsKey($token)) {

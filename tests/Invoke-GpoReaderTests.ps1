@@ -268,6 +268,15 @@ try {
             }
             RequireExactCaseCount = $true
         }
+        [pscustomobject]@{
+            Name = 'GPO report class'
+            Script = 'GpoReportClassFixture.ps1'
+            Cases = [ordered]@{
+                Contracts = 22
+                Direct = 29
+            }
+            RequireExactCaseCount = $true
+        }
     )
     foreach ($fixture in $gpoFixtures) {
         foreach ($case in $fixture.Cases.Keys) {
