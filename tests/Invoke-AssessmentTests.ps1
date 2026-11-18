@@ -824,6 +824,265 @@ try {
         $again = Import-ADAnalyzerBaseline -GpoPath $path -Name Fixture -Version '2026.11'
         Assert-Equal ($profile.ExpectedGpoSettings.Id -join '|') ($again.ExpectedGpoSettings.Id -join '|')
     }
+    $strictBaselineRoot = Join-Path $temp 'strict-baseline/DomainSysvol/GPO'
+    $strictBaselineSecurity = Join-Path $strictBaselineRoot 'Machine/Microsoft/Windows NT/SecEdit'
+    $null = [IO.Directory]::CreateDirectory($strictBaselineSecurity)
+    [IO.File]::WriteAllLines((Join-Path $strictBaselineRoot 'GPT.INI'), @('[General]', 'Version=1'))
+    [IO.File]::WriteAllLines((Join-Path $strictBaselineSecurity 'GptTmpl.inf'),
+        @('[System Access]', 'MinimumPasswordLength=16', 'PasswordComplexity=1'), [Text.Encoding]::Unicode)
+    Write-AssessmentPol (Join-Path $strictBaselineRoot 'Machine/Registry.pol') @(
+        @{
+            Key = 'Software\Fixture'
+            Name = 'Enabled'
+            Type = 4
+            Bytes = [BitConverter]::GetBytes([uint32]1)
+        }
+        @{
+            Key = 'Software\Fixture'
+            Name = 'Timeout'
+            Type = 4
+            Bytes = [BitConverter]::GetBytes([uint32]9)
+        }
+    )
+    $generatedStrictBaseline = Import-ADAnalyzerBaseline -GpoPath $strictBaselineRoot -Version 'strict-rehydrate'
+    $persistedStrictBaseline = Join-Path $temp 'strict-baseline.json'
+    [IO.File]::WriteAllText($persistedStrictBaseline,
+        (ConvertTo-Json -InputObject $generatedStrictBaseline -Depth 25), [Text.Encoding]::UTF8)
+    $strictBaselineRoutes = [ordered]@{
+        Registry = @{ RegistryRules = $generatedStrictBaseline.RegistryRules }
+        Security = @{ ExpectedGpoSettings = $generatedStrictBaseline.ExpectedGpoSettings }
+        Combined = $generatedStrictBaseline
+        Json = $null
+    }
+    foreach ($strictBaselineRoute in $strictBaselineRoutes.Keys) {
+        Test-Assessment ('generated baseline rehydrates under Strict Latest via ' + $strictBaselineRoute) {
+            Assert-Equal 2 $generatedStrictBaseline.RegistryRules.Count
+            Assert-Equal 2 $generatedStrictBaseline.ExpectedGpoSettings.Count
+            foreach ($rule in $generatedStrictBaseline.RegistryRules) {
+                Assert-True (-not $rule.ContainsKey('Kind') -and -not $rule.ContainsKey('Name')) 'The generated registry fixture no longer omits Kind and Name.'
+            }
+            foreach ($rule in $generatedStrictBaseline.ExpectedGpoSettings) {
+                Assert-True ($rule.Kind -ceq 'Account' -and $rule.ContainsKey('Name') -and
+                    -not $rule.ContainsKey('Key') -and -not $rule.ContainsKey('ValueName')) 'The generated security fixture no longer has Account-only identity fields.'
+            }
+
+            foreach ($strictMode in @($false, $true)) {
+                $rehydrated = & {
+                    if ($strictMode) {
+                        Set-StrictMode -Version Latest
+                    }
+                    if ($strictBaselineRoute -ceq 'Json') {
+                        Import-ADAnalyzerProfile -Path $persistedStrictBaseline
+                    }
+                    else {
+                        Import-ADAnalyzerProfile -Profile $strictBaselineRoutes[$strictBaselineRoute]
+                    }
+                }
+
+                foreach ($collection in @('RegistryRules', 'ExpectedGpoSettings')) {
+                    $expected = @($generatedStrictBaseline[$collection])
+                    if (($strictBaselineRoute -ceq 'Registry' -and $collection -ceq 'ExpectedGpoSettings') -or
+                        ($strictBaselineRoute -ceq 'Security' -and $collection -ceq 'RegistryRules')) {
+                        $expected = @()
+                    }
+                    $actual = @($rehydrated[$collection])
+                    Assert-Equal $expected.Count $actual.Count
+                    for ($index = 0; $index -lt $expected.Count; $index++) {
+                        $expectedKeys = @($expected[$index].Keys | Sort-Object)
+                        $actualKeys = @($actual[$index].Keys | Sort-Object)
+                        Assert-Equal ($expectedKeys -join '|') ($actualKeys -join '|')
+                        foreach ($key in $expectedKeys) {
+                            Assert-Equal $expected[$index][$key] $actual[$index][$key]
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    $secretBaselineMessage = 'Value baselines for secret-bearing settings are not supported. Use secret-presence checks.'
+    $typeBaselineMessage = 'Custom value baseline identity fields must be strings or null.'
+    $identityCases = @(
+        @{
+            Name = 'absent Kind selects registry ValueName over both fallback names'
+            Rule = @{
+                Name = 'Password'
+                Key = 'Software\Password'
+                ValueName = 'Enabled'
+            }
+            Diagnostic = ''
+            AlsoImport = $true
+        }
+        @{
+            Name = 'explicit null Kind selects Name ahead of ValueName'
+            Rule = @{
+                Kind = $null
+                Name = 'Password'
+                Key = 'Software\Fixture'
+                ValueName = 'Enabled'
+            }
+            Diagnostic = $secretBaselineMessage
+            AlsoImport = $true
+        }
+        @{
+            Name = 'empty registry ValueName checks the Key even with an ordinary Name'
+            Rule = @{
+                Name = 'Enabled'
+                Key = 'Software\Password'
+                ValueName = ''
+            }
+            Diagnostic = $secretBaselineMessage
+        }
+        @{
+            Name = 'absent registry ValueName checks the Name when Key is missing'
+            Rule = @{ Name = 'Password' }
+            Diagnostic = $secretBaselineMessage
+        }
+        @{
+            Name = 'nonregistry Name wins over ValueName and Key'
+            Rule = @{
+                Kind = 'Account'
+                Name = 'Enabled'
+                Key = 'Software\Password'
+                ValueName = 'Password'
+            }
+            Diagnostic = ''
+        }
+        @{
+            Name = 'nonregistry identity can fall back to Key'
+            Rule = @{
+                Kind = 'Account'
+                Key = 'Software\Password'
+            }
+            Diagnostic = $secretBaselineMessage
+        }
+        @{
+            Name = 'host registry precedence ignores explicit null Kind'
+            Rule = @{
+                Kind = $null
+                Name = 'Password'
+                Key = 'Software\Password'
+                ValueName = 'Enabled'
+                Expected = 1
+            }
+            Location = 'Host'
+            Diagnostic = ''
+            AlsoImport = $true
+        }
+        @{
+            Name = 'nonstring Name is rejected before selection of a safe ValueName'
+            Rule = @{
+                Kind = 'Registry'
+                Name = 9
+                Key = 'Software\Fixture'
+                ValueName = 'Enabled'
+            }
+            Diagnostic = $typeBaselineMessage
+        }
+    )
+    $ordinalIdentity = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    $foldedIdentity = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($map in @($ordinalIdentity, $foldedIdentity)) {
+        $map.Add('kind', $null)
+        $map.Add('Name', 'Password')
+        $map.Add('Key', 'Software\Fixture')
+        $map.Add('ValueName', 'Enabled')
+    }
+    $identityCases += @(
+        @{
+            Name = 'ordinal dictionary treats differently cased Kind as absent'
+            Rule = $ordinalIdentity
+            Diagnostic = ''
+        }
+        @{
+            Name = 'ignore-case dictionary finds the explicit null Kind'
+            Rule = $foldedIdentity
+            Diagnostic = $secretBaselineMessage
+        }
+    )
+    foreach ($identityCase in $identityCases) {
+        Test-Assessment ('strict baseline identity: ' + $identityCase.Name) {
+            $profile = Get-ADAnalyzerDefaultProfile
+            if ($identityCase['Location'] -ceq 'Host') {
+                $profile.Host.RegistryRules = @($identityCase.Rule)
+            }
+            else {
+                $profile.RegistryRules = @($identityCase.Rule)
+            }
+            $routes = @('Raw')
+            if ($identityCase['AlsoImport']) {
+                $routes += 'Import'
+            }
+            foreach ($route in $routes) {
+                foreach ($strictMode in @($false, $true)) {
+                    $diagnostic = ''
+                    try {
+                        & {
+                            if ($strictMode) {
+                                Set-StrictMode -Version Latest
+                            }
+                            if ($route -ceq 'Import') {
+                                $null = Import-ADAnalyzerProfile -Profile $profile
+                            }
+                            else {
+                                Assert-ADAnalyzerValueBaseline -Profile $profile
+                            }
+                        }
+                    }
+                    catch {
+                        $diagnostic = $_.Exception.GetBaseException().Message
+                    }
+                    Assert-Equal $identityCase.Diagnostic $diagnostic
+                }
+            }
+        }
+    }
+
+    foreach ($getterKind in @('Registry', 'Account')) {
+        Test-Assessment ('baseline identity getter order is preserved for ' + $getterKind) {
+            $trace = [Collections.Generic.List[string]]::new()
+            $rule = [pscustomobject]@{
+                Trace = $trace
+                FixtureKind = $getterKind
+            }
+            $rule.PSObject.Properties.Add([Management.Automation.PSScriptProperty]::new('Kind', {
+                        $this.Trace.Add('Kind')
+                        $this.FixtureKind
+                    }))
+            $rule.PSObject.Properties.Add([Management.Automation.PSScriptProperty]::new('Name', {
+                        $this.Trace.Add('Name')
+                        'Enabled'
+                    }))
+            $rule.PSObject.Properties.Add([Management.Automation.PSScriptProperty]::new('Key', {
+                        $this.Trace.Add('Key')
+                        'Software\Fixture'
+                    }))
+            $rule.PSObject.Properties.Add([Management.Automation.PSScriptProperty]::new('ValueName', {
+                        $this.Trace.Add('ValueName')
+                        'Enabled'
+                    }))
+            $profile = Get-ADAnalyzerDefaultProfile
+            $profile.RegistryRules = @($rule)
+            $chosenName = if ($getterKind -ceq 'Registry') {
+                'ValueName,ValueName'
+            }
+            else {
+                'Name,Name'
+            }
+            $expected = 'Kind,Kind,Name,Name,Key,Key,ValueName,ValueName,Kind,' + $chosenName
+            foreach ($strictMode in @($false, $true)) {
+                $trace.Clear()
+                & {
+                    if ($strictMode) {
+                        Set-StrictMode -Version Latest
+                    }
+                    Assert-ADAnalyzerValueBaseline -Profile $profile
+                }
+                Assert-Equal $expected ($trace -join ',')
+            }
+        }
+    }
+
     Test-Assessment 'misplaced account-template entries are excluded from baselines and leave explicit coverage' {
         $root = Join-Path $temp 'section-baseline'
         $directory = Join-Path $root 'Machine/Microsoft/Windows NT/SecEdit'

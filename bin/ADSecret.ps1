@@ -56,8 +56,10 @@ class ADAnalyzerSecretIndicator {
                 if ($null -eq $rule) {
                     continue
                 }
+                $inputFrame = @{ Record = $rule }
                 foreach ($field in @('Kind', 'Name', 'Key', 'ValueName')) {
-                    if ($null -ne $rule.$field -and $rule.$field -isnot [string]) {
+                    if ((Test-ADAnalyzerOptionalSecretRecordMember $inputFrame $field) -and
+                        $null -ne $rule.$field -and $rule.$field -isnot [string]) {
                         throw 'Custom value baseline identity fields must be strings or null.'
                     }
                 }
@@ -73,22 +75,33 @@ class ADAnalyzerSecretIndicator {
                 # A registry key named Password can contain ordinary values such as Enabled.
                 # Evaluate the actual value/setting name before using a full-key fallback.
                 $identities = if ($collection.Registry -or $kind -eq 'Registry') {
-                    if ($rule.ValueName) {
+                    if ((Test-ADAnalyzerOptionalSecretRecordMember $inputFrame 'ValueName') -and $rule.ValueName) {
                         @($rule.ValueName)
                     }
                     else {
-                        @($rule.Name, $rule.Key)
+                        $name = $null
+                        $key = $null
+                        if (Test-ADAnalyzerOptionalSecretRecordMember $inputFrame 'Name') {
+                            $name = $rule.Name
+                        }
+                        if (Test-ADAnalyzerOptionalSecretRecordMember $inputFrame 'Key') {
+                            $key = $rule.Key
+                        }
+                        @($name, $key)
                     }
                 }
                 else {
-                    if ($rule.Name) {
+                    if ((Test-ADAnalyzerOptionalSecretRecordMember $inputFrame 'Name') -and $rule.Name) {
                         $rule.Name
                     }
-                    elseif ($rule.ValueName) {
+                    elseif ((Test-ADAnalyzerOptionalSecretRecordMember $inputFrame 'ValueName') -and $rule.ValueName) {
                         $rule.ValueName
                     }
-                    else {
+                    elseif (Test-ADAnalyzerOptionalSecretRecordMember $inputFrame 'Key') {
                         $rule.Key
+                    }
+                    else {
+                        $null
                     }
                 }
                 foreach ($identity in @($identities)) {
