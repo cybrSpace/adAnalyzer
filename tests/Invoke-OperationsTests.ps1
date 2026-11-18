@@ -1705,6 +1705,21 @@ try {
             Assert-True (($output -join ' ') -like ('*' + $marker + '*')) 'Fresh process did not execute every required dictionary metadata scenario.'
         }
     }
+
+    $legacyValueCases = [ordered]@{
+        Parity = 44
+        Collision = 16
+    }
+    foreach ($case in $legacyValueCases.Keys) {
+        Invoke-Test ('Legacy table values: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $fixture = Join-Path $PSScriptRoot 'LegacyTableValuesFixture.ps1'
+            $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -Case $case
+            Assert-True ($LASTEXITCODE -eq 0) 'Legacy table values fixture failed.'
+            $marker = 'PASS legacy table values ' + $case + ' ' + $legacyValueCases[$case]
+            Assert-True ($marker -cin @($output)) 'Fresh process did not execute every legacy table case.'
+        }
+    }
 }
 finally {
     Remove-Item -LiteralPath $script:Temporary -Recurse -Force -WhatIf:$false -Confirm:$false

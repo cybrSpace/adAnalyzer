@@ -504,13 +504,14 @@ class Table : Hashtable {
 
         $key = $this.Properties.Key
 
-        $list = $this.Values | ForEach-Object {
+        # A row named Values can shadow the adapted collection member.
+        $list = $this.PSBase.Values | ForEach-Object {
             ([Collections.IDictionary].GetProperty('Keys')).GetValue($_, $null)
         } | Sort-Object -Unique | Where-Object {
             $_ -notin $this.Properties.Exclude
         }
 
-        $this.Values | ForEach-Object {
+        $this.PSBase.Values | ForEach-Object {
 
             $object = [Format]::OrderedProperties($_, $list)
 
@@ -523,7 +524,7 @@ class Table : Hashtable {
     }
     [void]ExportCSV([String]$value) {
 
-        [Export]::CSV($this.Values, $value)
+        [Export]::CSV($this.PSBase.Values, $value)
     }
 }
 
@@ -1211,7 +1212,9 @@ class UserData : Data {
 
         $table = [UserTable]::SetDefault()
 
-        $this.Data.Values | ForEach-Object { $table[$_.($table.Properties.Key)] = [UserObject]::Initialize($_) }
+        $this.Data.PSBase.Values | ForEach-Object {
+            $table[$_.($table.Properties.Key)] = [UserObject]::Initialize($_)
+        }
 
         $this.Report = $table
     }
@@ -1219,7 +1222,9 @@ class UserData : Data {
 
         $array = [Finding]::New()
 
-        $this.Report.Values | ForEach-Object { $array.AddItem([UserObject]::Analyze($_)) }
+        $this.Report.PSBase.Values | ForEach-Object {
+            $array.AddItem([UserObject]::Analyze($_))
+        }
 
         $this.Finding = $array
 
@@ -1735,7 +1740,9 @@ class GroupData : Data {
 
         $table = [GroupTable]::SetDefault()
 
-        $this.Data.Values | ForEach-Object { $table[$_.($table.Properties.Key)] = [GroupObject]::Initialize($_) }
+        $this.Data.PSBase.Values | ForEach-Object {
+            $table[$_.($table.Properties.Key)] = [GroupObject]::Initialize($_)
+        }
 
         $this.Report = $table
     }
@@ -1744,7 +1751,9 @@ class GroupData : Data {
 
         $array = [Finding]::New()
 
-        $this.Report.Values | ForEach-Object { $array.AddItem([GroupObject]::Analyze($_)) }
+        $this.Report.PSBase.Values | ForEach-Object {
+            $array.AddItem([GroupObject]::Analyze($_))
+        }
 
         $this.Finding = $array
 
@@ -1999,7 +2008,9 @@ class ComputerData : Data {
 
         $table = [ComputerTable]::SetDefault()
 
-        $this.Data.Values | ForEach-Object { $table[$_.($table.Properties.Key)] = [ComputerObject]::Initialize($_) }
+        $this.Data.PSBase.Values | ForEach-Object {
+            $table[$_.($table.Properties.Key)] = [ComputerObject]::Initialize($_)
+        }
 
         $this.Report = $table
     }
@@ -2007,7 +2018,9 @@ class ComputerData : Data {
 
         $array = [Finding]::New()
 
-        $this.Report.Values | ForEach-Object { $array.AddItem([ComputerObject]::Analyze($_)) }
+        $this.Report.PSBase.Values | ForEach-Object {
+            $array.AddItem([ComputerObject]::Analyze($_))
+        }
 
         $this.Finding = $array
 
