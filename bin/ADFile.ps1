@@ -1,53 +1,4 @@
 # Private package file I/O. Callers serialize and approve writes before invoking it.
-class ADAnalyzerJsonTextDecoder {
-    static [string] Decode([byte[]]$Bytes) {
-        if ($null -eq $Bytes -or $Bytes.Length -eq 0) {
-            return ''
-        }
-
-        $length = $Bytes.Length
-        $offset = 0
-        # The little-endian UTF-32 preamble starts with the UTF-16 preamble.
-        if ($length -ge 4 -and
-            $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE -and $Bytes[2] -eq 0 -and $Bytes[3] -eq 0) {
-            $encoding = [Text.UTF32Encoding]::new($false, $false)
-            $offset = 4
-        }
-        elseif ($length -ge 4 -and
-            $Bytes[0] -eq 0 -and $Bytes[1] -eq 0 -and $Bytes[2] -eq 0xFE -and $Bytes[3] -eq 0xFF) {
-            $encoding = [Text.UTF32Encoding]::new($true, $false)
-            $offset = 4
-        }
-        elseif ($length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) {
-            $encoding = [Text.UnicodeEncoding]::new($false, $false)
-            $offset = 2
-        }
-        elseif ($length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) {
-            $encoding = [Text.UnicodeEncoding]::new($true, $false)
-            $offset = 2
-        }
-        else {
-            $encoding = [Text.UTF8Encoding]::new($false)
-            if ($length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {
-                $offset = 3
-            }
-        }
-
-        $count = $length - $offset
-        $text = $encoding.GetString($Bytes, $offset, $count)
-        if ($text.IndexOf([char]0xFFFD) -ge 0) {
-            # A real replacement character counts in both passes. Substituted bytes
-            # count only in the decoded length. The fallback keeps bytes out of errors.
-            $validationEncoding = $encoding.Clone()
-            $validationEncoding.DecoderFallback = [Text.DecoderReplacementFallback]::new('')
-            if ($validationEncoding.GetCharCount($Bytes, $offset, $count) -ne $text.Length) {
-                throw [IO.InvalidDataException]::new('JSON input contains invalid encoded text.')
-            }
-        }
-        return $text
-    }
-}
-
 function Get-ADAnalyzerJsonReadParameters {
     param([string]$Path)
 
@@ -94,7 +45,17 @@ function ConvertTo-ADAnalyzerJsonText {
     param([Parameter(ValueFromPipeline)][byte[]]$Bytes)
 
     process {
-        $text = [ADAnalyzerJsonTextDecoder]::Decode($Bytes)
+        if ($null -eq $Bytes -or $Bytes.Length -eq 0) {
+            return
+        }
+        # A CLR decoder remains valid when another Windows PowerShell runspace
+        # dot-sources these file helpers and is later disposed.
+        if (-not ('ADAnalyzer.JsonTextDecoder' -as [type])) {
+            $null = Microsoft.PowerShell.Utility\Add-Type -Path (
+                Join-Path $PSScriptRoot 'ADJsonTextDecoder.cs'
+            ) -ErrorAction Stop
+        }
+        $text = [ADAnalyzer.JsonTextDecoder]::Decode($Bytes)
         if ($text.Length -gt 0) {
             return $text
         }

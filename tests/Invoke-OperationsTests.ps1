@@ -1111,6 +1111,41 @@ try {
             $isolated.Dispose()
         }
     }
+    Invoke-Test 'journal decoding survives closing a nested runspace that loaded the same source' {
+        $journalText = '{"SchemaVersion":1,"JournalType":"ADAnalyzerRemediationJournal","JournalId":"fixture-runspace","Entries":[]}'
+        [IO.File]::WriteAllText($script:Journal, $journalText, [Text.UTF8Encoding]::new($true))
+        $bytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:Journal))
+        $before = @(Read-ADAnalyzerOperationDocument -InputObject $script:Journal -Kind Journal)
+
+        $isolated = [powershell]::Create()
+        try {
+            $source = @'
+param($OperationsPath, $JournalPath)
+$ErrorActionPreference = 'Stop'
+. $OperationsPath
+Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
+'@
+            $operations = Join-Path $RepositoryRoot 'bin/ADOperations.ps1'
+            $null = $isolated.AddScript($source).AddArgument($operations).AddArgument($script:Journal)
+            $inside = @($isolated.Invoke())
+            Assert-Equal 0 $isolated.Streams.Error.Count
+        }
+        finally {
+            $isolated.Dispose()
+        }
+
+        $after = @(Read-ADAnalyzerOperationDocument -InputObject $script:Journal -Kind Journal)
+        Assert-Equal 1 $before.Count
+        Assert-Equal 1 $inside.Count
+        Assert-Equal 1 $after.Count
+        foreach ($journal in @($before[0], $inside[0], $after[0])) {
+            Assert-Equal 1 $journal.SchemaVersion
+            Assert-Equal 'ADAnalyzerRemediationJournal' $journal.JournalType
+            Assert-Equal 'fixture-runspace' $journal.JournalId
+            Assert-Equal 0 $journal.Entries.Count
+        }
+        Assert-Equal $bytes ([Convert]::ToBase64String([IO.File]::ReadAllBytes($script:Journal)))
+    }
     foreach ($classification in @('Unknown', 'Service')) {
         Invoke-Test ('fresh classification change to ' + $classification + ' is blocked') {
             $plan = New-FixturePlan
