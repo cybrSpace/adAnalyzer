@@ -1271,6 +1271,7 @@ class ADAnalyzerGpoXmlWriter {
                             else {
                                 foreach ($entry in @($setting.Value)) {
                                     $member = $writer.Append($node, 'Member', $null)
+                                    $token = $null
                                     $token = ([string]$entry).TrimStart('*')
                                     if ($writer.WriteMemberIdentity($member, $token)) {
                                         $observed = @{

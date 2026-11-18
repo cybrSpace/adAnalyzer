@@ -238,11 +238,18 @@ $script:Frozen = [ordered]@{
         Hash = '4245dabb593e009b55e79a318a720c15f3e17b6bfa125db9638a16f488179cac'
     }
 }
-$script:Valid = @('Empty', 'Linked', 'Security', 'Registry', 'IniXml', 'Sid', 'Json', 'Ofs')
+$script:Valid = @('Empty', 'Linked', 'Security', 'Registry', 'IniXml', 'Sid', 'Json', 'Ofs', 'MemberEmptyInputs')
 $script:Faults = @(
     'Version', 'Flags', 'NullNames', 'NullStatus', 'MissingKind', 'MissingValue',
     'BadScalar', 'InventoryKind', 'BadMemberStrict', 'BadMemberLoose'
 )
+$script:MemberIsolationFaults = @(
+    'BadMemberMiddleStrict'
+    'BadMemberMiddleLoose'
+    'BadMemberSettingStrict'
+    'BadMemberScopeLoose'
+)
+$script:Faults += $script:MemberIsolationFaults
 
 function Assert-WriterFixture($Condition, [string]$Message) {
     if (-not $Condition) {
@@ -487,6 +494,27 @@ function New-WriterInput([string]$Name) {
                 Value = @([WriterFixtureBadScalar]::new(), 'S-1-5-18')
             }
         }
+        'MemberEmptyInputs' {
+            $members = @($null, '', '*', 'Fixture account', '*S-1-5-18')
+            $policy.SecuritySettings = @(New-WriterSecurity UserRightsAssignment 'Fixture ordinary members' $members)
+        }
+        { $_ -in $script:MemberIsolationFaults } {
+            $knownMember = '*S-1-5-32-544'
+            $targetScope = 'Computer'
+            $members = @()
+            if ($Name -in 'BadMemberMiddleStrict', 'BadMemberMiddleLoose') {
+                $members += $knownMember
+            }
+            else {
+                $policy.SecuritySettings += New-WriterSecurity UserRightsAssignment 'Fixture previous setting' $knownMember
+                if ($Name -eq 'BadMemberScopeLoose') {
+                    $targetScope = 'User'
+                }
+            }
+            $members += [WriterFixtureBadScalar]::new()
+            $members += '*S-1-5-18'
+            $policy.SecuritySettings += New-WriterSecurity UserRightsAssignment 'Fixture isolation target' $members $targetScope
+        }
     }
     $result = [pscustomobject]@{
         Gpo = $gpo
@@ -726,13 +754,13 @@ function Invoke-WriterObservation([string]$Name, [string]$Route, [string]$Action
     }
     $data = New-WriterInput $Name
     $before = ConvertTo-Json -InputObject $data -Depth 18 -Compress
-    if ($Name -eq 'BadMemberLoose') {
+    if ($Name -in 'BadMemberLoose', 'BadMemberMiddleLoose', 'BadMemberScopeLoose') {
         Set-StrictMode -Off
     }
     else {
         Set-StrictMode -Version Latest
     }
-    if ($Name -eq 'BadMemberStrict') {
+    if ($Name -in 'BadMemberStrict', 'BadMemberMiddleStrict', 'BadMemberSettingStrict', 'BadMemberScopeLoose') {
         $token = 'fixture-caller-token'
     }
     if ($Name -eq 'Ofs') {
@@ -793,6 +821,45 @@ function Invoke-WriterObservation([string]$Name, [string]$Route, [string]$Action
     }
 }
 
+function Get-WriterIsolatedMemberExpectation($Frozen, $FirstMember, [string]$Name) {
+    Assert-WriterFixture ($Frozen.Stream.Count -eq 2 -and $Frozen.Stream[0].Id -match 'InvalidCast' -and
+        $Frozen.Unchanged) "Frozen $Name did not emit one native conversion error and one report."
+
+    $report = $Frozen.Stream[1]
+    $document = [xml]$report.Xml
+    $scope = 'Computer'
+    $failedIndex = 0
+    if ($Name -eq 'BadMemberScopeLoose') {
+        $scope = 'User'
+    }
+    if ($Name -in 'BadMemberMiddleStrict', 'BadMemberMiddleLoose') {
+        $failedIndex = 1
+    }
+    $path = "/GPO/$scope/ExtensionData[Name='Security']/Extension/UserRightsAssignment[Name='Fixture isolation target']/Member"
+    $members = @($document.SelectNodes($path))
+    Assert-WriterFixture ($members.Count -eq $failedIndex + 2 -and
+        $null -ne $members[$failedIndex].SelectSingleNode("SID[.='S-1-5-32-544']") -and
+        $null -ne $members[$failedIndex].SelectSingleNode("Name[.='Administrators']") -and
+        $null -ne $members[$failedIndex].SelectSingleNode("Resolution[.='Resolved']") -and
+        $null -ne $members[-1].SelectSingleNode("SID[.='S-1-5-18']") -and
+        $null -ne $members[-1].SelectSingleNode("Name[.='SYSTEM']") -and
+        $null -ne $members[-1].SelectSingleNode("Resolution[.='Resolved']")) "Frozen $Name did not reproduce the borrowed membership."
+
+    $firstFailure = ([xml]$FirstMember.Stream[-1].Xml).SelectSingleNode(
+        "//UserRightsAssignment[Name='First member has no usable text']/Member[1]")
+    Assert-WriterFixture ($firstFailure.PSBase.OuterXml -ceq '<Member><Name /></Member>') 'Frozen first failed membership did not provide the empty Name shape.'
+    $failed = $members[$failedIndex]
+    $null = $failed.PSBase.ParentNode.ReplaceChild($document.ImportNode($firstFailure, $true), $failed)
+    $isolated = $Frozen.PSObject.Copy()
+    $isolated.Stream = @(
+        $Frozen.Stream[0]
+        [pscustomobject]@{
+            Xml = $document.PSBase.OuterXml
+        }
+    )
+    $isolated
+}
+
 function Invoke-WriterHelper([bool]$Frozen, [string]$Mode) {
     if ($Frozen) {
         . ([scriptblock]::Create($script:Oracle))
@@ -839,7 +906,7 @@ function Invoke-WriterHelper([bool]$Frozen, [string]$Mode) {
     }
 }
 
-if ($Case -in 'Contracts', 'Uncaught') {
+if ($Case -in 'Contracts', 'Direct', 'Uncaught') {
     Add-Type @'
 public sealed class WriterFixtureBadScalar
 {
@@ -976,6 +1043,14 @@ foreach ($name in $script:Valid) {
     if ($name -eq 'Ofs') {
         Assert-WriterFixture ($expected.Stream[0].Xml.Contains('alpha|beta')) 'The scalar observation did not exercise OFS.'
     }
+    if ($name -eq 'MemberEmptyInputs') {
+        $report = [xml]$expected.Stream[0].Xml
+        $path = "//UserRightsAssignment[Name='Fixture ordinary members']/Member"
+        Assert-WriterFixture ($report.SelectNodes($path).Count -eq 5 -and
+            $report.SelectNodes("$path[Name='' and not(SID or Resolution)]").Count -eq 3 -and
+            $null -ne $report.SelectSingleNode("$path[4]/Name[.='Fixture account']") -and
+            $null -ne $report.SelectSingleNode("$path[5][SID='S-1-5-18' and Name='SYSTEM' and Resolution='Resolved']")) 'Frozen null, empty, text and SID members did not have the expected order and shape.'
+    }
     Assert-WriterSame $expected $actual "$Case/$name"
     $count++
 }
@@ -983,6 +1058,7 @@ foreach ($name in $script:Valid) {
 if ($Case -eq 'Contracts') {
     $oldChild = Invoke-WriterChild $true
     $newChild = Invoke-WriterChild $false
+    $borrowedMemberships = @()
     for ($i = 0; $i -lt $script:Faults.Count; $i++) {
         $name = $script:Faults[$i]
         $expected = $oldChild.Observations[$i]
@@ -996,7 +1072,24 @@ if ($Case -eq 'Contracts') {
                 $expected.Stream[-1].Xml.Contains('<SID>S-1-5-18</SID>') -and
                 -not $expected.Stream[-1].Xml.Contains('fixture-caller-token')) "Frozen $name did not preserve token isolation."
         }
-        Assert-WriterSame $expected $actual "Uncaught $name"
+        if ($name -in $script:MemberIsolationFaults) {
+            $firstCase = 'BadMemberStrict'
+            if ($name -in 'BadMemberMiddleLoose', 'BadMemberScopeLoose') {
+                $firstCase = 'BadMemberLoose'
+            }
+            $firstIndex = [array]::IndexOf($script:Faults, $firstCase)
+            $isolated = Get-WriterIsolatedMemberExpectation $expected $oldChild.Observations[$firstIndex] $name
+            if ($isolated.Stream[1].Xml -ceq $actual.Stream[1].Xml) {
+                Assert-WriterSame $isolated $actual "Uncaught isolated membership $name"
+            }
+            else {
+                Assert-WriterSame $expected $actual "Uncaught membership $name with broader drift"
+                $borrowedMemberships += $name
+            }
+        }
+        else {
+            Assert-WriterSame $expected $actual "Uncaught $name"
+        }
         foreach ($action in @('Continue', 'Stop')) {
             $expected = Invoke-WriterObservation $name Original $action $true $null
             $actual = Invoke-WriterObservation $name Command $action $true $null
@@ -1019,12 +1112,15 @@ if ($Case -eq 'Contracts') {
         $oldChild.Helper.Report -eq '<Fixture />') 'Frozen DOM helper did not exercise native element failure.'
     Assert-WriterSame (Invoke-WriterHelper $true Stop) (Invoke-WriterHelper $false Stop) 'Stopped DOM helper'
     $count++
+    Assert-WriterFixture ($borrowedMemberships.Count -eq 0) ('Failed memberships borrowed prior identities under uncaught Continue: ' +
+        ($borrowedMemberships -join ', ') + '.')
 }
 else {
-    foreach ($name in @('Version', 'MissingKind')) {
+    foreach ($name in @('Version', 'MissingKind', 'BadMemberMiddleStrict')) {
         $expected = Invoke-WriterObservation $name Original Stop $true $null
         $actual = Invoke-WriterObservation $name Direct Stop $true $service
-        Assert-WriterFixture ($null -ne $actual.Caught -and $actual.Caught.Message -ceq $expected.Caught.Message -and
+        Assert-WriterFixture ($null -ne $actual.Caught -and $actual.Caught.Cause -ceq $expected.Caught.Cause -and
+            $actual.Caught.Message -ceq $expected.Caught.Message -and
             $actual.Stream.Count -eq 0 -and $actual.Unchanged) "Direct $name did not surface its failure without a partial report."
         $count++
     }
