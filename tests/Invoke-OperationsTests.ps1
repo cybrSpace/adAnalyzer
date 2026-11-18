@@ -1613,6 +1613,53 @@ try {
             Assert-True (($output -join ' ') -like ('*' + $marker + '*')) 'Fresh process did not execute every required presence-merge scenario.'
         }
     }
+
+    $evidenceProjectorCases = [ordered]@{
+        Characterization = 122
+        Metadata = 2
+        References = 2
+        Errors = 32
+        Capabilities = 4
+        Construction = 4
+        Direct = 116
+        Binding = 10
+        Ownership = 123
+        Isolation = 4
+        Serialization = 7
+        Loading = 5
+        Uncaught = 24
+    }
+    foreach ($case in $evidenceProjectorCases.Keys) {
+        Invoke-Test ('Evidence projector object API: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $arguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                (Join-Path $PSScriptRoot 'EvidenceProjectorFixture.ps1')
+                '-Case'
+                $case
+            )
+            $fixtureErrorPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $output = & $executable @arguments 2>&1
+                $fixtureExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $fixtureErrorPreference
+            }
+            if ($fixtureExitCode -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw 'Fresh evidence projector fixture failed.'
+            }
+            $marker = 'PASS evidence characterization ' + $case + ' ' + $evidenceProjectorCases[$case]
+            Assert-True (($output -join ' ') -like ('*' + $marker + '*')) 'Fresh process did not execute every required evidence scenario.'
+        }
+    }
 }
 finally {
     Remove-Item -LiteralPath $script:Temporary -Recurse -Force -WhatIf:$false -Confirm:$false

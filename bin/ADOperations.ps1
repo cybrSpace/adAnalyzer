@@ -3,6 +3,476 @@
 . (Join-Path $PSScriptRoot 'ADSecret.ps1')
 . (Join-Path $PSScriptRoot 'ADFile.ps1')
 
+class ADAnalyzerEvidenceProjector {
+    ADAnalyzerEvidenceProjector() {
+    }
+
+    [object] Project([object]$Value) {
+        return $this.Project($Value, 0)
+    }
+
+    [object] Project([object]$Value, [int]$Depth) {
+        return $this.ProjectBoundFrame(@{
+                Value = $Value
+                Depth = $Depth
+            })
+    }
+
+    [object] ProjectPowerShellObject([psobject]$Value) {
+        return $this.ProjectPowerShellObject($Value, 0)
+    }
+
+    [object] ProjectPowerShellObject([psobject]$Value, [int]$Depth) {
+        return $this.ProjectBoundFrame(@{
+                Value = $Value
+                Depth = $Depth
+            })
+    }
+
+    hidden [object] ProjectBoundFrame([hashtable]$Frame) {
+        $ErrorActionPreference = 'Stop'
+        $state = $this.CreateState($Frame)
+        try {
+            while (-not $state.Done) {
+                $request = $this.Advance($state)
+                if ($state.Done) {
+                    break
+                }
+                switch ($request.Kind) {
+                    Child {
+                        $result = $this.ProjectBoundFrame($this.ChildFrame($request.Arguments))
+                        $this.Accept($state, @{
+                                Value = $result
+                            })
+                    }
+                    Presence {
+                        $result = $state.SecretService.IsPresent($request.Value)
+                        $this.Accept($state, @{
+                                Value = $result
+                            })
+                    }
+                    Enumeration {
+                        foreach ($item in $request.Value) {
+                            $arguments = $this.CreateItemRequest($state, @{
+                                    Value = $item
+                                })
+                            $result = $this.ProjectBoundFrame($this.ChildFrame($arguments))
+                            $this.AcceptItem($state, @{
+                                    Value = $result
+                                })
+                        }
+                        $this.AcceptEnumeration($state)
+                    }
+                    default {
+                        throw 'Invalid projection request.'
+                    }
+                }
+            }
+            return $state.Result
+        }
+        catch {
+            throw
+        }
+    }
+
+    hidden [hashtable] CreateState([hashtable]$Frame) {
+        $secretType = 'ADAnalyzerSecretIndicator' -as [type]
+        return @{
+            Input = $Frame.Value
+            Depth = [int]$Frame.Depth
+            Stage = 'Start'
+            Pending = $null
+            Done = $false
+            Result = $null
+            SecretService = $secretType::new()
+        }
+    }
+
+    hidden [hashtable] ChildFrame([hashtable]$Arguments) {
+        return @{
+            Value = $Arguments.InputObject
+            Depth = $Arguments.Depth
+        }
+    }
+
+    hidden [hashtable] CreateItemRequest([hashtable]$State, [hashtable]$Frame) {
+        return @{
+            InputObject = $Frame.Value
+            Depth = ($State.Depth + 1)
+        }
+    }
+
+    hidden [void] Complete([hashtable]$State, [hashtable]$Frame) {
+        $State.Result = $Frame.Value
+        $State.Pending = $null
+        $State.Done = $true
+    }
+
+    hidden [void] RequestChild([hashtable]$State, [hashtable]$Frame, [string]$Stage) {
+        $State.Stage = $Stage
+        $State.Pending = @{
+            Kind = 'Child'
+            Arguments = $this.CreateItemRequest($State, $Frame)
+        }
+    }
+
+    hidden [void] RequestPresence([hashtable]$State, [hashtable]$Frame, [string]$Stage) {
+        $State.Stage = $Stage
+        $State.Pending = @{
+            Kind = 'Presence'
+            Value = $Frame.Value
+        }
+    }
+
+    hidden [void] Accept([hashtable]$State, [hashtable]$Frame) {
+        if ($null -eq $State.Pending -or $State.Pending.Kind -notin @('Child', 'Presence')) {
+            throw 'No projection response is pending.'
+        }
+        $State.Response = $Frame.Value
+        $State.Pending = $null
+    }
+
+    hidden [void] AcceptItem([hashtable]$State, [hashtable]$Frame) {
+        if ($null -eq $State.Pending -or $State.Pending.Kind -ne 'Enumeration') {
+            throw 'No enumeration is pending.'
+        }
+        $null = $State.Items.Add($Frame.Value)
+    }
+
+    hidden [void] AcceptEnumeration([hashtable]$State) {
+        if ($null -eq $State.Pending -or $State.Pending.Kind -ne 'Enumeration') {
+            throw 'No enumeration is pending.'
+        }
+        $this.Complete($State, @{
+                Value = $State.Items.ToArray()
+            })
+    }
+
+    hidden [void] MergeFieldPresence([hashtable]$State, [string]$Name, [hashtable]$Frame) {
+        if ($null -eq $State.Presence) {
+            $State.Presence = [ordered]@{}
+        }
+        if (-not $State.Presence.Contains($Name)) {
+            $State.Presence[$Name] = @{
+                HasSource = $false
+                Present = $false
+                Name = $Name
+            }
+        }
+        $indicator = $State.Presence[$Name]
+        $indicator.HasSource = $true
+        $indicator.Present = $indicator.Present -or $Frame.Value
+        $indicator.Name = $Name
+        $State.Output[$Name] = $Frame.Value
+    }
+
+    hidden [void] FinishOrdinaryProperty([hashtable]$State) {
+        $propertyName = [string]$State.Name
+        $State.Output[$propertyName] = $State.Response
+        if ($propertyName.EndsWith('Present', [StringComparison]::OrdinalIgnoreCase)) {
+            if ($null -eq $State.Presence) {
+                $State.Presence = [ordered]@{}
+            }
+            if (-not $State.Presence.Contains($propertyName)) {
+                $State.Presence[$propertyName] = @{
+                    HasSource = $false
+                    Present = $false
+                    Name = $propertyName
+                }
+            }
+            $indicator = $State.Presence[$propertyName]
+            if ($State.Value -is [bool] -and $State.Value) {
+                $indicator.Present = $true
+            }
+            $indicator.Name = $propertyName
+        }
+    }
+
+    hidden [void] FinishRecord([hashtable]$State) {
+        $result = $State.Output
+        $presence = $State.Presence
+        if ($State.TaggedSecret -and $null -ne $presence -and
+            $presence.Contains('SecretPresent') -and $presence['SecretPresent'].HasSource) {
+            $result.Remove('SecretPresent')
+            $presence['SecretPresent'].Name = 'SecretPresent'
+        }
+        if ($State.TaggedSecret -and $State.HasPresence) {
+            $result['SecretPresent'] = $State.Present
+            if ($null -ne $presence -and $presence.Contains('SecretPresent')) {
+                $presence['SecretPresent'].Name = 'SecretPresent'
+            }
+        }
+        if ($null -ne $presence) {
+            foreach ($indicator in $presence.Values) {
+                if (-not $indicator.HasSource) {
+                    continue
+                }
+                $fieldPresent = $indicator.Present
+                if ($result[$indicator.Name] -is [bool]) {
+                    $fieldPresent = $fieldPresent -or $result[$indicator.Name]
+                }
+                $result[$indicator.Name] = [bool]$fieldPresent
+            }
+        }
+        $this.Complete($State, @{
+                Value = [pscustomobject]$result
+            })
+    }
+
+    hidden [object] Advance([hashtable]$State) {
+        while (-not $State.Done -and $null -eq $State.Pending) {
+            $InputObject = $State.Input
+            $secretService = $State.SecretService
+            switch ($State.Stage) {
+                Start {
+                    if ($null -eq $InputObject) {
+                        $this.Complete($State, @{
+                                Value = $null
+                            })
+                    }
+                    elseif ($State.Depth -gt 40) {
+                        $this.Complete($State, @{
+                                Value = '[Depth limit]'
+                            })
+                    }
+                    elseif ($InputObject -is [pscredential] -or $InputObject -is [Security.SecureString]) {
+                        $this.RequestPresence($State, @{
+                                Value = $InputObject
+                            }, 'Credential')
+                    }
+                    elseif ($InputObject -is [string]) {
+                        $this.Complete($State, @{
+                                Value = $secretService.ProjectText($InputObject)
+                            })
+                    }
+                    elseif ($InputObject -is [datetime] -or $InputObject -is [datetimeoffset]) {
+                        $this.Complete($State, @{
+                                Value = $InputObject.ToUniversalTime().ToString('o')
+                            })
+                    }
+                    elseif ($InputObject -is [guid]) {
+                        $this.Complete($State, @{
+                                Value = $InputObject.ToString('D')
+                            })
+                    }
+                    else {
+                        $inputType = $InputObject.GetType()
+                        if ($inputType.IsPrimitive -or $inputType.IsEnum -or
+                            $inputType.FullName -in @('System.Decimal', 'System.TimeSpan',
+                                'System.Numerics.BigInteger', 'System.Half', 'System.Int128', 'System.UInt128')) {
+                            $this.Complete($State, @{
+                                    Value = $InputObject
+                                })
+                        }
+                        elseif ($InputObject -is [Collections.DictionaryEntry] -or
+                            ($inputType.IsGenericType -and
+                            $inputType.GetGenericTypeDefinition().FullName -eq 'System.Collections.Generic.KeyValuePair`2')) {
+                            $State.Output = [ordered]@{}
+                            $this.RequestChild($State, @{
+                                    Value = $InputObject.Key
+                                }, 'PairKey')
+                        }
+                        elseif ($InputObject -is [Xml.XmlNode]) {
+                            $safeXml = $secretService.ProjectXml($InputObject)
+                            $this.Complete($State, @{
+                                    Value = $secretService.ProjectText($safeXml.PSBase.OuterXml)
+                                })
+                        }
+                        elseif ($InputObject -is [Collections.IEnumerable] -and
+                            $InputObject -isnot [Collections.IDictionary] -and
+                            $InputObject -isnot [pscustomobject]) {
+                            $State.Items = [Collections.ArrayList]::new()
+                            $State.Pending = @{
+                                Kind = 'Enumeration'
+                                Value = $InputObject
+                            }
+                        }
+                        else {
+                            $State.Output = [ordered]@{}
+                            $State.Presence = $null
+                            $State.Properties = [Collections.ArrayList]::new()
+                            $State.TaggedSecret = $false
+                            $State.Present = $false
+                            $State.HasPresence = $false
+                            $State.Index = 0
+                            $State.LabelIndex = 0
+                            $State.Stage = 'Labels'
+                            $properties = if ($InputObject -is [Collections.IDictionary]) {
+                                @($InputObject.Keys)
+                            }
+                            else {
+                                @($InputObject.PSObject.Properties.Name)
+                            }
+                            foreach ($name in $properties) {
+                                $null = $State.Properties.Add(@{
+                                        Name = $name
+                                    })
+                            }
+                        }
+                    }
+                }
+                Credential {
+                    $this.Complete($State, @{
+                            Value = [pscustomobject]@{
+                                SecretPresent = $State.Response
+                            }
+                        })
+                }
+                PairKey {
+                    $State.Output.Key = $State.Response
+                    if ($secretService.IsSecretName(([string]$InputObject.Key))) {
+                        $this.RequestPresence($State, @{
+                                Value = $InputObject.Value
+                            }, 'PairPresence')
+                    }
+                    else {
+                        $this.RequestChild($State, @{
+                                Value = $InputObject.Value
+                            }, 'PairValue')
+                    }
+                }
+                PairPresence {
+                    $State.Output.SecretPresent = $State.Response
+                    $this.Complete($State, @{
+                            Value = [pscustomobject]$State.Output
+                        })
+                }
+                PairValue {
+                    $State.Output.Value = $State.Response
+                    $this.Complete($State, @{
+                            Value = [pscustomobject]$State.Output
+                        })
+                }
+                Labels {
+                    $labels = @('Name', 'Attribute', 'AttributeName', 'Property',
+                        'PropertyName', 'SettingName', 'ValueName')
+                    if ($State.LabelIndex -ge $labels.Count) {
+                        $State.Stage = 'Properties'
+                        continue
+                    }
+                    $labelName = $labels[$State.LabelIndex]
+                    $State.LabelIndex++
+                    if ($secretService.IsSecretName(([string]($this.GetValueFrame(@{
+                                            Object = $InputObject
+                                            Names = @($labelName)
+                                            Default = $null
+                                        }))))) {
+                        $State.TaggedSecret = $true
+                    }
+                }
+                Properties {
+                    if ($State.Index -ge $State.Properties.Count) {
+                        $this.FinishRecord($State)
+                        continue
+                    }
+                    $State.Name = $State.Properties[$State.Index].Name
+                    $State.Index++
+                    if ($InputObject -is [Collections.IDictionary]) {
+                        $State.Value = $InputObject[$State.Name]
+                    }
+                    else {
+                        $State.Value = $InputObject.PSObject.Properties[$State.Name].Value
+                    }
+                    if ($secretService.IsSecretName(([string]$State.Name))) {
+                        $State.Flag = [string]$State.Name + 'Present'
+                        $this.RequestPresence($State, @{
+                                Value = $State.Value
+                            }, 'NamedPresence')
+                    }
+                    elseif ($State.TaggedSecret -and
+                        [string]$State.Name -in @('Value', 'Observed', 'Expected', 'Data', 'Bytes', 'RawData')) {
+                        if ($State.Name -ne 'Expected') {
+                            if ($State.Name -eq 'Observed' -and $State.Value -is [bool]) {
+                                $State.Present = $State.Present -or $State.Value
+                                $State.HasPresence = $true
+                            }
+                            else {
+                                $this.RequestPresence($State, @{
+                                        Value = $State.Value
+                                    }, 'TaggedPresence')
+                            }
+                        }
+                    }
+                    elseif ($State.TaggedSecret -and $State.Name -eq 'SecretPresent') {
+                        if ($State.Value -is [bool]) {
+                            $State.Present = $State.Present -or $State.Value
+                            $State.HasPresence = $true
+                        }
+                    }
+                    else {
+                        $this.RequestChild($State, @{
+                                Value = $State.Value
+                            }, 'OrdinaryProperty')
+                    }
+                }
+                NamedPresence {
+                    $this.MergeFieldPresence($State, $State.Flag, @{
+                            Value = $State.Response
+                        })
+                    $State.Stage = 'Properties'
+                }
+                TaggedPresence {
+                    $State.Present = $State.Present -or $State.Response
+                    $State.HasPresence = $true
+                    $State.Stage = 'Properties'
+                }
+                OrdinaryProperty {
+                    $this.FinishOrdinaryProperty($State)
+                    $State.Stage = 'Properties'
+                }
+                default {
+                    throw 'Invalid projection continuation.'
+                }
+            }
+        }
+        return $State.Pending
+    }
+
+    [object] GetValue([object]$Object, [string[]]$Names) {
+        return $this.GetValue($Object, $Names, $null)
+    }
+
+    [object] GetValue([object]$Object, [string[]]$Names, [object]$Default) {
+        return $this.GetValueFrame(@{
+                Object = $Object
+                Names = $Names
+                Default = $Default
+            })
+    }
+
+    hidden [object] GetValueForCommand([hashtable]$Frame) {
+        return $this.GetValueFrame($Frame)
+    }
+
+    hidden [object] GetValueFrame([hashtable]$Frame) {
+        $Object = $Frame.Object
+        [string[]]$Names = $Frame.Names
+        $Default = $Frame.Default
+        if ($null -eq $Object) {
+            return $Default
+        }
+        foreach ($name in $Names) {
+            if ($Object -is [Collections.IDictionary]) {
+                if (([Collections.IDictionary]$Object).Contains($name)) {
+                    return $Object[$name]
+                }
+            }
+            else {
+                $property = $Object.PSObject.Properties[$name]
+                if ($null -ne $property) {
+                    return $property.Value
+                }
+            }
+        }
+        return $Default
+    }
+}
+
+function Invoke-ADAnalyzerPresenceObservation {
+    param([AllowNull()]$Value)
+    return [ADAnalyzerSecretIndicator]::new().IsPresent($Value)
+}
+
 function Get-ADAnalyzerOperationValue {
     param(
         [AllowNull()]$Object,
@@ -10,23 +480,11 @@ function Get-ADAnalyzerOperationValue {
         [AllowNull()]$Default = $null
 
     )
-    if ($null -eq $Object) {
-        return $Default
-    }
-    foreach ($name in $Names) {
-        if ($Object -is [Collections.IDictionary]) {
-            if (([Collections.IDictionary]$Object).Contains($name)) {
-                return $Object[$name]
-            }
-        }
-        else {
-            $property = $Object.PSObject.Properties[$name]
-            if ($null -ne $property) {
-                return $property.Value
-            }
-        }
-    }
-    return $Default
+    return [ADAnalyzerEvidenceProjector]::new().GetValueForCommand(@{
+            Object = $Object
+            Names = $Names
+            Default = $Default
+        })
 }
 
 function Get-ADAnalyzerOperationSecretNames {
@@ -46,176 +504,48 @@ function ConvertTo-ADAnalyzerSafeData {
 
     )
     process {
-        if ($null -eq $InputObject) {
-            return $null
-        }
-        if ($Depth -gt 40) {
-            return '[Depth limit]'
-        }
-        if ($InputObject -is [pscredential] -or $InputObject -is [Security.SecureString]) {
-            return [pscustomobject]@{
-                SecretPresent = (Test-ADAnalyzerSecretPresence $InputObject)
+        $projector = [ADAnalyzerEvidenceProjector]::new()
+        $state = $projector.CreateState(@{
+                Value = $InputObject
+                Depth = $Depth
+            })
+        while (-not $state.Done) {
+            $request = $projector.Advance($state)
+            if ($state.Done) {
+                break
             }
-        }
-        if ($InputObject -is [string]) {
-            return Protect-ADAnalyzerSecretText $InputObject
-        }
-        if ($InputObject -is [datetime]) {
-            return $InputObject.ToUniversalTime().ToString('o')
-        }
-        if ($InputObject -is [datetimeoffset]) {
-            return $InputObject.ToUniversalTime().ToString('o')
-        }
-        if ($InputObject -is [guid]) {
-            return $InputObject.ToString('D')
-        }
-        $inputType = $InputObject.GetType()
-        if ($inputType.IsPrimitive -or
-            $inputType.IsEnum -or
-            $inputType.FullName -in @('System.Decimal',
-                'System.TimeSpan',
-                'System.Numerics.BigInteger',
-                'System.Half',
-                'System.Int128',
-                'System.UInt128')) {
-            return $InputObject
-        }
-        if ($InputObject -is [Collections.DictionaryEntry] -or
-            ($inputType.IsGenericType -and
-            $inputType.GetGenericTypeDefinition().FullName -eq 'System.Collections.Generic.KeyValuePair`2')) {
-            $pair = [ordered]@{
-                Key = (ConvertTo-ADAnalyzerSafeData -InputObject $InputObject.Key -Depth ($Depth + 1))
-            }
-            if (Test-ADAnalyzerSecretName ([string]$InputObject.Key)) {
-                $pair.SecretPresent = Test-ADAnalyzerSecretPresence $InputObject.Value
-            }
-            else {
-                $pair.Value = ConvertTo-ADAnalyzerSafeData -InputObject $InputObject.Value -Depth ($Depth + 1)
-            }
-            return [pscustomobject]$pair
-        }
-        if ($InputObject -is [Xml.XmlNode]) {
-            $safeXml = ConvertTo-ADAnalyzerSecretIndicatorXml $InputObject
-            return Protect-ADAnalyzerSecretText $safeXml.PSBase.OuterXml
-        }
-        if ($InputObject -is [Collections.IEnumerable] -and
-            $InputObject -isnot [Collections.IDictionary] -and
-            $InputObject -isnot [pscustomobject]) {
-            $items = [Collections.ArrayList]::new()
-            foreach ($item in $InputObject) {
-                $null = $items.Add((ConvertTo-ADAnalyzerSafeData -InputObject $item -Depth ($Depth + 1)))
-            }
-            return , $items.ToArray()
-        }
-        $result = [ordered]@{}
-        $presence = $null
-        $properties = if ($InputObject -is [Collections.IDictionary]) {
-            @($InputObject.Keys)
-        }
-        else {
-            @($InputObject.PSObject.Properties.Name)
-        }
-        $taggedSecret = $false
-        foreach ($labelName in @('Name', 'Attribute', 'AttributeName', 'Property', 'PropertyName', 'SettingName', 'ValueName')) {
-            if (Test-ADAnalyzerSecretName ([string](Get-ADAnalyzerOperationValue $InputObject @($labelName)))) {
-                $taggedSecret = $true
-            }
-        }
-        $present = $false
-        $hasPresence = $false
-        foreach ($name in $properties) {
-            if ($InputObject -is [Collections.IDictionary]) {
-                $value = $InputObject[$name]
-            }
-            else {
-                $value = $InputObject.PSObject.Properties[$name].Value
-            }
-            if (Test-ADAnalyzerSecretName ([string]$name)) {
-                $flag = [string]$name + 'Present'
-                # Observe every source value before combining prior evidence.
-                $fieldPresent = Test-ADAnalyzerSecretPresence $value
-                if ($null -eq $presence) {
-                    $presence = [ordered]@{}
+            switch ($request.Kind) {
+                Child {
+                    $arguments = $request.Arguments
+                    $result = ConvertTo-ADAnalyzerSafeData @arguments
+                    $projector.Accept($state, @{
+                            Value = $result
+                        })
                 }
-                if (-not $presence.Contains($flag)) {
-                    $presence[$flag] = @{
-                        HasSource = $false
-                        Present = $false
-                        Name = $flag
+                Presence {
+                    $result = Invoke-ADAnalyzerPresenceObservation $request.Value
+                    $projector.Accept($state, @{
+                            Value = $result
+                        })
+                }
+                Enumeration {
+                    foreach ($item in $request.Value) {
+                        $arguments = $projector.CreateItemRequest($state, @{
+                                Value = $item
+                            })
+                        $result = ConvertTo-ADAnalyzerSafeData @arguments
+                        $projector.AcceptItem($state, @{
+                                Value = $result
+                            })
                     }
+                    $projector.AcceptEnumeration($state)
                 }
-                $indicator = $presence[$flag]
-                $indicator.HasSource = $true
-                $indicator.Present = $indicator.Present -or $fieldPresent
-                $indicator.Name = $flag
-                $result[$flag] = $fieldPresent
-            }
-            elseif ($taggedSecret -and [string]$name -in @('Value', 'Observed', 'Expected', 'Data', 'Bytes', 'RawData')) {
-                if ($name -ne 'Expected') {
-                    $indicator = if ($name -eq 'Observed' -and $value -is [bool]) {
-                        $value
-                    }
-                    else {
-                        Test-ADAnalyzerSecretPresence $value
-                    }
-                    $present = $present -or $indicator
-                    $hasPresence = $true
-                }
-            }
-            elseif ($taggedSecret -and $name -eq 'SecretPresent') {
-                if ($value -is [bool]) {
-                    $present = $present -or $value
-                    $hasPresence = $true
-                }
-            }
-            else {
-                $propertyName = [string]$name
-                $result[$propertyName] = ConvertTo-ADAnalyzerSafeData -InputObject $value -Depth ($Depth + 1)
-                if ($propertyName.EndsWith('Present', [StringComparison]::OrdinalIgnoreCase)) {
-                    if ($null -eq $presence) {
-                        $presence = [ordered]@{}
-                    }
-                    if (-not $presence.Contains($propertyName)) {
-                        $presence[$propertyName] = @{
-                            HasSource = $false
-                            Present = $false
-                            Name = $propertyName
-                        }
-                    }
-                    $indicator = $presence[$propertyName]
-                    if ($value -is [bool] -and $value) {
-                        $indicator.Present = $true
-                    }
-                    $indicator.Name = $propertyName
+                default {
+                    throw 'Invalid projection request.'
                 }
             }
         }
-        if ($taggedSecret -and $null -ne $presence -and
-            $presence.Contains('SecretPresent') -and $presence['SecretPresent'].HasSource) {
-            # Mixed named records use the same final indicator position when
-            # their raw Secret field becomes SecretPresent on the next pass.
-            $result.Remove('SecretPresent')
-            $presence['SecretPresent'].Name = 'SecretPresent'
-        }
-        if ($taggedSecret -and $hasPresence) {
-            $result['SecretPresent'] = $present
-            if ($null -ne $presence -and $presence.Contains('SecretPresent')) {
-                $presence['SecretPresent'].Name = 'SecretPresent'
-            }
-        }
-        if ($null -ne $presence) {
-            foreach ($indicator in $presence.Values) {
-                if (-not $indicator.HasSource) {
-                    continue
-                }
-                $fieldPresent = $indicator.Present
-                if ($result[$indicator.Name] -is [bool]) {
-                    $fieldPresent = $fieldPresent -or $result[$indicator.Name]
-                }
-                $result[$indicator.Name] = [bool]$fieldPresent
-            }
-        }
-        return [pscustomobject]$result
+        return , $state.Result
     }
 }
 
