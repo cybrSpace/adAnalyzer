@@ -657,17 +657,153 @@ function Read-ADAnalyzerGpo {
     )
 }
 
+class ADAnalyzerGpoSourceNormalizer {
+    ADAnalyzerGpoSourceNormalizer() {
+    }
+
+    [pscustomobject] Normalize([object]$Policy) {
+        if ($null -eq $Policy) {
+            throw [ArgumentNullException]::new('Policy')
+        }
+
+        $ErrorActionPreference = 'Stop'
+        $normalizer = $this
+        foreach ($field in $normalizer.RecordCollections()) {
+            foreach ($record in @($Policy.$field)) {
+                if ($normalizer.IsUnsupportedRecord(@{ Record = $record })) {
+                    throw 'InputObject policy records must use package report objects or JSON objects.'
+                }
+            }
+        }
+        $xmlFiles = @(foreach ($record in @($Policy.XmlFiles)) {
+                if ($null -eq $record) {
+                    continue
+                }
+                $settings = $normalizer.NewXmlSettings()
+                $text = [IO.StringReader]::new([string]$record.Xml)
+                $reader = $null
+                try {
+                    $reader = [Xml.XmlReader]::Create($text, $settings)
+                    $document = $normalizer.NewXmlDocument()
+                    $document.Load($reader)
+                    $safe = ConvertTo-ADAnalyzerSecretIndicatorXml $document
+                }
+                catch {
+                    throw 'Provided policy XML is unreadable.'
+                }
+                finally {
+                    if ($null -ne $reader) {
+                        $reader.Dispose()
+                    }
+                    $text.Dispose()
+                }
+                $normalizer.BuildXmlFile(@{
+                    Scope = $record.Scope
+                    Kind = $record.Kind
+                    Path = $record.Path
+                    Xml = $safe.PSBase.OuterXml
+                })
+            })
+        return $this.BuildPolicy(@{
+            Path = $Policy.Path
+            SysvolVersion = $Policy.SysvolVersion
+            Files = @($Policy.Files)
+            UnparsedFiles = @($Policy.UnparsedFiles)
+            SecuritySettings = @(
+                $Policy.SecuritySettings | Where-Object {
+                    $null -ne $_
+                } | ForEach-Object {
+                    ConvertTo-ADAnalyzerSecretRecord $_
+                }
+            )
+            RegistrySettings = @(
+                $Policy.RegistrySettings | Where-Object {
+                    $null -ne $_
+                } | ForEach-Object {
+                    $record = ConvertTo-ADAnalyzerSecretRecord $_.PSObject.Copy()
+                    if ($normalizer.RequiresBinaryConversion(@{ Type = $record.Type }) -and
+                        ($null -ne $record.PSObject.Properties['Value'] -or
+                            $null -eq $record.PSObject.Properties['SecretPresent']) -and
+                        $record.Value -is [array]) {
+                        $record.Value = [byte[]]$record.Value
+                    }
+                    $record
+                }
+            )
+            IniSettings = @(
+                $Policy.IniSettings | Where-Object {
+                    $null -ne $_
+                } | ForEach-Object {
+                    ConvertTo-ADAnalyzerSecretRecord $_
+                }
+            )
+            XmlFiles = $xmlFiles
+        })
+    }
+
+    hidden [string[]] RecordCollections() {
+        return @('SecuritySettings', 'RegistrySettings', 'IniSettings', 'XmlFiles', 'Files', 'UnparsedFiles')
+    }
+
+    hidden [bool] IsUnsupportedRecord([hashtable]$InputFrame) {
+        $record = $InputFrame.Record
+        return $null -ne $record -and
+            ($record -is [Collections.IDictionary] -or
+                $record -is [string] -or
+                $record -is [ValueType] -or
+                $record -isnot [pscustomobject])
+    }
+
+    hidden [Xml.XmlReaderSettings] NewXmlSettings() {
+        $settings = [Xml.XmlReaderSettings]::new()
+        $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+        $settings.XmlResolver = $null
+        return $settings
+    }
+
+    hidden [xml] NewXmlDocument() {
+        $document = [xml]::new()
+        $document.XmlResolver = $null
+        return $document
+    }
+
+    hidden [bool] RequiresBinaryConversion([hashtable]$InputFrame) {
+        return $InputFrame.Type -notin @(1, 2, 4, 5, 7, 11)
+    }
+
+    hidden [pscustomobject] BuildXmlFile([hashtable]$Fields) {
+        return [pscustomobject]@{
+            Scope = $Fields.Scope
+            Kind = $Fields.Kind
+            Path = $Fields.Path
+            Xml = $Fields.Xml
+        }
+    }
+
+    hidden [pscustomobject] BuildPolicy([hashtable]$Fields) {
+        return [pscustomobject]@{
+            Path = $Fields.Path
+            SysvolVersion = $Fields.SysvolVersion
+            Files = $Fields.Files
+            UnparsedFiles = $Fields.UnparsedFiles
+            SecuritySettings = $Fields.SecuritySettings
+            RegistrySettings = $Fields.RegistrySettings
+            IniSettings = $Fields.IniSettings
+            XmlFiles = $Fields.XmlFiles
+        }
+    }
+}
+
 function ConvertTo-ADAnalyzerProvidedGpoPolicy {
     # Prefetched input uses the package DTO contract, including safe XML and
     # typed registry values. Copy before projecting so caller data stays intact.
     param([Parameter(Mandatory)]$Policy)
-    foreach ($field in @('SecuritySettings', 'RegistrySettings', 'IniSettings', 'XmlFiles', 'Files', 'UnparsedFiles')) {
+
+    $normalizer = [ADAnalyzerGpoSourceNormalizer]::new()
+    # Keep native XML, property observations, and binary casts in command scope.
+    foreach ($field in $normalizer.RecordCollections()) {
         foreach ($record in @($Policy.$field)) {
-            if ($null -ne $record -and
-                ($record -is [Collections.IDictionary] -or
-                $record -is [string] -or
-                $record -is [ValueType] -or
-                $record -isnot [pscustomobject])) {
+            if ($normalizer.IsUnsupportedRecord(@{ Record = $record })) {
                 throw 'InputObject policy records must use package report objects or JSON objects.'
             }
         }
@@ -676,15 +812,12 @@ function ConvertTo-ADAnalyzerProvidedGpoPolicy {
             if ($null -eq $record) {
                 continue
             }
-            $settings = [Xml.XmlReaderSettings]::new()
-            $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
-            $settings.XmlResolver = $null
+            $settings = $normalizer.NewXmlSettings()
             $text = [IO.StringReader]::new([string]$record.Xml)
             $reader = $null
             try {
                 $reader = [Xml.XmlReader]::Create($text, $settings)
-                $document = [xml]::new()
-                $document.XmlResolver = $null
+                $document = $normalizer.NewXmlDocument()
                 $document.Load($reader)
                 $safe = ConvertTo-ADAnalyzerSecretIndicatorXml $document
             }
@@ -697,32 +830,48 @@ function ConvertTo-ADAnalyzerProvidedGpoPolicy {
                 }
                 $text.Dispose()
             }
-            [pscustomobject]@{
+            $normalizer.BuildXmlFile(@{
                 Scope = $record.Scope
                 Kind = $record.Kind
                 Path = $record.Path
                 Xml = $safe.PSBase.OuterXml
-            }
+            })
         })
-    [pscustomobject]@{
+    $normalizer.BuildPolicy(@{
         Path = $Policy.Path
         SysvolVersion = $Policy.SysvolVersion
         Files = @($Policy.Files)
         UnparsedFiles = @($Policy.UnparsedFiles)
-        SecuritySettings = @($Policy.SecuritySettings | Where-Object { $null -ne $_ } | ForEach-Object { ConvertTo-ADAnalyzerSecretRecord $_ })
-        RegistrySettings = @($Policy.RegistrySettings | Where-Object { $null -ne $_ } | ForEach-Object {
+        SecuritySettings = @(
+            $Policy.SecuritySettings | Where-Object {
+                $null -ne $_
+            } | ForEach-Object {
+                ConvertTo-ADAnalyzerSecretRecord $_
+            }
+        )
+        RegistrySettings = @(
+            $Policy.RegistrySettings | Where-Object {
+                $null -ne $_
+            } | ForEach-Object {
                 $record = ConvertTo-ADAnalyzerSecretRecord $_.PSObject.Copy()
-                if ($record.Type -notin @(1, 2, 4, 5, 7, 11) -and
+                if ($normalizer.RequiresBinaryConversion(@{ Type = $record.Type }) -and
                     ($null -ne $record.PSObject.Properties['Value'] -or
                         $null -eq $record.PSObject.Properties['SecretPresent']) -and
                     $record.Value -is [array]) {
                     $record.Value = [byte[]]$record.Value
                 }
                 $record
-            })
-        IniSettings = @($Policy.IniSettings | Where-Object { $null -ne $_ } | ForEach-Object { ConvertTo-ADAnalyzerSecretRecord $_ })
+            }
+        )
+        IniSettings = @(
+            $Policy.IniSettings | Where-Object {
+                $null -ne $_
+            } | ForEach-Object {
+                ConvertTo-ADAnalyzerSecretRecord $_
+            }
+        )
         XmlFiles = $xmlFiles
-    }
+    })
 }
 
 function Get-ADAnalyzerGpo {

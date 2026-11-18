@@ -226,6 +226,56 @@ try {
             }
         }
     }
+    $sourceNormalizerCases = [ordered]@{
+        Contracts = 10
+        Direct = 10
+    }
+    foreach ($case in $sourceNormalizerCases.Keys) {
+        Test-Gpo ('GPO source normalizer API: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $arguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                (Join-Path $PSScriptRoot 'GpoSourceNormalizerClassFixture.ps1')
+                '-Case'
+                $case
+                '-RepositoryRoot'
+                $RepositoryRoot
+            )
+
+            $fixtureErrorPreference = $ErrorActionPreference
+            try {
+                # Capture native stderr before checking the child exit code on 5.1.
+                $ErrorActionPreference = 'Continue'
+                $output = @(& $executable @arguments 2>&1)
+                $fixtureExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $fixtureErrorPreference
+            }
+
+            if ($fixtureExitCode -ne 0) {
+                throw ("GPO source normalizer fixture exited with code {0}.{1}{2}" -f
+                    $fixtureExitCode, [Environment]::NewLine, ($output -join [Environment]::NewLine))
+            }
+
+            $sentinels = @($output | Where-Object {
+                    $_ -is [string] -and $_ -clike 'PASS GPO source normalizer*'
+                })
+            Assert-Equal 1 $sentinels.Count
+            $summary = [regex]::Match($sentinels[0], ('\APASS GPO source normalizer {0} ([1-9][0-9]*)\z' -f $case))
+            $executed = 0
+            Assert-True (
+                $summary.Success -and
+                [int]::TryParse($summary.Groups[1].Value, [ref]$executed) -and
+                $executed -ge $sourceNormalizerCases[$case]
+            ) ("Fresh process did not report at least {0} GPO source normalizer {1} cases." -f
+                $sourceNormalizerCases[$case], $case)
+        }
+    }
+
     Test-Gpo 'zero-byte numeric records remain key-only inventory rather than effective values' {
         foreach ($name in @('ADProfile', 'ADPolicyAnalysis')) {
             . (Join-Path $RepositoryRoot ('bin/' + $name + '.ps1'))
