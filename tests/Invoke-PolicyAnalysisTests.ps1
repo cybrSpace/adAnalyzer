@@ -1375,6 +1375,24 @@ try {
 finally {
     Remove-Item -LiteralPath $taskTemp -Recurse -Force
 }
+
+$policyValueCases = [ordered]@{
+    Values = 180
+    Faults = 36
+    Direct = 189
+}
+foreach ($case in $policyValueCases.Keys) {
+    Test-Policy ('policy value semantics API: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'PolicyValueSemanticsFixture.ps1'
+        $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -Case $case 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw ($output -join [Environment]::NewLine)
+        }
+        $marker = 'PASS policy value semantics ' + $case + ' ' + $policyValueCases[$case]
+        Assert-Policy ($marker -cin @($output)) 'Fresh process did not execute every policy value scenario.'
+    }
+}
 Write-Host ("{0} policy-analysis tests passed; {1} failed" -f $script:Passed, $script:Failed)
 if ($script:Failed) {
     throw 'Policy-analysis tests failed'
