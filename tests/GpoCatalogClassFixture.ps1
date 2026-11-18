@@ -256,6 +256,18 @@ function New-CatalogFixtureInput([string]$Fault, [bool]$Trace) {
         gPLink = '[LDAP://{0};3]' -f $first.DistinguishedName
         gPOptions = 0
     }
+    $changingLinks = $Fault -in 'ChangingLinksNull', 'ChangingLinksMalformed'
+    if ($changingLinks) {
+        $lastText = $null
+        if ($Fault -eq 'ChangingLinksMalformed') {
+            $lastText = '[LDAP://{0};not-a-number]' -f $tail.DistinguishedName
+        }
+        $firstText = '[LDAP://{0};0] [ldap://{1};2] [LDAP://{1};1] [LDAP://{2};0]' -f
+            $middle.DistinguishedName, $first.DistinguishedName.ToLowerInvariant(), $tail.DistinguishedName
+        $secondText = '[LDAP://{0};0] [LDAP://{1};3] [LDAP://{2};2]' -f
+            $first.DistinguishedName, $middle.DistinguishedName, $tail.DistinguishedName
+        $siteLink.gPLink = $firstText
+    }
     if ($Fault -eq 'MissingOptions') {
         $domainLink.PSObject.Properties.Remove('gPOptions')
     }
@@ -271,6 +283,18 @@ function New-CatalogFixtureInput([string]$Fault, [bool]$Trace) {
         Add-CatalogFixtureGetters $first First $fields
         Add-CatalogFixtureGetters $middle Middle $fields
         Add-CatalogFixtureGetters $tail Tail $fields
+    }
+    if ($changingLinks) {
+        $domainLink.FixtureValues['LinkTexts'] = @($firstText, $secondText, $lastText)
+        $domainLink.PSObject.Properties.Remove('gPLink')
+        $domainLink | Add-Member -MemberType ScriptProperty -Name gPLink -Value {
+            $observations = @($script:Reads | Where-Object { $_ -ceq 'DomainLink.gPLink' })
+            $script:Reads.Add('DomainLink.gPLink')
+            $this.FixtureValues['LinkTexts'][$observations.Count]
+        }
+    }
+    if ($Fault -eq 'MissingLink') {
+        $domainLink.PSObject.Properties.Remove('gPLink')
     }
     if ($Fault -eq 'ChangedSelected') {
         $root.PSObject.Properties.Remove('DnsHostName')
@@ -385,14 +409,23 @@ $script:Exports = @{
     'Get-ADUser' = Get-Command Get-ADObject -CommandType Function
 }
 
+function Get-CatalogFixtureInputSnapshot {
+    # Serialization observes getters. Give each snapshot its own first observation.
+    $script:Reads.Clear()
+    try {
+        ConvertTo-CatalogFixtureJson $script:CatalogInput
+    }
+    finally {
+        $script:Reads.Clear()
+    }
+}
+
 function Start-CatalogFixture([string]$Fault, [bool]$Trace = $true) {
     $script:CatalogFault = $Fault
     $script:CatalogInput = New-CatalogFixtureInput $Fault $Trace
-    $before = ConvertTo-CatalogFixtureJson $script:CatalogInput
     $script:Queries.Clear()
-    $script:Reads.Clear()
     $script:Imports.Clear()
-    $before
+    Get-CatalogFixtureInputSnapshot
 }
 
 function Read-CatalogFixtureSignal($Item) {
@@ -526,7 +559,7 @@ function Invoke-CatalogNativeFixture(
         Caught = $caught
         Queries = $script:Queries.ToArray()
         Reads = $reads
-        SourceUnchanged = $before -ceq (ConvertTo-CatalogFixtureJson $script:CatalogInput)
+        SourceUnchanged = $before -ceq (Get-CatalogFixtureInputSnapshot)
     }
 }
 
@@ -603,12 +636,35 @@ function Assert-CatalogFixtureNativeWitness($Observation) {
     ) 'The native witness did not exercise an ordered per-row error, valid neighbors and ErrorVariable.'
 }
 
+function Assert-CatalogFixtureChangingLinks([object[]]$Rows, [string[]]$ObservedGetters) {
+    $linkReads = @($ObservedGetters | Where-Object { $_ -clike '*.gPLink' })
+    $expectedReads = @('DomainLink.gPLink', 'SiteLink.gPLink') * 3
+    Assert-CatalogBehavior ($Rows.Count -eq 3 -and ($linkReads -join '|') -ceq ($expectedReads -join '|')) (
+        'Catalog skipped a link getter or changed its policy/container traversal order.'
+    )
+    $firstLinks = @($Rows[0].Links)
+    $secondLinks = @($Rows[1].Links)
+    $lastLinks = @($Rows[2].Links)
+    Assert-CatalogBehavior ($firstLinks.Count -eq 4 -and
+        (($firstLinks | ForEach-Object StoredLinkIndex) -join '|') -ceq '1|2|1|2' -and
+        (($firstLinks | ForEach-Object BlockInheritance) -join '|') -ceq 'True|True|False|False' -and
+        $firstLinks[0].Enabled -and $firstLinks[0].Enforced -and
+        -not $firstLinks[1].Enabled -and -not $firstLinks[1].Enforced -and
+        $secondLinks.Count -eq 2 -and $secondLinks[0].StoredLinkIndex -eq 1 -and $secondLinks[1].StoredLinkIndex -eq 0 -and
+        -not $secondLinks[0].Enabled -and $secondLinks[0].Enforced -and $secondLinks[0].BlockInheritance -and
+        $secondLinks[1].Enabled -and -not $secondLinks[1].Enforced -and -not $secondLinks[1].BlockInheritance -and
+        $lastLinks.Count -eq 1 -and $lastLinks[0].StoredLinkIndex -eq 3 -and -not $lastLinks[0].BlockInheritance
+    ) 'Catalog borrowed stale link text, collapsed distinct stored ordinals or changed link scope.'
+}
+
 if ($Case -eq 'Contracts') {
     Assert-CatalogFixtureBinding
     $count = 1
     $scenarios = @(
         ,@('None', 'Default', 'InheritedContinue', 1)
         ,@('None', 'All', 'ExplicitContinue', 3)
+        ,@('ChangingLinksNull', 'All', 'ExplicitContinue', 3)
+        ,@('MissingLink', 'All', 'ExplicitContinue', 1)
         ,@('None', 'FalseAll', 'InheritedContinue', 1)
         ,@('None', 'Guid', 'ExplicitContinue', 2)
         ,@('None', 'Name', 'ExplicitContinue', 1)
@@ -636,6 +692,17 @@ if ($Case -eq 'Contracts') {
         $expected = Invoke-CatalogNativeFixture $true @scenario
         $actual = Invoke-CatalogNativeFixture $false @scenario
         $context = $scenario -join '/'
+        if ($scenario[0] -eq 'ChangingLinksNull') {
+            $rows = @($actual.Stream | Where-Object Type -eq 'Row' | ForEach-Object Value)
+            Assert-CatalogFixtureChangingLinks $rows $actual.Reads
+        }
+        if ($scenario[0] -eq 'MissingLink') {
+            $missingErrors = @($actual.Stream | Where-Object Type -eq 'Error')
+            $missingRows = @($actual.Stream | Where-Object Type -eq 'Row')
+            Assert-CatalogBehavior ($missingErrors.Count -eq 3 -and $missingRows.Count -eq 3 -and
+                $missingErrors[0].Id -like 'PropertyNotFoundStrict*'
+            ) 'A missing link field changed its native per-row error or valid output.'
+        }
         if ($context -eq 'BadGuid/All/InheritedContinue/1') {
             Assert-CatalogFixtureNativeWitness $expected
         }
@@ -661,6 +728,10 @@ foreach ($mode in @('All', 'Guid', 'Name')) {
     foreach ($arity in 1..3) {
         $baselines["$mode/$arity"] = Invoke-CatalogNativeFixture $true None $mode ExplicitContinue $arity
     }
+}
+$changingBaselines = @{}
+foreach ($fault in @('ChangingLinksNull', 'ChangingLinksMalformed')) {
+    $changingBaselines[$fault] = Invoke-CatalogNativeFixture $true $fault All ExplicitContinue
 }
 $noSite = Invoke-CatalogNativeFixture $true NoSites All ExplicitContinue
 function Get-ADAnalyzerGpo {
@@ -692,7 +763,7 @@ foreach ($mode in @('All', 'Guid', 'Name')) {
             (ConvertTo-CatalogFixtureJson $rows) -ceq (ConvertTo-CatalogFixtureJson $expectedRows) -and
             (ConvertTo-CatalogFixtureJson $script:Queries.ToArray()) -ceq (ConvertTo-CatalogFixtureJson $expected.Queries) -and
             ($observedGetterOrder -join '|') -ceq ($expected.Reads -join '|') -and
-            $before -ceq (ConvertTo-CatalogFixtureJson $script:CatalogInput)
+            $before -ceq (Get-CatalogFixtureInputSnapshot)
         ) "Direct $key changed row, link, getter, input, credential or query behavior."
         Assert-CatalogBehavior ($rows[0].Id -is [guid] -and $rows[0].CreationTime -is [datetime] -and
             $rows[0].Version -is [long] -and $rows[0].Flags -is [int] -and
@@ -758,6 +829,23 @@ Assert-CatalogBehavior ($retained.Count -eq 0 -and
     (ConvertTo-CatalogFixtureJson $again) -ceq (ConvertTo-CatalogFixtureJson $fresh)
 ) 'Reusing the catalog retained a credential or capability, or returned aliased results.'
 $count++
+
+foreach ($fault in @('ChangingLinksNull', 'ChangingLinksMalformed')) {
+    $expected = $changingBaselines[$fault]
+    $expectedRows = @($expected.Stream | Where-Object Type -eq 'Row' | ForEach-Object Value)
+    $before = Start-CatalogFixture $fault
+    $rows = @($catalog.GetAll($script:DomainName))
+    $getterOrder = $script:Reads.ToArray()
+    Assert-CatalogFixtureChangingLinks $rows $getterOrder
+    Assert-CatalogBehavior (
+        $script:Imports.Count -eq 1 -and $expected.SourceUnchanged -and
+        (ConvertTo-CatalogFixtureJson $rows) -ceq (ConvertTo-CatalogFixtureJson $expectedRows) -and
+        (ConvertTo-CatalogFixtureJson $script:Queries.ToArray()) -ceq (ConvertTo-CatalogFixtureJson $expected.Queries) -and
+        ($getterOrder -join '|') -ceq ($expected.Reads -join '|') -and
+        $before -ceq (Get-CatalogFixtureInputSnapshot)
+    ) "Reused direct catalog changed link values, getters, input or queries for $fault."
+    $count++
+}
 
 if ($Case -eq 'Direct') {
     $exe = (Get-Process -Id $PID).Path

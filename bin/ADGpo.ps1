@@ -1059,6 +1059,9 @@ class ADAnalyzerGpoCatalog {
         }
 
         $policies = [Collections.Generic.List[object]]::new()
+        # Reuse matches only after reading the current text from this container.
+        $lastLinkText = $null
+        $lastLinkMatches = $null
         foreach ($object in $objects) {
             $id = [guid]([string]$object.Name).Trim('{}')
             if ($selection -eq 'Guid' -and $catalog.RejectGuid($id, $Guid)) {
@@ -1069,9 +1072,25 @@ class ADAnalyzerGpoCatalog {
             }
 
             $policyLinks = [Collections.ArrayList]::new()
+            $containerIndex = -1
             foreach ($container in $links) {
+                $containerIndex++
                 $storedIndex = 0
-                foreach ($match in [regex]::Matches([string]$container.gPLink, $linkPattern)) {
+                $linkText = $null
+                $linkText = [string]$container.gPLink
+                if ($null -eq $linkText) {
+                    continue
+                }
+                if ($null -eq $lastLinkMatches) {
+                    $lastLinkMatches = [object[]]::new($links.Count)
+                    $lastLinkText = [string[]]::new($links.Count)
+                }
+                if ($null -eq $lastLinkMatches[$containerIndex] -or
+                    -not [string]::Equals($lastLinkText[$containerIndex], $linkText, [StringComparison]::Ordinal)) {
+                    $lastLinkMatches[$containerIndex] = [regex]::Matches($linkText, $linkPattern)
+                    $lastLinkText[$containerIndex] = $linkText
+                }
+                foreach ($match in $lastLinkMatches[$containerIndex]) {
                     if ($match.Groups['dn'].Value -ieq $object.DistinguishedName) {
                         $options = [int]$match.Groups['flags'].Value
                         $null = $policyLinks.Add($catalog.BuildLink(@{
@@ -1151,6 +1170,9 @@ function Get-ADAnalyzerGpo {
         $links += @(Get-ADObject -SearchBase ($queries.SiteBasePrefix + $rootDse.ConfigurationNamingContext) @linkQuery @connection)
     }
 
+    # Keep the original link getter and conversion in this native scope.
+    $lastLinkText = $null
+    $lastLinkMatches = $null
     foreach ($object in $objects) {
         # A failed native cast under Continue leaves the variable unchanged.
         $id = $null
@@ -1166,9 +1188,25 @@ function Get-ADAnalyzerGpo {
         }
 
         $policyLinks = [Collections.ArrayList]::new()
+        $containerIndex = -1
         foreach ($container in $links) {
+            $containerIndex++
             $storedIndex = 0
-            foreach ($match in [regex]::Matches([string]$container.gPLink, $linkPattern)) {
+            $linkText = $null
+            $linkText = [string]$container.gPLink
+            if ($null -eq $linkText) {
+                continue
+            }
+            if ($null -eq $lastLinkMatches) {
+                $lastLinkMatches = [object[]]::new($links.Count)
+                $lastLinkText = [string[]]::new($links.Count)
+            }
+            if ($null -eq $lastLinkMatches[$containerIndex] -or
+                -not [string]::Equals($lastLinkText[$containerIndex], $linkText, [StringComparison]::Ordinal)) {
+                $lastLinkMatches[$containerIndex] = [regex]::Matches($linkText, $linkPattern)
+                $lastLinkText[$containerIndex] = $linkText
+            }
+            foreach ($match in $lastLinkMatches[$containerIndex]) {
                 if ($match.Groups['dn'].Value -ieq $object.DistinguishedName) {
                     $options = $null
                     $options = [int]$match.Groups['flags'].Value
