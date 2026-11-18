@@ -1317,14 +1317,17 @@ $observations = @(foreach ($kind in @('Xml', 'Preferences')) {
             }
         }
     }) + @(Measure-WriterRecord Preferences Xml AfterBinary)
-ConvertTo-Json -InputObject $observations -Depth 5 -Compress
+ConvertTo-Json -InputObject ([ordered]@{
+        Observations = $observations
+    }) -Depth 6 -Compress
 '@
     $engine = (Get-Process -Id $PID).Path
     $writerOutput = @(& $engine -NoLogo -NoProfile -NonInteractive -File $writerProbe -RepositoryRoot $RepositoryRoot 2>&1)
     if ($LASTEXITCODE -ne 0 -or $writerOutput.Count -ne 1) {
         throw 'The isolated raw writer fixture did not return its observations.'
     }
-    $writerObservations = @(ConvertFrom-Json -InputObject ([string]$writerOutput[0]))
+    $writerReport = ConvertFrom-Json -InputObject ([string]$writerOutput[0])
+    $writerObservations = $writerReport.Observations
     Assert-Equal 9 $writerObservations.Count
     foreach ($observation in $writerObservations) {
         Test-Gpo ('strict raw writer isolates ' + $observation.Scenario) {
