@@ -1394,6 +1394,23 @@ foreach ($case in $policyValueCases.Keys) {
     }
 }
 
+$replayConversionCases = [ordered]@{
+    Continue = 5
+    Compatibility = 13
+}
+foreach ($case in $replayConversionCases.Keys) {
+    Test-Policy ('Registry replay conversion: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'RegistryReplayConversionFixture.ps1'
+        $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -Case $case 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw ($output -join [Environment]::NewLine)
+        }
+        $marker = 'PASS registry replay conversion ' + $case + ' ' + $replayConversionCases[$case]
+        Assert-Policy ($marker -cin @($output)) 'Fresh process did not execute every registry replay conversion case.'
+    }
+}
+
 $gpoParserCases = [ordered]@{
     Records = 41
     Faults = 13

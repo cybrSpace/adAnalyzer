@@ -832,8 +832,15 @@ function Get-ADAnalyzerEffectiveRegistryRecords {
     param([object[]]$RegistrySettings)
     $state = @{}
     foreach ($row in @($RegistrySettings)) {
+        # Native assignment can leave its destination unchanged after an error under Continue.
+        $keyPath = $null
+        $name = $null
         $keyPath = ([string]$row.Key).TrimEnd('\')
         $name = [string]$row.ValueName
+        if ($null -eq $keyPath -or $null -eq $name) {
+            continue
+        }
+
         if ($name -match '^\*\*del\.(.*)$') {
             $state[(Join-ADAnalyzerPolicyIdentity @($row.Hive, $keyPath, $Matches[1]))] = [pscustomobject]@{
                 Hive = $row.Hive
@@ -848,6 +855,7 @@ function Get-ADAnalyzerEffectiveRegistryRecords {
             continue
         }
         if ($name -ieq '**DeleteValues') {
+            $data = $null
             $data = if ($row.Value -is [byte[]]) {
                 [Text.Encoding]::Unicode.GetString($row.Value).TrimEnd([char]0)
             }
@@ -881,6 +889,7 @@ function Get-ADAnalyzerEffectiveRegistryRecords {
             continue
         }
         if ($name -ieq '**DeleteKeys') {
+            $data = $null
             $data = if ($row.Value -is [byte[]]) {
                 [Text.Encoding]::Unicode.GetString($row.Value).TrimEnd([char]0)
             }
