@@ -104,9 +104,11 @@ class ADAnalyzerSecretIndicator {
         if ($null -eq $Record) {
             throw [ArgumentNullException]::new('Record')
         }
+        $inputFrame = @{ Record = $Record }
         $secret = $false
         foreach ($label in @('Name', 'ValueName', 'Attribute', 'PropertyName')) {
-            if ($this.IsSecretName(([string]$Record.$label))) {
+            if ((Test-ADAnalyzerOptionalSecretRecordMember $inputFrame $label) -and
+                $this.IsSecretName(([string]$Record.$label))) {
                 $secret = $true
             }
         }
@@ -115,7 +117,8 @@ class ADAnalyzerSecretIndicator {
         }
         $result = [ordered]@{}
         $present = $false
-        if ($Record.SecretPresent -is [bool]) {
+        if ((Test-ADAnalyzerOptionalSecretRecordMember $inputFrame 'SecretPresent') -and
+            $Record.SecretPresent -is [bool]) {
             $present = $Record.SecretPresent
         }
         foreach ($property in $Record.PSObject.Properties) {
@@ -402,6 +405,37 @@ class ADAnalyzerSecretIndicator {
         )
     }
 
+}
+
+function Test-ADAnalyzerOptionalSecretRecordMember {
+    param(
+        [hashtable]$InputFrame,
+        [string]$Name
+    )
+
+    $record = $InputFrame.Record
+    # Dynamic objects can resolve members that PSObject does not list.
+    if ($record.PSObject.BaseObject -is [System.Dynamic.IDynamicMetaObjectProvider]) {
+        return $true
+    }
+    if ($record -is [Collections.IDictionary]) {
+        $type = $record.GetType()
+        $isGenericDictionary = $type.IsGenericType -and
+            $type.GetGenericTypeDefinition() -eq [Collections.Generic.Dictionary[string, object]].GetGenericTypeDefinition()
+        if ($type -notin [hashtable], [Collections.Specialized.OrderedDictionary] -and
+            -not $isGenericDictionary) {
+            # Keep custom dictionary lookup in the native member access.
+            return $true
+        }
+        if (([Collections.IDictionary]$record).Contains($Name)) {
+            return $true
+        }
+    }
+    elseif ($record -is [Collections.IEnumerable] -and $record -isnot [string]) {
+        # Keep PowerShell's member-access enumeration for these records.
+        return $true
+    }
+    return $null -ne $record.PSObject.Properties[$Name]
 }
 
 function Get-ADAnalyzerSecretNames {

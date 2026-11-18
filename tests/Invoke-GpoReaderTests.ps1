@@ -448,6 +448,211 @@ try {
         Assert-True ($report -match '<SecretPresent>true</SecretPresent>' -and
             $report -notmatch 'fixture-(xml|ini|inf|pol)-secret|REDACTED') 'Compatibility report lost presence or retained values'
     }
+
+    $strictPol = Join-Path $temp 'strict-secret-registry/Machine/Registry.pol'
+    Write-Pol $strictPol @(
+        @{
+            Key = 'Software\Fixture'
+            Name = 'FixtureNumber'
+            Type = 4
+            Bytes = [BitConverter]::GetBytes([uint32]42)
+        }
+        @{
+            Key = 'Software\Fixture'
+            Name = 'DefaultPassword'
+            Type = 1
+            Bytes = [Text.Encoding]::Unicode.GetBytes("fixture-marker`0")
+        }
+        @{
+            Key = 'Software\Fixture'
+            Name = 'Password'
+            Type = 1
+            Bytes = [byte[]]@()
+        }
+    )
+    $strictInfRoot = Join-Path $temp 'strict-secret-inf'
+    Write-Text (Join-Path $strictInfRoot 'GPT.INI') "[General]`nVersion=1"
+    Write-Text (Join-Path $strictInfRoot 'Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf') @'
+[System Access]
+MinimumPasswordLength=14
+PasswordComplexity=0
+[Registry Values]
+MACHINE\Software\Fixture\DefaultPassword=1,"fixture-marker"
+MACHINE\Software\Fixture\Password=1,""
+'@ ([Text.Encoding]::Unicode)
+
+    Add-Type -TypeDefinition @'
+using System;
+using System.Dynamic;
+
+public sealed class ADAnalyzerDynamicPolicyRecordFixture : DynamicObject
+{
+    public readonly string Value = "fixture-marker";
+    public int ObservationCount { get; private set; }
+
+    public override bool TryGetMember(GetMemberBinder binder, out object value)
+    {
+        ObservationCount++;
+        value = null;
+        if (String.Equals(binder.Name, "Name", StringComparison.OrdinalIgnoreCase))
+        {
+            value = "DefaultPassword";
+            return true;
+        }
+        if (String.Equals(binder.Name, "SecretPresent", StringComparison.OrdinalIgnoreCase))
+        {
+            value = true;
+            return true;
+        }
+        return String.Equals(binder.Name, "ValueName", StringComparison.OrdinalIgnoreCase)
+            || String.Equals(binder.Name, "Attribute", StringComparison.OrdinalIgnoreCase)
+            || String.Equals(binder.Name, "PropertyName", StringComparison.OrdinalIgnoreCase);
+    }
+}
+'@
+
+    foreach ($route in @('Command', 'Object')) {
+        foreach ($strictMode in @('Off', 'Latest')) {
+            Test-Gpo ('record projection keeps dynamic members through ' + $route + ' with strict mode ' + $strictMode) {
+                if ($strictMode -eq 'Latest') {
+                    Set-StrictMode -Version Latest
+                }
+                else {
+                    Set-StrictMode -Off
+                }
+                $record = [ADAnalyzerDynamicPolicyRecordFixture]::new()
+                Assert-True ($null -eq $record.PSObject.Properties['Name']) 'The fixture no longer uses dynamic member lookup.'
+                $projected = if ($route -eq 'Command') {
+                    ConvertTo-ADAnalyzerSecretRecord -Record $record
+                }
+                else {
+                    [ADAnalyzerSecretIndicator]::new().ProjectRecord($record)
+                }
+                Assert-True ($record.ObservationCount -gt 0 -and
+                    -not [object]::ReferenceEquals($record, $projected) -and
+                    $projected.SecretPresent -is [bool] -and
+                    $projected.SecretPresent -and
+                    $null -eq $projected.PSObject.Properties['Value']) 'Dynamic secret projection lost Boolean presence or retained a payload.'
+            }
+        }
+
+        Test-Gpo ('strict Registry.pol keeps typed rows and boolean presence through ' + $route) {
+            Set-StrictMode -Version Latest
+            $rows = @(if ($route -eq 'Command') {
+                    Read-AnalyzerRegistryPolicy -Path $strictPol -Scope Computer
+                }
+                else {
+                    [ADAnalyzerGpoReader]::new().ReadRegistryPolicy($strictPol, 'Computer')
+                })
+            Assert-Equal 3 $rows.Count
+            $ordinary = $rows | Where-Object ValueName -CEQ FixtureNumber
+            Assert-True ($ordinary.Value -is [uint32] -and $ordinary.Value -eq 42 -and
+                $ordinary.RawData -is [byte[]] -and $ordinary.RawData.Length -eq 4 -and
+                [BitConverter]::ToUInt32($ordinary.RawData, 0) -eq 42 -and
+                $null -eq $ordinary.PSObject.Properties['SecretPresent']) 'The strict reader changed a normal registry value or its bytes.'
+            $present = $rows | Where-Object ValueName -CEQ DefaultPassword
+            $absent = $rows | Where-Object ValueName -CEQ Password
+            Assert-True ($present.SecretPresent -is [bool] -and $present.SecretPresent -and
+                $absent.SecretPresent -is [bool] -and -not $absent.SecretPresent) 'The strict reader lost Boolean registry presence.'
+            foreach ($row in @($present, $absent)) {
+                foreach ($field in @('Value', 'RawData', 'Data', 'Bytes')) {
+                    Assert-True ($null -eq $row.PSObject.Properties[$field]) 'A registry presence row retained a payload field.'
+                }
+            }
+        }
+
+        Test-Gpo ('strict INF keeps typed rows and boolean presence through ' + $route) {
+            Set-StrictMode -Version Latest
+            $parsed = if ($route -eq 'Command') {
+                Read-ADAnalyzerGpo -Path $strictInfRoot
+            }
+            else {
+                [ADAnalyzerGpoReader]::new().Read($strictInfRoot)
+            }
+            $length = $parsed.SecuritySettings | Where-Object Name -CEQ MinimumPasswordLength
+            $complex = $parsed.SecuritySettings | Where-Object Name -CEQ PasswordComplexity
+            Assert-True ($length.Value -is [long] -and $length.Value -eq 14 -and
+                $complex.Value -is [bool] -and -not $complex.Value) 'The strict reader changed ordinary INF value types.'
+            foreach ($rows in @($parsed.IniSettings, $parsed.SecuritySettings)) {
+                $present = $rows | Where-Object Name -CEQ 'MACHINE\Software\Fixture\DefaultPassword'
+                $absent = $rows | Where-Object Name -CEQ 'MACHINE\Software\Fixture\Password'
+                Assert-True ($present.SecretPresent -is [bool] -and $present.SecretPresent -and
+                    $absent.SecretPresent -is [bool] -and -not $absent.SecretPresent) 'The strict reader lost Boolean INF presence.'
+                foreach ($row in @($present, $absent)) {
+                    foreach ($field in @('Value', 'RawData', 'Data', 'Bytes')) {
+                        Assert-True ($null -eq $row.PSObject.Properties[$field]) 'An INF presence row retained a payload field.'
+                    }
+                }
+            }
+        }
+
+        Test-Gpo ('strict record projection preserves ordinary references and all identity aliases through ' + $route) {
+            Set-StrictMode -Version Latest
+            $indicator = [ADAnalyzerSecretIndicator]::new()
+            $ordinary = [pscustomobject]@{
+                ValueName = 'FixtureData'
+                Value = [byte[]]@(19, 42)
+                RawData = [byte[]]@(19, 42)
+                Source = 'fixture.pol'
+            }
+            $projected = if ($route -eq 'Command') {
+                ConvertTo-ADAnalyzerSecretRecord -Record $ordinary
+            }
+            else {
+                $indicator.ProjectRecord($ordinary)
+            }
+            Assert-True ([object]::ReferenceEquals($ordinary, $projected) -and
+                [object]::ReferenceEquals($ordinary.Value, $projected.Value) -and
+                [object]::ReferenceEquals($ordinary.RawData, $projected.RawData) -and
+                $projected.Value -is [byte[]]) 'An ordinary record or its typed data was copied or changed.'
+
+            foreach ($alias in @('Name', 'ValueName', 'Attribute', 'PropertyName')) {
+                $record = [pscustomobject]@{
+                    Value = [byte[]]@()
+                    SecretPresent = ($alias -eq 'PropertyName')
+                    Source = 'fixture.pol'
+                }
+                $record | Add-Member -NotePropertyName $alias -NotePropertyValue 'Password'
+                $projected = if ($route -eq 'Command') {
+                    ConvertTo-ADAnalyzerSecretRecord -Record $record
+                }
+                else {
+                    $indicator.ProjectRecord($record)
+                }
+                Assert-True ($projected.SecretPresent -is [bool] -and
+                    $projected.SecretPresent -eq $record.SecretPresent -and
+                    $projected.Source -ceq 'fixture.pol' -and $projected.$alias -ceq 'Password' -and
+                    $null -eq $projected.PSObject.Properties['Value']) 'The projection lost an identity alias, origin, or prior presence.'
+            }
+        }
+
+        Test-Gpo ('strict record projection derives presence without a prior indicator through ' + $route) {
+            Set-StrictMode -Version Latest
+            $record = [pscustomobject]@{
+                Name = $null
+                ValueName = 'DefaultPassword'
+                Attribute = $null
+                PropertyName = $null
+                Value = 'fixture-marker'
+                RawData = [byte[]]@(4)
+                Data = 'fixture-marker'
+                Bytes = [byte[]]@(4)
+                Source = 'fixture.pol'
+            }
+            $projected = if ($route -eq 'Command') {
+                ConvertTo-ADAnalyzerSecretRecord -Record $record
+            }
+            else {
+                [ADAnalyzerSecretIndicator]::new().ProjectRecord($record)
+            }
+            Assert-True ($projected.SecretPresent -is [bool] -and $projected.SecretPresent -and
+                $projected.ValueName -ceq 'DefaultPassword' -and $projected.Source -ceq 'fixture.pol') 'The projection did not derive strict Boolean presence.'
+            foreach ($field in @('Value', 'RawData', 'Data', 'Bytes')) {
+                Assert-True ($null -eq $projected.PSObject.Properties[$field]) 'A strict projection retained a payload field.'
+            }
+        }
+    }
+
     Test-Gpo 'UTF-16 INF preserves numeric zero and boolean false' {
         Assert-Equal 0 ($parsed.SecuritySettings | Where-Object Name -eq 'MinimumPasswordLength').Value
         $value = ($parsed.SecuritySettings | Where-Object Name -eq 'PasswordComplexity').Value
