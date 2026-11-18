@@ -31,6 +31,23 @@ function Test-HostCollector([scriptblock]$Test) {
     $script:Checks++
 }
 
+function Invoke-HostRunspacePhase([string]$Name, [scriptblock]$Action) {
+    try {
+        & $Action
+    }
+    catch {
+        $cause = $_.Exception.GetBaseException()
+        $diagnostic = @(
+            ('Host collector runspace phase [{0}] failed after {1} recorded CIM events.' -f $Name, $script:Events.Count)
+            ('{0}: {1}' -f $_.FullyQualifiedErrorId, $_.Exception.Message)
+            ('{0}: {1}' -f $cause.GetType().FullName, $cause.Message)
+            $_.ScriptStackTrace
+            $cause.StackTrace
+        ) -join [Environment]::NewLine
+        throw [InvalidOperationException]::new($diagnostic, $_.Exception)
+    }
+}
+
 function Confirm-FixtureBinding($Condition, [string]$Message) {
     if (-not $Condition) {
         $script:Contracts.Add($Message)
@@ -538,11 +555,15 @@ if ($Case -eq 'Reuse') {
 
 if ($Case -eq 'Runspace') {
     Test-HostCollector {
-        $initial = $collector.Collect([string[]]@('a.fixture.invalid'), $script:Credential, [uint32]17, $profile)
+        $initial = Invoke-HostRunspacePhase 'initial collection' {
+            $collector.Collect([string[]]@('a.fixture.invalid'), $script:Credential, [uint32]17, $profile)
+        }
         Assert-HostCollector ($initial.Hosts.Count -eq 1 -and $initial.Errors.Count -eq 0) 'Initial collector was empty.'
-        $worker = [powershell]::Create()
-        try {
-            $source = @'
+        Reset-HostFixture Healthy
+        Invoke-HostRunspacePhase 'secondary load, collection and disposal' {
+            $worker = [powershell]::Create()
+            try {
+                $source = @'
 param($Root)
 $ErrorActionPreference = 'Stop'
 function New-CimSession { throw 'Unexpected CIM acquisition in test runspace.' }
@@ -557,23 +578,39 @@ if ($empty.Hosts.Count -ne 0 -or $empty.Errors.Count -ne 0) {
 }
 'Host collector loaded'
 '@
-            $result = @($worker.AddScript($source).AddArgument($RepositoryRoot).Invoke())
-            Assert-HostCollector ($result.Count -eq 1 -and [string]$result[0] -ceq 'Host collector loaded' -and
-                $worker.Streams.Error.Count -eq 0) 'Secondary runspace could not load and construct the collector.'
-        }
-        finally {
-            $worker.Dispose()
+                $result = @($worker.AddScript($source).AddArgument($RepositoryRoot).Invoke())
+                if ($worker.Streams.Error.Count -gt 0) {
+                    $failure = $worker.Streams.Error[0]
+                    throw [InvalidOperationException]::new($failure.ScriptStackTrace, $failure.Exception)
+                }
+                Assert-HostCollector ($result.Count -eq 1 -and [string]$result[0] -ceq 'Host collector loaded') `
+                    'Secondary runspace could not load and construct the collector.'
+            }
+            finally {
+                $worker.Dispose()
+            }
         }
 
-        Reset-HostFixture Healthy
-        $reused = $collector.Collect([string[]]@('b.fixture.invalid'), $script:Credential, [uint32]17, $profile)
+        $settings = Invoke-HostRunspacePhase 'construct and read profile after disposal' {
+            ([ADAnalyzerProfile]::new($profile)).ToHashtable()
+        }
+        Assert-HostCollector ($settings.Analysis.DirectoryConnection -ceq 'PSDrive' -and
+            $settings.Host.Services[0].Name -ceq $script:ServiceName -and
+            $settings.Host.RegistryRules.Count -eq 3 -and $script:Events.Count -eq 0) `
+            'Profile after disposal lost defaults or nested overrides, or called CIM.'
+
+        $reused = Invoke-HostRunspacePhase 'reuse collector after disposal' {
+            $collector.Collect([string[]]@('b.fixture.invalid'), $script:Credential, [uint32]17, $profile)
+        }
         Assert-HostCollector ($reused.Hosts.Count -eq 1 -and $reused.Hosts[0].ComputerName -ceq 'b.fixture.invalid' -and
             $reused.Hosts[0].Status -ceq 'Observed' -and $reused.Errors.Count -eq 0) 'Existing collector failed after disposing the other runspace.'
     }
     Test-HostCollector {
         Reset-HostFixture Healthy
-        $independent = [ADAnalyzerHostCollector]::new()
-        $result = $independent.Collect([string[]]@('a.fixture.invalid'), $script:Credential, [uint32]17, $profile)
+        $result = Invoke-HostRunspacePhase 'construct and use new collector after disposal' {
+            $independent = [ADAnalyzerHostCollector]::new()
+            $independent.Collect([string[]]@('a.fixture.invalid'), $script:Credential, [uint32]17, $profile)
+        }
         Assert-HostCollector ($result.Hosts.Count -eq 1 -and $result.Hosts[0].ComputerName -ceq 'a.fixture.invalid' -and
             $result.Hosts[0].Status -ceq 'Observed' -and $result.Errors.Count -eq 0) 'Fresh collector failed after disposing the other runspace.'
     }

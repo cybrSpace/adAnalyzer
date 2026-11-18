@@ -2541,13 +2541,22 @@ foreach ($case in $hostCollectorCases.Keys) {
     Invoke-DirectoryTest ('host collector: ' + $case) {
         $executable = (Get-Process -Id $PID).Path
         $fixture = Join-Path $PSScriptRoot 'HostCollectorClassFixture.ps1'
-        $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -RepositoryRoot $RepositoryRoot -Case $case 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            $diagnostics = @($output | Where-Object { [string]$_ -cnotlike 'HOST NATIVE OBSERVATION *' })
+        $process = & {
+            $ErrorActionPreference = 'Continue'
+            $PSNativeCommandUseErrorActionPreference = $false
+            $lines = @(& $executable -NoLogo -NoProfile -NonInteractive -File $fixture `
+                    -RepositoryRoot $RepositoryRoot -Case $case 2>&1)
+            [pscustomobject]@{
+                ExitCode = $LASTEXITCODE
+                Lines = $lines
+            }
+        }
+        if ($process.ExitCode -ne 0) {
+            $diagnostics = @($process.Lines | Where-Object { [string]$_ -cnotlike 'HOST NATIVE OBSERVATION *' })
             throw ($diagnostics -join [Environment]::NewLine)
         }
         $expected = 'PASS host collector {0} {1}' -f $case, $hostCollectorCases[$case]
-        $sentinels = @($output | Where-Object { [string]$_ -clike 'PASS host collector *' })
+        $sentinels = @($process.Lines | Where-Object { [string]$_ -clike 'PASS host collector *' })
         Assert-DirectoryTrue ($sentinels.Count -eq 1 -and [string]$sentinels[0] -ceq $expected) 'Fresh process did not execute every selected host collector check.'
     }
 }

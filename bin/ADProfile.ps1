@@ -44,41 +44,13 @@ function ConvertTo-ADAnalyzerHashtable {
     return $InputObject
 }
 
-class ADAnalyzerProfile {
-    hidden [object]$Settings
-
-    ADAnalyzerProfile() {
-        $this.Initialize($null)
+# Profile initialization uses instance methods so a secondary Windows
+# PowerShell runspace cannot rebind its default and merge operations.
+class ADAnalyzerProfileDefinition {
+    ADAnalyzerProfileDefinition() {
     }
 
-    ADAnalyzerProfile([object]$Profile) {
-        $this.Initialize($Profile)
-    }
-
-    hidden [void] Initialize([object]$Profile) {
-        $result = [ADAnalyzerProfile]::DefaultSnapshot()
-        if ($null -ne $Profile) {
-            $overrides = ConvertTo-ADAnalyzerHashtable $Profile
-            if ($overrides -isnot [hashtable]) {
-                throw 'Profile must be a dictionary'
-            }
-            [ADAnalyzerProfile]::MergeInto($result, $overrides, '')
-        }
-
-        $this.ValidateCommon($result)
-        $this.ValidateRules($result)
-        $this.ValidateHostRules($result)
-        $this.Settings = [Activator]::CreateInstance(
-            ('ADAnalyzer.ConfigurationState' -as [type]),
-            [object[]]@($result)
-        )
-    }
-
-    [hashtable] ToHashtable() {
-        return (ConvertTo-ADAnalyzerHashtable $this.Settings.GetProfile())
-    }
-
-    static [hashtable] DefaultSnapshot() {
+    [hashtable] CreateSnapshot() {
         # Return a fresh graph on every call; a scan must not change another scan's rules.
         return @{
             SchemaVersion = 1
@@ -162,7 +134,7 @@ class ADAnalyzerProfile {
         }
     }
 
-    hidden static [void] MergeInto(
+    [void] MergeInto(
         [hashtable]$Defaults,
         [hashtable]$Overrides,
         [string]$Prefix
@@ -179,13 +151,63 @@ class ADAnalyzerProfile {
                     $Defaults[$key] = $Overrides[$key]
                 }
                 else {
-                    [ADAnalyzerProfile]::MergeInto($Defaults[$key], $Overrides[$key], ($Prefix + $key + '.'))
+                    $this.MergeInto($Defaults[$key], $Overrides[$key], ($Prefix + $key + '.'))
                 }
             }
             else {
                 $Defaults[$key] = $Overrides[$key]
             }
         }
+    }
+}
+
+class ADAnalyzerProfile {
+    hidden [object]$Settings
+
+    ADAnalyzerProfile() {
+        $this.Initialize($null)
+    }
+
+    ADAnalyzerProfile([object]$Profile) {
+        $this.Initialize($Profile)
+    }
+
+    hidden [void] Initialize([object]$Profile) {
+        $definition = [ADAnalyzerProfileDefinition]::new()
+        $result = $definition.CreateSnapshot()
+        if ($null -ne $Profile) {
+            $overrides = ConvertTo-ADAnalyzerHashtable $Profile
+            if ($overrides -isnot [hashtable]) {
+                throw 'Profile must be a dictionary'
+            }
+            $definition.MergeInto($result, $overrides, '')
+        }
+
+        $this.ValidateCommon($result)
+        $this.ValidateRules($result)
+        $this.ValidateHostRules($result)
+        $this.Settings = [Activator]::CreateInstance(
+            ('ADAnalyzer.ConfigurationState' -as [type]),
+            [object[]]@($result)
+        )
+    }
+
+    [hashtable] ToHashtable() {
+        return (ConvertTo-ADAnalyzerHashtable $this.Settings.GetProfile())
+    }
+
+    static [hashtable] DefaultSnapshot() {
+        $definition = [ADAnalyzerProfileDefinition]::new()
+        return $definition.CreateSnapshot()
+    }
+
+    hidden static [void] MergeInto(
+        [hashtable]$Defaults,
+        [hashtable]$Overrides,
+        [string]$Prefix
+    ) {
+        $definition = [ADAnalyzerProfileDefinition]::new()
+        $definition.MergeInto($Defaults, $Overrides, $Prefix)
     }
 
     static [ADAnalyzerProfile] Load([string]$Path) {
@@ -235,8 +257,9 @@ class ADAnalyzerProfile {
             }
             $result.Policy[$name] = $number
         }
+        $definition = [ADAnalyzerProfileDefinition]::new()
         foreach ($section in @('Analysis', 'Policy', 'Remediation')) {
-            $default = [ADAnalyzerProfile]::DefaultSnapshot()
+            $default = $definition.CreateSnapshot()
             foreach ($key in $default[$section].Keys) {
                 if ($default[$section][$key] -is [bool] -and $result[$section][$key] -isnot [bool]) {
                     throw "$section.$key must be a boolean"
