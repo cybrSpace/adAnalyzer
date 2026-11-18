@@ -1146,11 +1146,17 @@ function ConvertTo-ADAnalyzerSafeData {
 }
 '@
 $script:EvidenceOracleCalls = 0
+$script:EvidenceLookupOracleCalls = 0
 
 function Get-EvidenceOracleSource {
-    return $script:EvidenceLegacyCommands.Replace(
+    $text = $script:EvidenceLegacyCommands.Replace(
         '    process {',
         '    process {' + [Environment]::NewLine + '        $script:EvidenceOracleCalls++'
+    )
+    return $text.Replace(
+        '    if ($null -eq $Object) {',
+        '    $script:EvidenceLookupOracleCalls++' + [Environment]::NewLine +
+        '    if ($null -eq $Object) {'
     )
 }
 
@@ -1171,6 +1177,33 @@ function Get-EvidenceOracleCapture([string]$Name, [string]$Preference) {
         Assert-Evidence ($script:EvidenceOracleCalls -gt 0) 'The accepted test oracle did not execute.'
     }
     return $result
+}
+
+function Get-EvidenceHistoricalBusiness($Capture) {
+    $value = Get-EvidenceComparable $Capture
+    # Native diagnostic formatting is verified against the accepted same-engine
+    # oracle. The immutable 7.6 baseline supplies the cross-runtime business data.
+    $value.PSObject.Properties.Remove('StreamErrors')
+    $value.PSObject.Properties.Remove('RecordedErrors')
+    if ($value.Name -in @('OneArrayPipeline', 'EmptyArrayPipeline', 'WrappedExplicit', 'WrappedPipeline')) {
+        foreach ($row in $value.Rows) {
+            if ($row.Type -eq 'System.Management.Automation.PSCustomObject') {
+                $count = @($row.Properties | Where-Object Name -ceq Count)
+                $row.Properties = @($row.Properties | Where-Object Name -cne Count) + $count
+            }
+        }
+    }
+    return $value
+}
+
+function Assert-EvidenceParity($Actual, $Expected, [string]$Message) {
+    $actualText = ConvertTo-EvidenceJson (Get-EvidenceComparable $Actual)
+    $expectedText = ConvertTo-EvidenceJson (Get-EvidenceComparable $Expected)
+    if ($actualText -cne $expectedText) {
+        Write-Host ('Expected accepted engine: ' + $expectedText)
+        Write-Host ('Actual current engine: ' + $actualText)
+    }
+    Assert-Evidence ($actualText -ceq $expectedText) $Message
 }
 
 function Invoke-EvidenceObjectScenario($Scenario, $Service, [bool]$RetainBinding) {
@@ -1500,17 +1533,46 @@ try {
     $baseline = Get-Content -LiteralPath $baselinePath -Raw -Encoding UTF8 | ConvertFrom-Json
     Assert-Evidence ($baseline.SourceSha256 -ceq $acceptedSource) 'Frozen source identity changed.'
     $service = [ADAnalyzerEvidenceProjector]::new()
+    $runtimeExpected = @{}
+    if ($Case -in @('Characterization', 'Direct', 'Binding', 'Ownership')) {
+        $script:EvidenceOracleCalls = 0
+        $script:EvidenceLookupOracleCalls = 0
+        $acceptedCaptures = @(& {
+                param($Text)
+                . ([scriptblock]::Create($Text))
+                foreach ($scenario in @(Get-EvidenceScenarios)) {
+                    Get-EvidenceCapture $scenario
+                }
+            } (Get-EvidenceOracleSource))
+        Assert-Evidence ($acceptedCaptures.Count -eq $scenarios.Count -and
+            $script:EvidenceOracleCalls -gt 0 -and
+            $script:EvidenceLookupOracleCalls -gt 0) 'The accepted same-engine characterization did not execute.'
+        foreach ($capture in $acceptedCaptures) {
+            Assert-Evidence (-not $runtimeExpected.ContainsKey($capture.Name)) 'Duplicate accepted scenario.'
+            $runtimeExpected[$capture.Name] = $capture
+            $frozen = @($baseline.Results | Where-Object Name -ceq $capture.Name)
+            Assert-Evidence ($frozen.Count -eq 1) 'An immutable baseline scenario is missing.'
+            if ($PSVersionTable.PSEdition -eq 'Desktop') {
+                $actualBusiness = ConvertTo-EvidenceJson (Get-EvidenceHistoricalBusiness $capture)
+                $frozenBusiness = ConvertTo-EvidenceJson (Get-EvidenceHistoricalBusiness $frozen[0])
+                if ($actualBusiness -cne $frozenBusiness) {
+                    Write-Host ('Frozen business: ' + $frozenBusiness)
+                    Write-Host ('Accepted native business: ' + $actualBusiness)
+                }
+                Assert-Evidence ($actualBusiness -ceq $frozenBusiness) ('Accepted native business differs from immutable data: ' + $capture.Name)
+            }
+            else {
+                Assert-EvidenceParity $capture $frozen[0] ('Accepted engine differs from immutable baseline: ' + $capture.Name)
+            }
+        }
+    }
+    $script:EvidenceOracleCalls = 0
+    $script:EvidenceLookupOracleCalls = 0
     switch ($Case) {
         Characterization {
             foreach ($scenario in $scenarios) {
-                $expected = @($baseline.Results | Where-Object Name -ceq $scenario.Name)
-                Assert-Evidence ($expected.Count -eq 1) 'Frozen scenario is missing.'
                 $actual = Get-EvidenceCapture $scenario
-                if ((ConvertTo-EvidenceJson (Get-EvidenceComparable $actual)) -cne (ConvertTo-EvidenceJson (Get-EvidenceComparable $expected[0]))) {
-                    Write-Host ('Expected frozen: ' + (ConvertTo-EvidenceJson (Get-EvidenceComparable $expected[0])))
-                    Write-Host ('Actual frozen: ' + (ConvertTo-EvidenceJson (Get-EvidenceComparable $actual)))
-                }
-                Assert-Evidence ((ConvertTo-EvidenceJson (Get-EvidenceComparable $actual)) -ceq (ConvertTo-EvidenceJson (Get-EvidenceComparable $expected[0]))) ('Frozen output changed: ' + $scenario.Name)
+                Assert-EvidenceParity $actual $runtimeExpected[$scenario.Name] ('Accepted command output changed: ' + $scenario.Name)
                 $script:EvidenceExecuted++
             }
             Assert-EvidenceMissingCapabilities $capabilities
@@ -1776,24 +1838,18 @@ try {
                 if ($scenario.Route -in @('Pipeline', 'PipelineOne') -or $scenario.Name -eq 'WrappedExplicit') {
                     continue
                 }
-                $expected = @($baseline.Results | Where-Object Name -ceq $scenario.Name)[0]
+                $expected = $runtimeExpected[$scenario.Name]
                 $actual = Get-EvidenceCapture $scenario Stop $service
-                Assert-Evidence (
-                    (ConvertTo-EvidenceJson (Get-EvidenceComparable $actual)) -ceq
-                    (ConvertTo-EvidenceJson (Get-EvidenceComparable $expected))
-                ) ('Direct method changed business output: ' + $scenario.Name)
+                Assert-EvidenceParity $actual $expected ('Direct method changed business output: ' + $scenario.Name)
                 $script:EvidenceExecuted++
             }
             Assert-EvidenceMissingCapabilities $capabilities
         }
         Binding {
             foreach ($scenario in @($scenarios | Where-Object Group -eq Binding)) {
-                $expected = @($baseline.Results | Where-Object Name -ceq $scenario.Name)[0]
+                $expected = $runtimeExpected[$scenario.Name]
                 $actual = Get-EvidenceCapture $scenario Stop $service $true
-                Assert-Evidence (
-                    (ConvertTo-EvidenceJson (Get-EvidenceComparable $actual)) -ceq
-                    (ConvertTo-EvidenceJson (Get-EvidenceComparable $expected))
-                ) ('Command frame lost binding facts: ' + $scenario.Name)
+                Assert-EvidenceParity $actual $expected ('Command frame lost binding facts: ' + $scenario.Name)
                 $script:EvidenceExecuted++
             }
             $wrapped = [Management.Automation.PSObject]::AsPSObject([object[]]@(1, 2))
@@ -1825,12 +1881,9 @@ try {
                 Set-Item -Path ('Function:' + $name) -Value { throw 'Legacy processor was called.' }
             }
             foreach ($scenario in $scenarios) {
-                $expected = @($baseline.Results | Where-Object Name -ceq $scenario.Name)[0]
+                $expected = $runtimeExpected[$scenario.Name]
                 $actual = Get-EvidenceCapture $scenario Stop $service $true
-                Assert-Evidence (
-                    (ConvertTo-EvidenceJson (Get-EvidenceComparable $actual)) -ceq
-                    (ConvertTo-EvidenceJson (Get-EvidenceComparable $expected))
-                ) ('Class processing depends on a legacy command: ' + $scenario.Name)
+                Assert-EvidenceParity $actual $expected ('Class processing depends on a legacy command: ' + $scenario.Name)
                 $script:EvidenceExecuted++
             }
             Assert-EvidenceMissingCapabilities $capabilities
@@ -1844,7 +1897,9 @@ try {
                         $node.GetCommandName() -in $legacyNames },
                     $true))
             $loops = @($class.FindAll({ param($node) $node -is [Management.Automation.Language.ForEachStatementAst] }, $true))
-            Assert-Evidence ($calls.Count -eq 0 -and $loops.Count -ge 3) 'The class is a facade around function-owned processing.'
+            Assert-Evidence ($calls.Count -eq 0 -and $loops.Count -ge 3 -and
+                $script:EvidenceOracleCalls -eq 0 -and
+                $script:EvidenceLookupOracleCalls -eq 0) 'The class is a facade around function-owned processing.'
             $script:EvidenceExecuted++
         }
         Isolation {
