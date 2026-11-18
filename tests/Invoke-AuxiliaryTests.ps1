@@ -950,6 +950,203 @@ if((`$rows -join ',') -ne 'Display One,Display Two'){throw 'Explicit name CLI fa
         Assert-Equal 0 $script:ReportCalls.Count
     }
 
+    Invoke-AuxiliaryTest 'offline GPO XML isolates malformed rows under strict uncaught Continue' {
+        $fixture = Join-Path $script:Temporary 'offline-xml-row-isolation.ps1'
+        Write-FixtureText $fixture @'
+param([string]$RepositoryRoot)
+
+$ErrorActionPreference = 'Stop'
+$xmlScript = Join-Path $RepositoryRoot 'etc/Get-GPOXML.ps1'
+. $xmlScript
+
+function Import-Module {
+    throw 'The offline fixture attempted to import a live provider.'
+}
+
+Set-StrictMode -Version Latest
+
+function Test-Record([Xml.XmlElement]$Record, [string]$Label, [string]$Value) {
+    $nameNode = $Record.SelectSingleNode('./Name')
+    $valueNode = $Record.SelectSingleNode('./Value')
+    return (
+        $null -ne $nameNode -and
+        $null -ne $valueNode -and
+        $nameNode.PSBase.InnerText -ceq $Label -and
+        $valueNode.PSBase.InnerText -ceq $Value
+    )
+}
+
+function Test-OfflineRow(
+    [string]$Kind,
+    [string]$Missing,
+    [string]$Position,
+    [string]$InputShape,
+    [string]$EntryPoint
+) {
+    $prior = [pscustomobject]@{
+        Scope = 'Computer'
+        Hive = 'HKLM'
+        Key = 'Software\Fixture'
+        ValueName = 'Prior'
+        Type = 7
+        Source = 'Machine/fixture.ini'
+        Section = 'Fixture'
+        Name = 'Prior'
+        Analyzed = $false
+        Value = 'prior-value'
+    }
+    $current = $prior.PSObject.Copy()
+    $current.Name = 'Current'
+    $current.ValueName = 'Current'
+    $current.Value = 'current-value'
+    $current.PSObject.Properties.Remove($Missing)
+    $tail = $prior.PSObject.Copy()
+    $tail.Name = 'Tail'
+    $tail.ValueName = 'Tail'
+    $tail.Value = 'tail-value'
+    $rows = @(
+        if ($Position -eq 'Middle') {
+            $prior
+        }
+        $current
+        $tail
+    )
+
+    $policy = [pscustomobject]@{
+        Path = 'fixture'
+        SysvolVersion = 1
+        SecuritySettings = @()
+        RegistrySettings = @()
+        IniSettings = @()
+        XmlFiles = @()
+        Files = @()
+        UnparsedFiles = @()
+    }
+    if ($Kind -eq 'Registry') {
+        $policy.RegistrySettings = $rows
+        $prefix = 'HKLM\Software\Fixture\'
+    }
+    else {
+        $policy.IniSettings = $rows
+        $prefix = 'Machine/fixture.ini: [Fixture] '
+    }
+    $report = [pscustomobject]@{
+        Gpo = [pscustomobject]@{
+            Id = [guid]'11111111-1111-1111-1111-111111111111'
+            DisplayName = 'Fixture'
+            Domain = 'example.invalid'
+            Server = 'dc.example.invalid'
+            Flags = 0
+            Version = 1
+            Links = @()
+        }
+        Policy = $policy
+    }
+    if ($InputShape -eq 'Json') {
+        $report = ConvertTo-Json -InputObject $report -Depth 16 -Compress | ConvertFrom-Json
+    }
+    $before = ConvertTo-Json -InputObject $report -Depth 16 -Compress
+
+    # There must be no enclosing try around the native Continue call.
+    $ErrorActionPreference = 'Continue'
+    $stream = @(
+        if ($EntryPoint -eq 'Command') {
+            Get-ADAnalyzerGpoXml -InputObject $report 2>&1
+        }
+        else {
+            & $xmlScript -InputObject $report 2>&1
+        }
+    )
+    $ErrorActionPreference = 'Stop'
+    $scenario = "$Kind $Missing $Position $InputShape $EntryPoint"
+    if ($stream.Count -ne 2 -or
+        $stream[0] -isnot [Management.Automation.ErrorRecord] -or
+        ($stream[0].FullyQualifiedErrorId -split ',', 2)[0] -cne 'PropertyNotFoundStrict' -or
+        $stream[0].Exception.GetBaseException().Message -notlike ("*'{0}'*" -f $Missing) -or
+        $stream[1] -isnot [string]) {
+        throw "$scenario did not emit one missing-field error followed by XML."
+    }
+    if ((ConvertTo-Json -InputObject $report -Depth 16 -Compress) -cne $before) {
+        throw "$scenario changed the prefetched report."
+    }
+
+    $document = [xml]$stream[1]
+    $records = $document.SelectNodes(('/GPO/Computer/ExtensionData[Name="{0}"]/Extension/Record' -f $Kind))
+    $index = $rows.Count - 2
+    if ($records.Count -ne $rows.Count -or
+        ($index -eq 1 -and -not (Test-Record $records[0] ($prefix + 'Prior') 'prior-value')) -or
+        -not (Test-Record $records[($index + 1)] ($prefix + 'Tail') 'tail-value')) {
+        throw "$scenario changed its valid neighboring rows."
+    }
+
+    $label = if ($Missing -eq 'Value') {
+        $prefix + 'Current'
+    }
+    else {
+        ''
+    }
+    $value = if ($Missing -eq 'Value') {
+        ''
+    }
+    else {
+        'current-value'
+    }
+    if (-not (Test-Record $records[$index] $label $value)) {
+        return $scenario
+    }
+}
+
+$fields = [ordered]@{
+    Registry = @('Value', 'Hive', 'Key', 'ValueName')
+    Ini = @('Value', 'Source', 'Section', 'Name')
+}
+$count = 0
+$mismatches = @(foreach ($kind in $fields.Keys) {
+        foreach ($field in $fields[$kind]) {
+            foreach ($position in @('First', 'Middle')) {
+                foreach ($shape in @('Native', 'Json')) {
+                    foreach ($entry in @('Command', 'Standalone')) {
+                        Test-OfflineRow $kind $field $position $shape $entry
+                        $count++
+                    }
+                }
+            }
+        }
+    })
+if ($mismatches.Count) {
+    throw ('{0} of {1} offline rows borrowed another row or lost their own fields: {2}' -f
+        $mismatches.Count, $count, ($mismatches -join ', '))
+}
+Write-Output ('PASS offline XML row isolation ' + $count)
+'@
+        $executable = (Get-Process -Id $PID).Path
+        $arguments = @(
+            '-NoLogo'
+            '-NoProfile'
+            '-NonInteractive'
+            '-File'
+            $fixture
+            '-RepositoryRoot'
+            $RepositoryRoot
+        )
+        $fixtureErrorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $output = @(& $executable @arguments 2>&1)
+            $fixtureExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $fixtureErrorPreference
+        }
+
+        if ($fixtureExitCode -ne 0) {
+            throw ($output -join [Environment]::NewLine)
+        }
+        Assert-True (
+            $output.Count -eq 1 -and $output[0] -ceq 'PASS offline XML row isolation 64'
+        ) 'The isolated process did not execute all offline XML row cases.'
+    }
+
     Invoke-AuxiliaryTest 'XML retains actual identity and Unicode metadata without fabricating optional fields' {
         $metadata = $script:ReportA.Gpo.PSObject.Copy()
         $metadata.PSObject.Properties.Remove('Domain')

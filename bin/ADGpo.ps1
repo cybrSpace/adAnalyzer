@@ -1132,6 +1132,9 @@ function ConvertTo-AnalyzerGpoXml {
             $null = Add-AnalyzerGpoXmlNode $doc $ext 'Name' $kind
             $body = Add-AnalyzerGpoXmlNode $doc $ext 'Extension'
             foreach ($row in $rows) {
+                # A failed native read must leave this record's field empty.
+                $label = $null
+                $value = $null
                 $record = Add-AnalyzerGpoXmlNode $doc $body 'Record'
                 if ($kind -eq 'Registry') {
                     $label = '{0}\{1}\{2}' -f $row.Hive, $row.Key, $row.ValueName

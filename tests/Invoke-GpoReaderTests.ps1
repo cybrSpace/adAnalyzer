@@ -1213,6 +1213,127 @@ public sealed class ADAnalyzerDictionaryRecordFixture : Hashtable
         Assert-True (($data | ConvertTo-Json -Depth 30) -notmatch 'unit12-secret|REDACTED') 'Unknown setting retained secret payload'
         Assert-Equal $text (Get-Content -LiteralPath $path -Raw)
     }
+    $writerProbe = Join-Path $temp 'raw-writer-isolation.ps1'
+    Write-Text $writerProbe @'
+param([string]$RepositoryRoot)
+
+$ErrorActionPreference = 'Stop'
+. (Join-Path $RepositoryRoot 'bin/ADGpo.ps1')
+Set-StrictMode -Version Latest
+
+function New-XmlFixture([string]$Kind, [string]$Id) {
+    [pscustomobject]@{
+        Scope = 'Computer'
+        Kind = $Kind
+        Path = "Machine/$Id.xml"
+        Xml = "<Fixture id='$Id' />"
+    }
+}
+
+function Test-Neighbor($Node, [string]$Id) {
+    $Node.SelectSingleNode('Name').InnerText -ceq "Machine/$Id.xml" -and
+        $Node.SelectSingleNode('Value').InnerText -ceq "<Fixture id='$Id' />"
+}
+
+function Measure-WriterRecord([string]$Kind, [string]$Missing, [string]$Position) {
+    $malformed = New-XmlFixture $Kind 'malformed'
+    $malformed.PSObject.Properties.Remove($Missing)
+    $rows = @($malformed, (New-XmlFixture $Kind 'tail'))
+    if ($Position -eq 'Middle') {
+        $rows = @((New-XmlFixture $Kind 'prefix')) + $rows
+    }
+    $policy = [pscustomobject]@{
+        SysvolVersion = 1
+        Files = @()
+        SecuritySettings = @()
+        RegistrySettings = @()
+        IniSettings = @()
+        XmlFiles = $rows
+    }
+    if ($Position -eq 'AfterBinary') {
+        $policy.RegistrySettings = @([pscustomobject]@{
+            Scope = 'Computer'
+            Hive = 'HKLM'
+            Key = 'Software\Fixture'
+            ValueName = 'FixtureBinary'
+            Type = 3
+            Value = [byte[]]@(19, 42)
+        })
+    }
+    $gpo = [pscustomobject]@{
+        Version = 1
+        Flags = 0
+        Links = @()
+    }
+    $before = ConvertTo-Json -InputObject $policy -Depth 12 -Compress
+    $ErrorActionPreference = 'Continue'
+    $stream = @(ConvertTo-AnalyzerGpoXml -Gpo $gpo -Parsed $policy 2>&1)
+    $ErrorActionPreference = 'Stop'
+    $primaryError = $stream.Count -eq 2 -and $stream[0] -is [Management.Automation.ErrorRecord] -and
+        $stream[0].FullyQualifiedErrorId -like 'PropertyNotFoundStrict*' -and
+        $stream[0].Exception.GetBaseException().Message -match ("'" + $Missing + "'") -and $stream[1] -is [string]
+    $prefixPreserved = $false
+    $tailPreserved = $false
+    $affectedEmpty = $false
+    $otherPreserved = $false
+    if ($primaryError) {
+        $xml = [xml]$stream[1]
+        $items = @($xml.SelectNodes("/GPO/Computer/ExtensionData[Name='$Kind']/Extension/Record"))
+        if ($items.Count -eq $rows.Count) {
+            $prefixPreserved = $Position -ne 'Middle' -or (Test-Neighbor $items[0] 'prefix')
+            $tailPreserved = Test-Neighbor $items[-1] 'tail'
+            $affected = $items[-2]
+            $name = $affected.SelectSingleNode('Name')
+            $value = $affected.SelectSingleNode('Value')
+            if ($Missing -eq 'Path') {
+                $affectedEmpty = $null -ne $name -and $name.InnerText.Length -eq 0
+                $otherPreserved = $value.InnerText -ceq "<Fixture id='malformed' />"
+            }
+            else {
+                $affectedEmpty = $null -ne $value -and $value.InnerText.Length -eq 0
+                $otherPreserved = $name.InnerText -ceq 'Machine/malformed.xml'
+            }
+        }
+        if ($Position -eq 'AfterBinary') {
+            $binary = $xml.SelectSingleNode("/GPO/Computer/ExtensionData[Name='Registry']/Extension/Record/Value")
+            $prefixPreserved = $null -ne $binary -and $binary.InnerText -ceq [Convert]::ToBase64String([byte[]]@(19, 42))
+        }
+    }
+    [pscustomobject]@{
+        Scenario = "$Kind/$Missing/$Position"
+        PrimaryError = $primaryError
+        PrefixPreserved = $prefixPreserved
+        TailPreserved = $tailPreserved
+        AffectedEmpty = $affectedEmpty
+        OtherPreserved = $otherPreserved
+        Unchanged = $before -ceq (ConvertTo-Json -InputObject $policy -Depth 12 -Compress)
+    }
+}
+
+$observations = @(foreach ($kind in @('Xml', 'Preferences')) {
+        foreach ($missing in @('Path', 'Xml')) {
+            foreach ($position in @('First', 'Middle')) {
+                Measure-WriterRecord $kind $missing $position
+            }
+        }
+    }) + @(Measure-WriterRecord Preferences Xml AfterBinary)
+ConvertTo-Json -InputObject $observations -Depth 5 -Compress
+'@
+    $engine = (Get-Process -Id $PID).Path
+    $writerOutput = @(& $engine -NoLogo -NoProfile -NonInteractive -File $writerProbe -RepositoryRoot $RepositoryRoot 2>&1)
+    if ($LASTEXITCODE -ne 0 -or $writerOutput.Count -ne 1) {
+        throw 'The isolated raw writer fixture did not return its observations.'
+    }
+    $writerObservations = @(ConvertFrom-Json -InputObject ([string]$writerOutput[0]))
+    Assert-Equal 9 $writerObservations.Count
+    foreach ($observation in $writerObservations) {
+        Test-Gpo ('strict raw writer isolates ' + $observation.Scenario) {
+            Assert-True ($observation.PrimaryError -and $observation.PrefixPreserved -and
+                $observation.TailPreserved -and $observation.OtherPreserved -and $observation.Unchanged) 'The malformed row changed the error, valid rows, or source.'
+            Assert-True $observation.AffectedEmpty 'The malformed row borrowed the previous label or value.'
+        }
+    }
+
     Test-Gpo 'named registry preference secrets are absent from reader and canonical XML values' {
         $namedRoot = Join-Path $temp 'named-xml-secret'
         $path = Join-Path $namedRoot 'Machine/Preferences/Registry/Registry.xml'
