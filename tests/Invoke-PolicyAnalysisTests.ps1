@@ -1623,6 +1623,25 @@ foreach ($case in $policyValueCases.Keys) {
     }
 }
 
+$securityCatalogueCases = [ordered]@{
+    Records = 9
+    Stream = 4
+    Faults = 8
+    Direct = 11
+}
+foreach ($case in $securityCatalogueCases.Keys) {
+    Test-Policy ('GPO security catalogue API: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'GpoSecurityCatalogueFixture.ps1'
+        $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -Case $case 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw ($output -join [Environment]::NewLine)
+        }
+        $marker = 'PASS GPO security catalogue ' + $case + ' ' + $securityCatalogueCases[$case]
+        Assert-Policy ($marker -cin @($output)) 'Fresh process did not execute every security catalogue API case.'
+    }
+}
+
 $applicabilityCases = [ordered]@{
     Records = 31
     Faults = 16

@@ -173,6 +173,14 @@ $targetedApplicability = $policyEvaluator.GetApplicability($gpoMetadata, 'Comput
 
 The method returns `Applicable`, `NotApplicable`, or `Unknown` from the policy scope, links, targeting, WMI filter and profile. The direct call surfaces a failed flag conversion as an exception. The compatibility command retains native error continuation.
 
+The evaluator also provides the ordered security specification catalogue. The method accepts the same raw profile settings and supplies the usual defaults for missing settings.
+
+```powershell
+$securitySpecifications = $policyEvaluator.GetSecuritySpecifications($profile)
+```
+
+Each call builds 22 fresh specification records. The compatibility command streams the 15 fixed records before reading the profile for its seven configured records. The direct method returns the complete catalogue together.
+
 `ADAnalyzerMembershipGraph` captures a minimal, independent group graph and owns iterative membership resolution. `Resolve(object, domainSid, privilegedSids)` returns the existing membership DTO, including primary groups, ordered transitive SIDs, cycle witnesses, and unresolved evidence. Repeated resolutions reuse the index without retaining earlier results. The constructor retains only copied DN/SID/parent identities in private .NET state, so input credentials and unrelated group properties are not captured or serialized. Modern collection and SIDHistory evaluation reuse one graph per call. The compatibility index builder deliberately retains its original mutable `ByDn`/`BySid` maps and group references; the compatibility resolver honors supplied aliases transiently.
 
 `ADAnalyzerDirectoryPolicyEvaluator` owns directory rule evaluation across domain/coverage, accounts and duplicate SPNs, trusts/ACLs, resultant password policies, and host observations. Its inert constructor retains no data or configuration. `Evaluate(data, profile)` accepts the existing raw/partial profile contract and returns complete ordered checks or throws. `Test-ADAnalyzerDirectoryPolicy` remains the command interface, including streamed checks before a late error, common parameters, and the underlying diagnostic cause.

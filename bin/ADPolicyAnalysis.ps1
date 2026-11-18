@@ -1110,169 +1110,27 @@ function Get-ADAnalyzerEffectiveRegistryRecords {
 
 function Get-ADAnalyzerSecuritySpecifications {
     param([hashtable]$Profile)
-    $definitions = @(
-        ,
-        @('RequireSecuritySignature',
-            'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters',
-            'Microsoft network server: Digitally sign communications (always)',
-            $true)
-        ,
-        @('EnableSecuritySignature',
-            'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters',
-            'Microsoft network server: Digitally sign communications (if client agrees)',
-            $true)
-        ,
-        @('RequireSecuritySignature',
-            'SYSTEM\CurrentControlSet\Services\LanManWorkstation\Parameters',
-            'Microsoft network client: Digitally sign communications (always)',
-            $true)
-        ,
-        @('EnableSecuritySignature',
-            'SYSTEM\CurrentControlSet\Services\LanManWorkstation\Parameters',
-            'Microsoft network client: Digitally sign communications (if server agrees)',
-            $true)
-        ,
-        @('EnablePlainTextPassword',
-            'SYSTEM\CurrentControlSet\Services\LanManWorkstation\Parameters',
-            'Microsoft network client: Send unencrypted password to third-party SMB servers',
-            $false)
-        ,
-        @('RequireSignOrSeal',
-            'SYSTEM\CurrentControlSet\Services\NetLogon\Parameters',
-            'Domain member: Digitally encrypt or sign secure channel data (always)',
-            $true)
-        ,
-        @('SealSecureChannel',
-            'SYSTEM\CurrentControlSet\Services\NetLogon\Parameters',
-            'Domain member: Digitally encrypt secure channel data (when possible)',
-            $true)
-        ,
-        @('EveryoneIncludesAnonymous',
-            'SYSTEM\CurrentControlSet\Control\Lsa',
-            'Network access: Let Everyone permissions apply to anonymous users',
-            $false)
-        ,
-        @('RestrictAnonymousSAM',
-            'SYSTEM\CurrentControlSet\Control\Lsa',
-            'Network access: Do not allow anonymous enumeration of SAM accounts',
-            $true)
-        ,
-        @('RestrictAnonymous',
-            'SYSTEM\CurrentControlSet\Control\Lsa',
-            'Network access: Do not allow anonymous enumeration of SAM accounts and shares',
-            $true)
-        ,
-        @('RestrictNullSessAccess',
-            'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters',
-            'Network access: Restrict anonymous access to Named Pipes and Shares',
-            $true)
-        ,
-        @('FilterAdministratorToken',
-            'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System',
-            'User Account Control: Admin Approval Mode for the Built-in Administrator account',
-            $true)
-        ,
-        @('EnableUIADesktopToggle',
-            'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System',
-            'User Account Control: Allow UIAccess applications to prompt for elevation without using the secure desktop',
-            $false)
-        ,
-        @('EnableInstallerDetection',
-            'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System',
-            'User Account Control: Detect application installations and prompt for elevation',
-            $true)
-        ,
-        @('EnableLUA',
-            'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System',
-            'User Account Control: Run all administrators in Admin Approval Mode',
-            $true)
-    )
-    foreach ($definition in $definitions) {
-        [pscustomobject]@{
-            Id = $definition[1] + '\' + $definition[0]
-            Key = $definition[1]
-            ValueName = $definition[0]
-            Name = $definition[2]
-            Kind = 'Boolean'
-            Type = 4
-            Expected = $definition[3]
-        }
-    }
-    @(
-        [pscustomobject]@{
-            Id = 'Lsa.LmCompatibilityLevel'
-            Key = 'SYSTEM\CurrentControlSet\Control\Lsa'
-            ValueName = 'LmCompatibilityLevel'
-            Name = 'Network security: LAN Manager authentication level'
-            Kind = 'Lm'
-            Type = 4
-            Expected = (Get-ADAnalyzerPolicyProfileValue $Profile MinimumLmCompatibilityLevel 5)
-        }
-        [pscustomobject]@{
-            Id = 'NTDS.LDAPServerIntegrity'
-            Key = 'SYSTEM\CurrentControlSet\Services\NTDS\Parameters'
-            ValueName = 'LDAPServerIntegrity'
-            Name = 'Domain controller: LDAP server signing requirements'
-            Kind = 'LdapServer'
-            Type = 4
-            Expected = $(if (Get-ADAnalyzerPolicyProfileValue $Profile RequireLdapServerSigning $true) {
-                    2
-                }
-                else {
-                    'Any valid value'
-                })
-        }
-        [pscustomobject]@{
-            Id = 'LDAP.LDAPClientIntegrity'
-            Key = 'SYSTEM\CurrentControlSet\Services\LDAP'
-            ValueName = 'LDAPClientIntegrity'
-            Name = 'Network security: LDAP client signing requirements'
-            Kind = 'LdapClient'
-            Type = 4
-            Expected = $(if (Get-ADAnalyzerPolicyProfileValue $Profile RequireLdapClientSigning $true) {
-                    2
-                }
-                else {
-                    'Any valid value'
-                })
-        }
-        [pscustomobject]@{
-            Id = 'UAC.ConsentPromptBehaviorAdmin'
-            Key = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
-            ValueName = 'ConsentPromptBehaviorAdmin'
-            Name = 'User Account Control: Behavior of the elevation prompt for administrators in Admin Approval Mode'
-            Kind = 'UacPrompt'
-            Type = 4
-            Expected = 'Prompt (1-5)'
-        }
-        [pscustomobject]@{
-            Id = 'Server.NullSessionPipes'
-            Key = 'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters'
-            ValueName = 'NullSessionPipes'
-            Name = 'Network access: Named Pipes that can be accessed anonymously'
-            Kind = 'Pipes'
-            Type = 7
-            Expected = @(Get-ADAnalyzerPolicyProfileValue $Profile AllowedAnonymousPipes @('LSARPC', 'NETLOGON', 'SAMR'))
-        }
-        [pscustomobject]@{
-            Id = 'Server.NullSessionShares'
-            Key = 'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters'
-            ValueName = 'NullSessionShares'
-            Name = 'Network access: Shares that can be access anonymously'
-            Kind = 'Shares'
-            Type = 7
-            Expected = @()
-        }
-        [pscustomobject]@{
-            Id = 'LSAAnonymousNameLookup'
-            Key = $null
-            ValueName = $null
-            Name = 'Network access: Allow anonymous SID/Name translation'
-            Kind = 'Boolean'
-            Type = $null
-            Expected = $false
-        }
-    )
+    $evaluator = [ADAnalyzerGpoPolicyEvaluator]::new()
+    # Emit the fixed rows before reading any profile settings.
+    $evaluator.FixedSecuritySpecifications()
+
+    $defaults = $evaluator.GetSecuritySpecificationDefaults()
+    $evaluator.ConfiguredSecuritySpecifications(@{
+        MinimumLm = (Get-ADAnalyzerPolicyProfileValue $Profile MinimumLmCompatibilityLevel $defaults.MinimumLm)
+        ServerSigning = $(if (Get-ADAnalyzerPolicyProfileValue $Profile RequireLdapServerSigning $defaults.LdapSigning) {
+                $true
+            }
+            else {
+                $false
+            })
+        ClientSigning = $(if (Get-ADAnalyzerPolicyProfileValue $Profile RequireLdapClientSigning $defaults.LdapSigning) {
+                $true
+            }
+            else {
+                $false
+            })
+        AnonymousPipes = @(Get-ADAnalyzerPolicyProfileValue $Profile AllowedAnonymousPipes $defaults.AnonymousPipes)
+    })
 }
 
 function Test-ADAnalyzerPolicyComparison {
@@ -1370,6 +1228,213 @@ class ADAnalyzerGpoPolicyEvaluator {
             return 'Applicable'
         }
         return 'Unknown'
+    }
+
+    [object[]] GetSecuritySpecifications([hashtable]$Profile) {
+        $fixed = $this.FixedSecuritySpecifications()
+        $defaults = $this.GetSecuritySpecificationDefaults()
+        $fields = @{
+            MinimumLm = (Get-ADAnalyzerPolicyProfileValue $Profile MinimumLmCompatibilityLevel $defaults.MinimumLm)
+            ServerSigning = $(if (Get-ADAnalyzerPolicyProfileValue $Profile RequireLdapServerSigning $defaults.LdapSigning) {
+                    $true
+                }
+                else {
+                    $false
+                })
+            ClientSigning = $(if (Get-ADAnalyzerPolicyProfileValue $Profile RequireLdapClientSigning $defaults.LdapSigning) {
+                    $true
+                }
+                else {
+                    $false
+                })
+            AnonymousPipes = @(Get-ADAnalyzerPolicyProfileValue $Profile AllowedAnonymousPipes $defaults.AnonymousPipes)
+        }
+        return @($fixed + $this.ConfiguredSecuritySpecifications($fields))
+    }
+
+    hidden [hashtable] GetSecuritySpecificationDefaults() {
+        return @{
+            MinimumLm = 5
+            LdapSigning = $true
+            AnonymousPipes = @('LSARPC', 'NETLOGON', 'SAMR')
+        }
+    }
+
+    hidden [object[]] FixedSecuritySpecifications() {
+        $definitions = @(
+            ,
+            @('RequireSecuritySignature',
+                'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters',
+                'Microsoft network server: Digitally sign communications (always)',
+                $true)
+            ,
+            @('EnableSecuritySignature',
+                'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters',
+                'Microsoft network server: Digitally sign communications (if client agrees)',
+                $true)
+            ,
+            @('RequireSecuritySignature',
+                'SYSTEM\CurrentControlSet\Services\LanManWorkstation\Parameters',
+                'Microsoft network client: Digitally sign communications (always)',
+                $true)
+            ,
+            @('EnableSecuritySignature',
+                'SYSTEM\CurrentControlSet\Services\LanManWorkstation\Parameters',
+                'Microsoft network client: Digitally sign communications (if server agrees)',
+                $true)
+            ,
+            @('EnablePlainTextPassword',
+                'SYSTEM\CurrentControlSet\Services\LanManWorkstation\Parameters',
+                'Microsoft network client: Send unencrypted password to third-party SMB servers',
+                $false)
+            ,
+            @('RequireSignOrSeal',
+                'SYSTEM\CurrentControlSet\Services\NetLogon\Parameters',
+                'Domain member: Digitally encrypt or sign secure channel data (always)',
+                $true)
+            ,
+            @('SealSecureChannel',
+                'SYSTEM\CurrentControlSet\Services\NetLogon\Parameters',
+                'Domain member: Digitally encrypt secure channel data (when possible)',
+                $true)
+            ,
+            @('EveryoneIncludesAnonymous',
+                'SYSTEM\CurrentControlSet\Control\Lsa',
+                'Network access: Let Everyone permissions apply to anonymous users',
+                $false)
+            ,
+            @('RestrictAnonymousSAM',
+                'SYSTEM\CurrentControlSet\Control\Lsa',
+                'Network access: Do not allow anonymous enumeration of SAM accounts',
+                $true)
+            ,
+            @('RestrictAnonymous',
+                'SYSTEM\CurrentControlSet\Control\Lsa',
+                'Network access: Do not allow anonymous enumeration of SAM accounts and shares',
+                $true)
+            ,
+            @('RestrictNullSessAccess',
+                'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters',
+                'Network access: Restrict anonymous access to Named Pipes and Shares',
+                $true)
+            ,
+            @('FilterAdministratorToken',
+                'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System',
+                'User Account Control: Admin Approval Mode for the Built-in Administrator account',
+                $true)
+            ,
+            @('EnableUIADesktopToggle',
+                'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System',
+                'User Account Control: Allow UIAccess applications to prompt for elevation without using the secure desktop',
+                $false)
+            ,
+            @('EnableInstallerDetection',
+                'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System',
+                'User Account Control: Detect application installations and prompt for elevation',
+                $true)
+            ,
+            @('EnableLUA',
+                'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System',
+                'User Account Control: Run all administrators in Admin Approval Mode',
+                $true)
+        )
+        return @(
+            foreach ($definition in $definitions) {
+                [pscustomobject]@{
+                    Id = $definition[1] + '\' + $definition[0]
+                    Key = $definition[1]
+                    ValueName = $definition[0]
+                    Name = $definition[2]
+                    Kind = 'Boolean'
+                    Type = 4
+                    Expected = $definition[3]
+                }
+            }
+        )
+    }
+
+    hidden [object[]] ConfiguredSecuritySpecifications([hashtable]$Fields) {
+        $serverExpected = $null
+        if ($null -ne $Fields.ServerSigning) {
+            $serverExpected = $this.GetLdapSigningExpectation($Fields.ServerSigning)
+        }
+        $clientExpected = $null
+        if ($null -ne $Fields.ClientSigning) {
+            $clientExpected = $this.GetLdapSigningExpectation($Fields.ClientSigning)
+        }
+
+        return @(
+            [pscustomobject]@{
+                Id = 'Lsa.LmCompatibilityLevel'
+                Key = 'SYSTEM\CurrentControlSet\Control\Lsa'
+                ValueName = 'LmCompatibilityLevel'
+                Name = 'Network security: LAN Manager authentication level'
+                Kind = 'Lm'
+                Type = 4
+                Expected = $Fields.MinimumLm
+            }
+            [pscustomobject]@{
+                Id = 'NTDS.LDAPServerIntegrity'
+                Key = 'SYSTEM\CurrentControlSet\Services\NTDS\Parameters'
+                ValueName = 'LDAPServerIntegrity'
+                Name = 'Domain controller: LDAP server signing requirements'
+                Kind = 'LdapServer'
+                Type = 4
+                Expected = $serverExpected
+            }
+            [pscustomobject]@{
+                Id = 'LDAP.LDAPClientIntegrity'
+                Key = 'SYSTEM\CurrentControlSet\Services\LDAP'
+                ValueName = 'LDAPClientIntegrity'
+                Name = 'Network security: LDAP client signing requirements'
+                Kind = 'LdapClient'
+                Type = 4
+                Expected = $clientExpected
+            }
+            [pscustomobject]@{
+                Id = 'UAC.ConsentPromptBehaviorAdmin'
+                Key = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+                ValueName = 'ConsentPromptBehaviorAdmin'
+                Name = 'User Account Control: Behavior of the elevation prompt for administrators in Admin Approval Mode'
+                Kind = 'UacPrompt'
+                Type = 4
+                Expected = 'Prompt (1-5)'
+            }
+            [pscustomobject]@{
+                Id = 'Server.NullSessionPipes'
+                Key = 'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters'
+                ValueName = 'NullSessionPipes'
+                Name = 'Network access: Named Pipes that can be accessed anonymously'
+                Kind = 'Pipes'
+                Type = 7
+                Expected = $Fields.AnonymousPipes
+            }
+            [pscustomobject]@{
+                Id = 'Server.NullSessionShares'
+                Key = 'SYSTEM\CurrentControlSet\Services\LanManServer\Parameters'
+                ValueName = 'NullSessionShares'
+                Name = 'Network access: Shares that can be access anonymously'
+                Kind = 'Shares'
+                Type = 7
+                Expected = @()
+            }
+            [pscustomobject]@{
+                Id = 'LSAAnonymousNameLookup'
+                Key = $null
+                ValueName = $null
+                Name = 'Network access: Allow anonymous SID/Name translation'
+                Kind = 'Boolean'
+                Type = $null
+                Expected = $false
+            }
+        )
+    }
+
+    hidden [object] GetLdapSigningExpectation([bool]$Required) {
+        if ($Required) {
+            return 2
+        }
+        return 'Any valid value'
     }
 
     [object[]] Evaluate([object]$Gpo, [object]$Policy, [hashtable]$Profile) {
