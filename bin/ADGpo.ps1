@@ -1431,6 +1431,7 @@ function Get-ADAnalyzerGpoReport {
     }
     $id = [guid]$Gpo.Id
     $drive = $null
+    $completed = $false
     try {
         if ($Credential -and $Credential -ne [pscredential]::Empty) {
             $drive = New-PSDrive `
@@ -1500,10 +1501,19 @@ function Get-ADAnalyzerGpoReport {
             }
             ConvertTo-AnalyzerGpoXml $Gpo $parsed $names $status
         }
+        $completed = $true
     }
     finally {
-        if ($drive) {
+        if ($drive -and $completed) {
             Remove-PSDrive -Name $drive.Name -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false
+        }
+        elseif ($drive) {
+            try {
+                Remove-PSDrive -Name $drive.Name -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false
+            }
+            catch {
+                # Retain any pending error and the native cleanup diagnostic.
+            }
         }
     }
 }

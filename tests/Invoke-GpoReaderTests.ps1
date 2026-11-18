@@ -252,6 +252,15 @@ try {
             }
             RequireExactCaseCount = $true
         }
+        [pscustomobject]@{
+            Name = 'GPO report drive failure'
+            Script = 'GpoReportDriveFailureFixture.ps1'
+            Cases = [ordered]@{
+                Regression = 10
+                Controls = 27
+            }
+            RequireExactCaseCount = $true
+        }
     )
     foreach ($fixture in $gpoFixtures) {
         foreach ($case in $fixture.Cases.Keys) {
