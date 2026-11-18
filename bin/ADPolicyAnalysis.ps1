@@ -828,102 +828,283 @@ function ConvertFrom-ADAnalyzerLocalUsersGroups {
     }
 }
 
+class ADAnalyzerRegistryPolicyReplay {
+    ADAnalyzerRegistryPolicyReplay() {
+    }
+
+    [object[]] Replay([object[]]$RegistrySettings) {
+        $state = $this.NewState()
+        $replay = $this
+        foreach ($row in @($RegistrySettings)) {
+            $keyPath = $this.NormalizeKey([string]$row.Key)
+            $name = [string]$row.ValueName
+            $singleDeletion = $name -match $this.NamedDeletionPattern()
+            $action = $this.GetAction($name, $singleDeletion)
+            if ($action -eq 'DeleteValue') {
+                $this.PutNamedDeletion($state, @{
+                    Hive = $row.Hive
+                    Key = $row.Key
+                    ValueName = $Matches[1]
+                    Type = $row.Type
+                    Scope = $row.Scope
+                    Source = $row.Source
+                }, (Join-ADAnalyzerPolicyIdentity @($row.Hive, $keyPath, $Matches[1])))
+                continue
+            }
+
+            if ($action -in 'DeleteValues', 'DeleteKeys') {
+                $data = if ($row.Value -is [byte[]]) {
+                    $this.TrimDecodedPayload([Text.Encoding]::Unicode.GetString($row.Value))
+                }
+                else {
+                    [string]$row.Value
+                }
+                foreach ($entry in $this.SplitPayload($data)) {
+                    if ($action -eq 'DeleteValues') {
+                        $this.PutNamedDeletion($state, @{
+                            Hive = $row.Hive
+                            Key = $row.Key
+                            ValueName = $entry
+                            Type = $row.Type
+                            Scope = $row.Scope
+                            Source = $row.Source
+                        }, (Join-ADAnalyzerPolicyIdentity @($row.Hive, $keyPath, $entry)))
+                    }
+                    else {
+                        $targetKey = $this.GetSubtreeRoot($keyPath, $entry)
+                        $prefix = $this.GetDescendantPrefix($targetKey)
+                        $keys = @($state.Keys | Where-Object {
+                            $replay.Matches(@{
+                                Left = $state[$_].Hive
+                                Right = $row.Hive
+                            }) -and (
+                                $replay.Matches(@{
+                                    Left = $state[$_].Key
+                                    Right = $targetKey
+                                }) -or
+                                $replay.StartsWithPrefix([string]$state[$_].Key, $prefix)
+                            )
+                        })
+                        $this.MarkDeleted($state, $keys)
+                    }
+                }
+                continue
+            }
+
+            if ($action -eq 'DelVals') {
+                $keys = @($state.Keys | Where-Object {
+                    $replay.Matches(@{
+                        Left = $state[$_].Hive
+                        Right = $row.Hive
+                    }) -and
+                    $replay.Matches(@{
+                        Left = $state[$_].Key
+                        Right = $row.Key
+                    })
+                })
+                $this.MarkDeleted($state, $keys)
+                continue
+            }
+
+            if ($action -eq 'Write' -and $this.CanWrite(@{ KeyOnly = $row.KeyOnly })) {
+                $copy = [ordered]@{}
+                foreach ($property in $row.PSObject.Properties) {
+                    $copy[$property.Name] = $property.Value
+                }
+                $this.PutRecord($state, $this.CreateWriteRecord($copy),
+                    (Join-ADAnalyzerPolicyIdentity @($row.Hive, $keyPath, $name)))
+            }
+        }
+        return @($state.Values)
+    }
+
+    hidden [hashtable] NewState() {
+        return @{}
+    }
+
+    hidden [string] NormalizeKey([string]$Key) {
+        return $Key.TrimEnd('\')
+    }
+
+    hidden [string] NamedDeletionPattern() {
+        return '^\*\*del\.(.*)$'
+    }
+
+    hidden [string] GetAction([string]$Name, [bool]$SingleDeletion) {
+        if ($SingleDeletion) {
+            return 'DeleteValue'
+        }
+        if ($Name -ieq '**DeleteValues') {
+            return 'DeleteValues'
+        }
+        if ($Name -ieq '**DelVals') {
+            return 'DelVals'
+        }
+        if ($Name -ieq '**DeleteKeys') {
+            return 'DeleteKeys'
+        }
+        if ($Name.StartsWith('**')) {
+            return 'Ignore'
+        }
+        return 'Write'
+    }
+
+    hidden [string] TrimDecodedPayload([string]$Text) {
+        return $Text.TrimEnd([char]0)
+    }
+
+    hidden [string[]] SplitPayload([string]$Payload) {
+        return @($Payload -split ';' | Where-Object { $_ })
+    }
+
+    hidden [string] GetSubtreeRoot([string]$Key, [string]$Entry) {
+        return $Key + '\' + $Entry.TrimEnd('\')
+    }
+
+    hidden [string] GetDescendantPrefix([string]$Root) {
+        return $Root + '\'
+    }
+
+    hidden [bool] Matches([hashtable]$Operands) {
+        return $Operands.Left -ieq $Operands.Right
+    }
+
+    hidden [bool] StartsWithPrefix([string]$Key, [string]$Prefix) {
+        return $Key.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase)
+    }
+
+    hidden [bool] CanWrite([hashtable]$InputFrame) {
+        return -not $InputFrame.KeyOnly
+    }
+
+    hidden [void] PutNamedDeletion([hashtable]$State, [hashtable]$Fields, [string]$Identity) {
+        $record = [pscustomobject]@{
+            Hive = $Fields.Hive
+            Key = $Fields.Key
+            ValueName = $Fields.ValueName
+            Value = $null
+            Type = $Fields.Type
+            Scope = $Fields.Scope
+            Source = $Fields.Source
+            Deleted = $true
+        }
+        $this.PutRecord($State, $record, $Identity)
+    }
+
+    hidden [pscustomobject] CreateWriteRecord([Collections.Specialized.OrderedDictionary]$Fields) {
+        $Fields.Deleted = $false
+        return [pscustomobject]$Fields
+    }
+
+    hidden [void] PutRecord([hashtable]$State, [pscustomobject]$Record, [string]$Identity) {
+        $State[$Identity] = $Record
+    }
+
+    hidden [void] MarkDeleted([hashtable]$State, [string[]]$Keys) {
+        foreach ($key in $Keys) {
+            if ($null -ne $State[$key].PSObject.Properties['Value']) {
+                $State[$key].Value = $null
+            }
+            if ($null -ne $State[$key].PSObject.Properties['SecretPresent']) {
+                $State[$key].SecretPresent = $false
+            }
+            $State[$key].Deleted = $true
+        }
+    }
+}
+
 function Get-ADAnalyzerEffectiveRegistryRecords {
     param([object[]]$RegistrySettings)
-    $state = @{}
+    $replay = [ADAnalyzerRegistryPolicyReplay]::new()
+    $state = $replay.NewState()
     foreach ($row in @($RegistrySettings)) {
-        # Native assignment can leave its destination unchanged after an error under Continue.
+        # Preserve native conversion errors without reusing a previous row.
         $keyPath = $null
         $name = $null
-        $keyPath = ([string]$row.Key).TrimEnd('\')
+        $keyPath = $replay.NormalizeKey([string]$row.Key)
         $name = [string]$row.ValueName
         if ($null -eq $keyPath -or $null -eq $name) {
             continue
         }
 
-        if ($name -match '^\*\*del\.(.*)$') {
-            $state[(Join-ADAnalyzerPolicyIdentity @($row.Hive, $keyPath, $Matches[1]))] = [pscustomobject]@{
+        # Capture the regular expression match in the command scope.
+        $singleDeletion = $name -match $replay.NamedDeletionPattern()
+        $action = $replay.GetAction($name, $singleDeletion)
+        if ($action -eq 'DeleteValue') {
+            $replay.PutNamedDeletion($state, @{
                 Hive = $row.Hive
                 Key = $row.Key
                 ValueName = $Matches[1]
-                Value = $null
                 Type = $row.Type
                 Scope = $row.Scope
                 Source = $row.Source
-                Deleted = $true
-            }
+            }, (Join-ADAnalyzerPolicyIdentity @($row.Hive, $keyPath, $Matches[1])))
             continue
         }
-        if ($name -ieq '**DeleteValues') {
+
+        if ($action -in 'DeleteValues', 'DeleteKeys') {
             $data = $null
             $data = if ($row.Value -is [byte[]]) {
-                [Text.Encoding]::Unicode.GetString($row.Value).TrimEnd([char]0)
+                $replay.TrimDecodedPayload([Text.Encoding]::Unicode.GetString($row.Value))
             }
             else {
                 [string]$row.Value
             }
-            foreach ($entry in @($data -split ';' | Where-Object { $_ })) {
-                $state[(Join-ADAnalyzerPolicyIdentity @($row.Hive, $keyPath, $entry))] = [pscustomobject]@{
-                    Hive = $row.Hive
-                    Key = $row.Key
-                    ValueName = $entry
-                    Value = $null
-                    Type = $row.Type
-                    Scope = $row.Scope
-                    Source = $row.Source
-                    Deleted = $true
+            foreach ($entry in $replay.SplitPayload($data)) {
+                if ($action -eq 'DeleteValues') {
+                    $replay.PutNamedDeletion($state, @{
+                        Hive = $row.Hive
+                        Key = $row.Key
+                        ValueName = $entry
+                        Type = $row.Type
+                        Scope = $row.Scope
+                        Source = $row.Source
+                    }, (Join-ADAnalyzerPolicyIdentity @($row.Hive, $keyPath, $entry)))
+                }
+                else {
+                    # Native filtering retains one observation per candidate and its own errors.
+                    $targetKey = $replay.GetSubtreeRoot($keyPath, $entry)
+                    $prefix = $replay.GetDescendantPrefix($targetKey)
+                    $keys = @($state.Keys | Where-Object {
+                        $replay.Matches(@{
+                            Left = $state[$_].Hive
+                            Right = $row.Hive
+                        }) -and (
+                            $replay.Matches(@{
+                                Left = $state[$_].Key
+                                Right = $targetKey
+                            }) -or
+                            $replay.StartsWithPrefix([string]$state[$_].Key, $prefix)
+                        )
+                    })
+                    $replay.MarkDeleted($state, $keys)
                 }
             }
             continue
         }
-        if ($name -ieq '**DelVals') {
-            foreach ($key in @($state.Keys | Where-Object { $state[$_].Hive -ieq $row.Hive -and $state[$_].Key -ieq $row.Key })) {
-                if ($null -ne $state[$key].PSObject.Properties['Value']) {
-                    $state[$key].Value = $null
-                }
-                if ($null -ne $state[$key].PSObject.Properties['SecretPresent']) {
-                    $state[$key].SecretPresent = $false
-                }
-                $state[$key].Deleted = $true
-            }
+
+        if ($action -eq 'DelVals') {
+            $keys = @($state.Keys | Where-Object {
+                $replay.Matches(@{
+                    Left = $state[$_].Hive
+                    Right = $row.Hive
+                }) -and
+                $replay.Matches(@{
+                    Left = $state[$_].Key
+                    Right = $row.Key
+                })
+            })
+            $replay.MarkDeleted($state, $keys)
             continue
         }
-        if ($name -ieq '**DeleteKeys') {
-            $data = $null
-            $data = if ($row.Value -is [byte[]]) {
-                [Text.Encoding]::Unicode.GetString($row.Value).TrimEnd([char]0)
-            }
-            else {
-                [string]$row.Value
-            }
-            foreach ($entry in @($data -split ';' | Where-Object { $_ })) {
-                $targetKey = $keyPath + '\' + $entry.TrimEnd('\')
-                $prefix = $targetKey + '\'
-                foreach ($key in @($state.Keys | Where-Object { $state[$_].Hive -ieq $row.Hive -and
-                            ($state[$_].Key -ieq $targetKey -or
-                            ([string]$state[$_].Key).StartsWith($prefix,
-                                [StringComparison]::OrdinalIgnoreCase)) })) {
-                    if ($null -ne $state[$key].PSObject.Properties['Value']) {
-                        $state[$key].Value = $null
-                    }
-                    if ($null -ne $state[$key].PSObject.Properties['SecretPresent']) {
-                        $state[$key].SecretPresent = $false
-                    }
-                    $state[$key].Deleted = $true
-                }
-            }
-            continue
-        }
-        if ($name.StartsWith('**')) {
-            continue
-        }
-        if (-not $row.KeyOnly) {
+
+        if ($action -eq 'Write' -and $replay.CanWrite(@{ KeyOnly = $row.KeyOnly })) {
             $copy = [ordered]@{}
             foreach ($property in $row.PSObject.Properties) {
                 $copy[$property.Name] = $property.Value
             }
-            $copy.Deleted = $false
-            $state[(Join-ADAnalyzerPolicyIdentity @($row.Hive, $keyPath, $name))] = [pscustomobject]$copy
+            $replay.PutRecord($state, $replay.CreateWriteRecord($copy),
+                (Join-ADAnalyzerPolicyIdentity @($row.Hive, $keyPath, $name)))
         }
     }
     $state.Values

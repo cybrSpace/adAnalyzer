@@ -1394,6 +1394,24 @@ foreach ($case in $policyValueCases.Keys) {
     }
 }
 
+$registryReplayCases = [ordered]@{
+    Records = 12
+    Faults = 8
+    Direct = 14
+}
+foreach ($case in $registryReplayCases.Keys) {
+    Test-Policy ('Registry policy replay API: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'RegistryPolicyReplayFixture.ps1'
+        $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -Case $case 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw ($output -join [Environment]::NewLine)
+        }
+        $marker = 'PASS registry policy replay ' + $case + ' ' + $registryReplayCases[$case]
+        Assert-Policy ($marker -cin @($output)) 'Fresh process did not execute every registry replay API case.'
+    }
+}
+
 $replayConversionCases = [ordered]@{
     Continue = 5
     Compatibility = 13
