@@ -2,7 +2,7 @@
 param(
     [ValidateSet('VerifyOriginal', 'Records', 'Faults', 'Direct', 'Uncaught')]
     [string]$Case = 'Records',
-    [ValidateSet('InvalidFlags', 'OverflowFlags', 'EnabledGetter')]
+    [ValidateSet('InvalidFlags', 'OverflowFlags', 'EnabledGetter', 'AssumptionTruthiness')]
     [string]$Fault = 'InvalidFlags',
     [switch]$Original
 )
@@ -113,7 +113,7 @@ $script:Records = @(
     'MultiBlankWmi', 'Wmi', 'AssumptionFalse', 'AssumptionTruthy', 'TraceAll', 'TraceTargeted',
     'TraceWmi', 'TraceDisabled', 'TraceLinksDisabled'
 )
-$script:Faults = @('InvalidFlags', 'OverflowFlags', 'EnabledGetter')
+$script:Faults = @('InvalidFlags', 'OverflowFlags', 'EnabledGetter', 'AssumptionTruthiness')
 
 function New-ApplicabilitySample([string]$Name) {
     $gpo = @{}
@@ -294,6 +294,28 @@ function New-ApplicabilitySample([string]$Name) {
         'OverflowFlags' {
             $gpo.Flags = [long]2147483648
         }
+        'AssumptionTruthiness' {
+            if ($null -eq ('GpoApplicabilityFaultCount' -as [type])) {
+                Add-Type @'
+using System;
+using System.Collections;
+
+public sealed class GpoApplicabilityFaultCount : ArrayList {
+    public GpoApplicabilityFaultCount() {
+        Add("placeholder");
+    }
+
+    public override int Count {
+        get { throw new InvalidOperationException("fixture truth count failure"); }
+    }
+}
+'@
+            }
+            $assumption = [object[]]::new(1)
+            $assumption[0] = [object[]]::new(1)
+            $assumption[0][0] = [GpoApplicabilityFaultCount]::new()
+            $profile.Analysis.AssumeGpoApplicable = $assumption
+        }
         default {
             throw "Unknown applicability fixture input $Name."
         }
@@ -448,7 +470,13 @@ switch ($Case) {
             foreach ($action in @('Continue', 'Stop')) {
                 $expected = Invoke-ApplicabilityCapture $name 'Original' $action $true $null
                 $actual = Invoke-ApplicabilityCapture $name 'Command' $action $true $null
-                if ($name -ne 'EnabledGetter') {
+                if ($name -eq 'AssumptionTruthiness') {
+                    Assert-Applicability ($null -ne $expected.Caught -and
+                        $expected.Caught.Cause -ceq 'System.InvalidOperationException' -and
+                        $expected.Caught.Message -ceq 'fixture truth count failure' -and
+                        $expected.Stream.Count -eq 0) "Frozen caught $name/$action did not reach native truthiness."
+                }
+                elseif ($name -ne 'EnabledGetter') {
                     Assert-Applicability ($null -ne $expected.Caught -and $expected.Caught.Id -like 'InvalidCast*' -and
                         $expected.Stream.Count -eq 0) "Frozen caught $name/$action did not reach the native cast failure."
                 }
@@ -462,7 +490,12 @@ switch ($Case) {
                 if ($action -eq 'Continue') {
                     $expected = Invoke-ApplicabilityCapture $name 'Original' $action $false $null
                     $actual = Invoke-ApplicabilityCapture $name 'Command' $action $false $null
-                    if ($name -ne 'EnabledGetter') {
+                    if ($name -eq 'AssumptionTruthiness') {
+                        Assert-Applicability ($expected.Stream.Count -eq 2 -and
+                            $expected.Stream[0].Message -ceq 'fixture truth count failure' -and
+                            $expected.Stream[1].Value -ceq 'Unknown') 'Frozen uncaught malformed assumption did not emit its error and Unknown in order.'
+                    }
+                    elseif ($name -ne 'EnabledGetter') {
                         Assert-Applicability ($expected.Stream.Count -eq 2 -and $expected.Stream[0].Id -like 'InvalidCast*' -and
                             $expected.Stream[1].Value -ceq 'Applicable') "Frozen uncaught $name did not emit its error and result in order."
                     }

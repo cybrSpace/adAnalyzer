@@ -691,7 +691,12 @@ function Get-ADAnalyzerPolicyApplicability {
     }
 
     $analysis = Get-ADAnalyzerPolicyValue $Profile Analysis @{}
-    return $evaluator.FromAssumption((Get-ADAnalyzerPolicyValue $analysis AssumeGpoApplicable $false))
+    # A native truthiness error under Continue keeps the default outcome.
+    $assumed = $false
+    if (Get-ADAnalyzerPolicyValue $analysis AssumeGpoApplicable $false) {
+        $assumed = $true
+    }
+    return $evaluator.FromAssumption($assumed)
 }
 
 function ConvertTo-ADAnalyzerPolicyNumber {

@@ -1396,7 +1396,7 @@ foreach ($case in $policyValueCases.Keys) {
 
 $applicabilityCases = [ordered]@{
     Records = 31
-    Faults = 12
+    Faults = 16
     Direct = 33
 }
 foreach ($case in $applicabilityCases.Keys) {
