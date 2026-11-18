@@ -1577,6 +1577,54 @@ foreach ($case in $checkFactoryCases.Keys) {
         Assert-True ($marker -cin @($output)) 'Fresh process did not execute every check factory case.'
     }
 }
+
+$baselineImporterCases = [ordered]@{
+    Contracts = 10
+    Direct = 10
+}
+foreach ($case in $baselineImporterCases.Keys) {
+    Test-Assessment ('baseline importer API: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $arguments = @(
+            '-NoLogo'
+            '-NoProfile'
+            '-NonInteractive'
+            '-File'
+            (Join-Path $PSScriptRoot 'BaselineImporterClassFixture.ps1')
+            '-Case'
+            $case
+            '-RepositoryRoot'
+            $RepositoryRoot
+        )
+
+        $fixtureErrorPreference = $ErrorActionPreference
+        try {
+            # Capture native stderr before checking the child exit code on 5.1.
+            $ErrorActionPreference = 'Continue'
+            $output = @(& $executable @arguments 2>&1)
+            $fixtureExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $fixtureErrorPreference
+        }
+
+        if ($fixtureExitCode -ne 0) {
+            throw ("Baseline importer fixture exited with code {0}.{1}{2}" -f
+                $fixtureExitCode, [Environment]::NewLine, ($output -join [Environment]::NewLine))
+        }
+
+        $sentinels = @($output | Where-Object { $_ -is [string] -and $_ -clike 'PASS baseline importer*' })
+        Assert-Equal 1 $sentinels.Count
+        $summary = [regex]::Match($sentinels[0], ('\APASS baseline importer {0} ([1-9][0-9]*)\z' -f $case))
+        $executed = 0
+        Assert-True (
+            $summary.Success -and
+            [int]::TryParse($summary.Groups[1].Value, [ref]$executed) -and
+            $executed -ge $baselineImporterCases[$case]
+        ) ("Fresh process did not report at least {0} baseline importer {1} cases." -f
+            $baselineImporterCases[$case], $case)
+    }
+}
 Write-Host ("{0} assessment-integration tests passed; {1} failed" -f $script:Passed, $script:Failed)
 if ($script:Failed) {
     exit 1

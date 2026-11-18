@@ -397,6 +397,201 @@ function Get-ADAnalyzerAssessment {
     $result
 }
 
+class ADAnalyzerBaselineImporter {
+    ADAnalyzerBaselineImporter() {
+    }
+
+    [hashtable] Import([string[]]$GpoPath, [string]$Version) {
+        return $this.Import($GpoPath, 'Imported GPO baseline', $Version)
+    }
+
+    [hashtable] Import([string[]]$GpoPath, [string]$Name, [string]$Version) {
+        if ($null -eq $GpoPath -or $GpoPath.Count -eq 0) {
+            throw [ArgumentException]::new('At least one baseline backup path is required.', 'GpoPath')
+        }
+        if ([string]::IsNullOrEmpty($Version)) {
+            throw [ArgumentException]::new('A baseline version is required.', 'Version')
+        }
+
+        $importer = $this
+        $state = $this.BeginImport([ADAnalyzerProfile]::DefaultSnapshot(), $Name, $Version)
+        $reader = [ADAnalyzerGpoReader]::new()
+        $replay = [ADAnalyzerRegistryPolicyReplay]::new()
+        foreach ($path in $GpoPath) {
+            if ([string]::IsNullOrEmpty($path)) {
+                throw [ArgumentException]::new('A baseline backup path cannot be empty.', 'GpoPath')
+            }
+            $policy = $reader.Read($path)
+            if (-not $policy.Files.Count) {
+                throw "No policy files in baseline: $path"
+            }
+            foreach ($row in $replay.Replay($policy.RegistrySettings)) {
+                if ($row.Deleted -or $row.DeletionDirective -or $row.KeyOnly -or (Test-ADAnalyzerSecretName $row.ValueName)) {
+                    continue
+                }
+                $identity = $importer.RegistryIdentity(@($row.Hive, $row.Key, $row.ValueName))
+                $value = ConvertTo-Json -InputObject ([ordered]@{
+                        Type = [int]$row.Type
+                        Value = $row.Value
+                    }) -Compress -Depth 20
+                $decision = $importer.RegisterIdentity($state, $identity.Identity, $value)
+                if ($decision -ne 'New') {
+                    if ($decision -eq 'Conflict') {
+                        throw "Conflicting baseline registry setting: $($identity.Key)"
+                    }
+                    continue
+                }
+                $id = $importer.RuleId('BASELINE.REGISTRY', $identity.HashTarget)
+                $importer.AddRegistryRule($state, $id, @{
+                    Hive = $row.Hive
+                    Key = $row.Key
+                    ValueName = $row.ValueName
+                    Type = [int]$row.Type
+                    Value = $row.Value
+                }, $path)
+            }
+
+            $securityGroups = @(
+                $policy.SecuritySettings | Where-Object {
+                    $importer.IsSecurityKind($_.Kind) -and -not (Test-ADAnalyzerSecretName $_.Name)
+                } | Group-Object -Property ($importer.SecurityGroupingFields())
+            )
+            foreach ($group in $securityGroups) {
+                if (@($group.Group | Where-Object { -not (Test-ADAnalyzerPolicyValueValid $_) }).Count) {
+                    throw 'Baseline contains an invalid stored policy value'
+                }
+                $row = $group.Group[0]
+                $aggregate = $group.Count -gt 1
+                $expected = if ($aggregate) {
+                    , @($group.Group | ForEach-Object Value | Sort-Object)
+                }
+                else {
+                    $row.Value
+                }
+                $key = $importer.SecurityIdentity(@($row.Scope, $row.Kind, $row.Name))
+                $value = ConvertTo-Json -InputObject $expected -Compress -Depth 20
+                $decision = $importer.RegisterIdentity($state, $key, $value)
+                if ($decision -ne 'New') {
+                    if ($decision -eq 'Conflict') {
+                        throw "Conflicting baseline security setting: $key"
+                    }
+                    continue
+                }
+                $id = $importer.RuleId('BASELINE.SECURITY', $key)
+                $importer.AddSecurityRule($state, $id, @{
+                    Kind = $row.Kind
+                    Scope = $row.Scope
+                    Name = $row.Name
+                    Aggregate = $aggregate
+                    Value = $expected
+                }, $path)
+            }
+        }
+
+        $profile = [ADAnalyzerProfile]::new($this.BuildProfile($state))
+        return $profile.ToHashtable()
+    }
+
+    hidden [hashtable] BeginImport([hashtable]$Profile, [string]$Name, [string]$Version) {
+        $Profile.Name = $Name
+        $Profile.Version = $Version
+        return @{
+            Profile = $Profile
+            Registry = [Collections.ArrayList]::new()
+            Settings = [Collections.ArrayList]::new()
+            Seen = @{}
+        }
+    }
+
+    hidden [hashtable] RegistryIdentity([object[]]$Parts) {
+        $key = ('{0}|{1}|{2}' -f $Parts).ToLowerInvariant()
+        $identity = (Join-ADAnalyzerPolicyIdentity $Parts).ToLowerInvariant()
+        $hashTarget = $key
+
+        # Keep the established hash seed when the components contain no literal pipe.
+        if ($key.Split('|').Count -gt 3) {
+            $hashTarget = $identity
+        }
+        return @{
+            Key = $key
+            Identity = $identity
+            HashTarget = $hashTarget
+        }
+    }
+
+    hidden [string] SecurityIdentity([object[]]$Parts) {
+        return ('{0}|{1}|{2}' -f $Parts).ToLowerInvariant()
+    }
+
+    hidden [string] RegisterIdentity([hashtable]$State, [string]$Identity, [object]$Value) {
+        if ($State.Seen.ContainsKey($Identity)) {
+            if ($State.Seen[$Identity] -ne $Value) {
+                return 'Conflict'
+            }
+            return 'Duplicate'
+        }
+        $State.Seen[$Identity] = $Value
+        return 'New'
+    }
+
+    hidden [string] RuleId([string]$Category, [string]$Target) {
+        $check = [ADAnalyzerCheckFactory]::new().Create($Category, 'Pass', $Target)
+        return $Category + '.' + $check.CheckId.Substring(0, 16)
+    }
+
+    hidden [void] AddRegistryRule(
+        [hashtable]$State,
+        [string]$Id,
+        [hashtable]$Fields,
+        [string]$Path
+    ) {
+        $null = $State.Registry.Add(@{
+                Id = $Id
+                Hive = $Fields.Hive
+                Key = $Fields.Key
+                ValueName = $Fields.ValueName
+                Type = $Fields.Type
+                Operator = 'Equals'
+                Expected = $Fields.Value
+                Severity = 'Medium'
+                Source = $Path
+            })
+    }
+
+    hidden [void] AddSecurityRule(
+        [hashtable]$State,
+        [string]$Id,
+        [hashtable]$Fields,
+        [string]$Path
+    ) {
+        $null = $State.Settings.Add(@{
+                Id = $Id
+                Kind = $Fields.Kind
+                Scope = $Fields.Scope
+                Name = $Fields.Name
+                Aggregate = $Fields.Aggregate
+                Operator = 'Equals'
+                Expected = $Fields.Value
+                Severity = 'Medium'
+                Source = $Path
+            })
+    }
+
+    hidden [bool] IsSecurityKind([object]$Kind) {
+        return $Kind -in 'Account', 'SecurityOptions'
+    }
+
+    hidden [string[]] SecurityGroupingFields() {
+        return @('Scope', 'Kind', 'Name')
+    }
+
+    hidden [hashtable] BuildProfile([hashtable]$State) {
+        $State.Profile.RegistryRules = $State.Registry.ToArray()
+        $State.Profile.ExpectedGpoSettings = $State.Settings.ToArray()
+        return $State.Profile
+    }
+}
+
 function Import-ADAnalyzerBaseline {
     <# Import an extracted GPO backup (including SCT backups) as stored-setting
        expectations. The input root contains Machine/User and GPT.INI, usually
@@ -409,11 +604,10 @@ function Import-ADAnalyzerBaseline {
 
     )
     $profile = Get-ADAnalyzerDefaultProfile
-    $profile.Name = $Name
-    $profile.Version = $Version
-    $registry = [Collections.ArrayList]::new()
-    $settings = [Collections.ArrayList]::new()
-    $seen = @{}
+    $importer = [ADAnalyzerBaselineImporter]::new()
+    $state = $importer.BeginImport($profile, $Name, $Version)
+
+    # Keep native reads, conversions, and throws at their original command scope.
     foreach ($path in $GpoPath) {
         $policy = Read-ADAnalyzerGpo -Path $path
         if (-not $policy.Files.Count) {
@@ -423,43 +617,33 @@ function Import-ADAnalyzerBaseline {
             if ($row.Deleted -or $row.DeletionDirective -or $row.KeyOnly -or (Test-ADAnalyzerSecretName $row.ValueName)) {
                 continue
             }
-            $parts = @($row.Hive, $row.Key, $row.ValueName)
-            $key = ('{0}|{1}|{2}' -f $parts).ToLowerInvariant()
-            $identity = (Join-ADAnalyzerPolicyIdentity $parts).ToLowerInvariant()
+            $identity = $importer.RegistryIdentity(@($row.Hive, $row.Key, $row.ValueName))
             $value = ConvertTo-Json -InputObject ([ordered]@{
                     Type = [int]$row.Type
                     Value = $row.Value
                 }) -Compress -Depth 20
-            if ($seen.ContainsKey($identity)) {
-                if ($seen[$identity] -ne $value) {
-                    throw "Conflicting baseline registry setting: $key"
+            $decision = $importer.RegisterIdentity($state, $identity.Identity, $value)
+            if ($decision -ne 'New') {
+                if ($decision -eq 'Conflict') {
+                    throw "Conflicting baseline registry setting: $($identity.Key)"
                 }
                 continue
             }
-            $seen[$identity] = $value
-            # Keep the established hash seed when the components contain no literal pipe.
-            $hashTarget = $key
-            if ($key.Split('|').Count -gt 3) {
-                $hashTarget = $identity
-            }
-            $stable = (New-ADAnalyzerCheck -RuleId 'BASELINE.REGISTRY' -Target $hashTarget -Status Pass).CheckId.Substring(0, 16)
-            $null = $registry.Add(@{
-                    Id = 'BASELINE.REGISTRY.' + $stable
-                    Hive = $row.Hive
-                    Key = $row.Key
-                    ValueName = $row.ValueName
-                    Type = [int]$row.Type
-                    Operator = 'Equals'
-                    Expected = $row.Value
-                    Severity = 'Medium'
-                    Source = $path
-                })
+            $id = $importer.RuleId('BASELINE.REGISTRY', $identity.HashTarget)
+            $importer.AddRegistryRule($state, $id, @{
+                Hive = $row.Hive
+                Key = $row.Key
+                ValueName = $row.ValueName
+                Type = [int]$row.Type
+                Value = $row.Value
+            }, $path)
         }
-        $securityGroups = @($policy.SecuritySettings | Where-Object { $_.Kind -in 'Account',
-                'SecurityOptions' -and
-                -not (Test-ADAnalyzerSecretName $_.Name) } | Group-Object Scope,
-            Kind,
-            Name)
+
+        $securityGroups = @(
+            $policy.SecuritySettings | Where-Object {
+                $importer.IsSecurityKind($_.Kind) -and -not (Test-ADAnalyzerSecretName $_.Name)
+            } | Group-Object -Property ($importer.SecurityGroupingFields())
+        )
         foreach ($group in $securityGroups) {
             if (@($group.Group | Where-Object { -not (Test-ADAnalyzerPolicyValueValid $_) }).Count) {
                 throw 'Baseline contains an invalid stored policy value'
@@ -472,30 +656,24 @@ function Import-ADAnalyzerBaseline {
             else {
                 $row.Value
             }
-            $key = ('{0}|{1}|{2}' -f $row.Scope, $row.Kind, $row.Name).ToLowerInvariant()
+            $key = $importer.SecurityIdentity(@($row.Scope, $row.Kind, $row.Name))
             $value = ConvertTo-Json -InputObject $expected -Compress -Depth 20
-            if ($seen.ContainsKey($key)) {
-                if ($seen[$key] -ne $value) {
+            $decision = $importer.RegisterIdentity($state, $key, $value)
+            if ($decision -ne 'New') {
+                if ($decision -eq 'Conflict') {
                     throw "Conflicting baseline security setting: $key"
                 }
                 continue
             }
-            $seen[$key] = $value
-            $stable = (New-ADAnalyzerCheck -RuleId 'BASELINE.SECURITY' -Target $key -Status Pass).CheckId.Substring(0, 16)
-            $null = $settings.Add(@{
-                    Id = 'BASELINE.SECURITY.' + $stable
-                    Kind = $row.Kind
-                    Scope = $row.Scope
-                    Name = $row.Name
-                    Aggregate = $aggregate
-                    Operator = 'Equals'
-                    Expected = $expected
-                    Severity = 'Medium'
-                    Source = $path
-                })
+            $id = $importer.RuleId('BASELINE.SECURITY', $key)
+            $importer.AddSecurityRule($state, $id, @{
+                Kind = $row.Kind
+                Scope = $row.Scope
+                Name = $row.Name
+                Aggregate = $aggregate
+                Value = $expected
+            }, $path)
         }
     }
-    $profile.RegistryRules = $registry.ToArray()
-    $profile.ExpectedGpoSettings = $settings.ToArray()
-    Import-ADAnalyzerProfile -Profile $profile
+    Import-ADAnalyzerProfile -Profile ($importer.BuildProfile($state))
 }

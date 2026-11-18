@@ -89,6 +89,8 @@ try {
         }
     }
     Invoke-Test 'all package PowerShell files parse without syntax errors' {
+        . (Join-Path $RepositoryRoot 'bin/ADAnalyzer.ps1')
+
         foreach ($file in Get-ChildItem -LiteralPath (Join-Path $RepositoryRoot 'bin') -File | Where-Object Extension -in '.ps1', '.psm1') {
             $tokens = $null
             $errors = $null

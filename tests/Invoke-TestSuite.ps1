@@ -85,6 +85,10 @@ if ($Mode -eq 'Quality') {
     if ($result.FailedCount -or $result.FailedBlocksCount -or $result.PassedCount -lt 1) {
         exit 1
     }
+
+    # Resolve dependencies between project classes in the analyzer's scope.
+    . (Join-Path $RepositoryRoot 'bin/ADAnalyzer.ps1')
+
     $rules = @('PSAvoidUsingInvokeExpression',
         'PSAvoidUsingPlainTextForPassword',
         'PSUsePSCredentialType',

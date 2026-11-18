@@ -295,6 +295,18 @@ Profiles reject duplicate audit subcategory GUIDs and equivalent certificate end
 
 Extract a matching Microsoft Security Compliance Toolkit GPO backup and pass its `DomainSysvol/GPO` root (containing Machine/User) to `Import-ADAnalyzerBaseline -GpoPath <root> -Name <name> -Version <version>`. The importer replays Registry.pol directives, retains types, aggregates multi-value security settings and rejects conflicting inputs. Its returned profile can be saved as JSON. Policy Analyzer/LGPO remain optional reference tools; neither is required by the runtime. Download baselines from the [Microsoft Security Compliance Toolkit](https://www.microsoft.com/en-us/download/details.aspx?id=55319).
 
+Dot-source the portable object entrypoint to construct an importer. The constructor is inert. Each `Import` call reads the supplied backups and builds an independent profile.
+
+```powershell
+. ./bin/ADAnalyzer.ps1
+$importer = [ADAnalyzerBaselineImporter]::new()
+$paths = [string[]]@('C:\PolicyCopies\Baseline\DomainSysvol\GPO')
+$profile = $importer.Import($paths, '2026.11')
+$namedProfile = $importer.Import($paths, 'Workstation baseline', '2026.11')
+```
+
+The two-argument overload names the profile `Imported GPO baseline`. Both overloads throw if the backup contents conflict or the resulting profile is invalid. The compatibility command retains native parameter binding and error streams.
+
 New imports use unambiguous registry identities when keys or value names contain a literal pipe. IDs for those rules can differ from IDs in older imported profiles.
 
 ## Reviewed remediation
