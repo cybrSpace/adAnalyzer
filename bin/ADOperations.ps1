@@ -608,14 +608,26 @@ function Read-ADAnalyzerOperationDocument {
         if (-not (Test-Path -LiteralPath $InputObject -PathType Leaf)) {
             throw "$Kind file does not exist"
         }
+        $jsonParameters = @{
+            ErrorAction = 'Stop'
+        }
+        if ($PSVersionTable.PSVersion.Major -ge 7) {
+            # Windows PowerShell already passes a decoded array as one object.
+            $jsonParameters.NoEnumerate = $true
+        }
         $InputObject = Microsoft.PowerShell.Management\Get-Content `
             -LiteralPath $InputObject `
             -Raw `
             -Encoding UTF8 `
-            -ErrorAction Stop | ConvertFrom-Json `
-            -ErrorAction Stop
+            -ErrorAction Stop | ConvertFrom-Json @jsonParameters
     }
-    if ($null -eq $InputObject -or $InputObject -is [ValueType] -or $InputObject -is [string]) {
+    if ($InputObject -is [array] -and $InputObject.Rank -eq 1 -and $InputObject.Length -eq 1) {
+        $InputObject = $InputObject.GetValue($InputObject.GetLowerBound(0))
+    }
+    if ($null -eq $InputObject -or
+        $InputObject -is [ValueType] -or
+        $InputObject -is [string] -or
+        ($InputObject -is [Collections.IEnumerable] -and $InputObject -isnot [Collections.IDictionary])) {
         throw "$Kind must be a structured object or JSON file"
     }
     $version = Get-ADAnalyzerOperationValue $InputObject @('SchemaVersion')

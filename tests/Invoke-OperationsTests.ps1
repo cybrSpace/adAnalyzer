@@ -769,6 +769,173 @@ try {
                 Findings = @()
             } $legacy }
     }
+    Invoke-Test 'standalone and shallow singleton documents compare as one snapshot' {
+        $snapshot = [pscustomobject]@{
+            SchemaVersion = '1.2'
+            Target = 'document.fixture.invalid'
+            Checks = @([pscustomobject]@{
+                    RuleId = 'FIXTURE.DOCUMENT'
+                    Target = 'CN=Fixture'
+                    Status = 'Pass'
+                    Observed = 'same fixture value'
+                })
+        }
+        $array = [pscustomobject[]]@($snapshot)
+        $read = @(Read-ADAnalyzerOperationDocument -InputObject $array)
+        Assert-Equal 1 $read.Count
+        Assert-True ([object]::ReferenceEquals($snapshot, $read[0])) 'The singleton array lost its original record.'
+
+        $json = ConvertTo-Json -InputObject $snapshot -Depth 8 -Compress
+        $path = Join-Path $script:Temporary 'one snapshot [literal].json'
+        $encoding = [Text.UTF8Encoding]::new($false)
+        $inputs = @($json, ('[' + $json + ']'))
+        foreach ($text in $inputs) {
+            [IO.File]::WriteAllText($path, $text, $encoding)
+            $comparison = Compare-ADAnalyzerAssessment -Reference $array -Difference $path
+            Assert-Equal 1 $comparison.Changes.Count
+            Assert-Equal 1 $comparison.Summary.Unchanged
+            Assert-Equal 0 $comparison.Summary.Changed
+            Assert-Equal 0 $comparison.Summary.Resolved
+            Assert-Equal 0 $comparison.Summary.New
+            Assert-Equal $text ([IO.File]::ReadAllText($path, $encoding))
+        }
+    }
+    Invoke-Test 'operation document reader rejects invalid array shapes' {
+        $snapshot = [pscustomobject]@{
+            SchemaVersion = 1
+        }
+        $singleton = , $snapshot
+        $nested = , $singleton
+        $matrix = [array]::CreateInstance([object], 1, 1)
+        $matrix.SetValue($snapshot, 0, 0)
+        $invalid = [ordered]@{
+            'empty' = @()
+            'multiple' = @($snapshot, $snapshot)
+            'nested' = $nested
+            'rectangular' = $matrix
+            'singleton null' = , $null
+            'singleton scalar' = @(42)
+        }
+        $accepted = [Collections.Generic.List[string]]::new()
+        foreach ($label in $invalid.Keys) {
+            try {
+                $null = Read-ADAnalyzerOperationDocument -InputObject $invalid[$label]
+                $accepted.Add($label)
+            }
+            catch {
+                Assert-Equal 'Assessment must be a structured object or JSON file' $_.Exception.Message
+            }
+        }
+
+        $path = Join-Path $script:Temporary 'invalid array [literal].json'
+        $encoding = [Text.UTF8Encoding]::new($false)
+        foreach ($text in @('[]', '[{},{}]', '[[{}]]', '[[]]', '[null]', '[42]')) {
+            [IO.File]::WriteAllText($path, $text, $encoding)
+            try {
+                $null = Read-ADAnalyzerOperationDocument -InputObject $path
+                $accepted.Add($text)
+            }
+            catch {
+                Assert-Equal 'Assessment must be a structured object or JSON file' $_.Exception.Message
+            }
+        }
+        Assert-True ($accepted.Count -eq 0) ('Reader accepted invalid document shapes: ' + ($accepted -join ', '))
+    }
+    Invoke-Test 'comparison rejects multiple records on either side before reporting drift' {
+        $matching = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = 'document.fixture.invalid'
+            Checks = @([pscustomobject]@{
+                    RuleId = 'FIXTURE.DOCUMENT'
+                    Target = 'CN=Fixture'
+                    Status = 'Pass'
+                    Observed = 'same fixture value'
+                })
+        }
+        $other = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $matching.Target
+            Checks = @()
+        }
+        $documents = @($matching, $other)
+        $path = Join-Path $script:Temporary 'two snapshots [literal].json'
+        $text = ConvertTo-Json -InputObject $documents -Depth 8 -Compress
+        [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false))
+
+        Assert-Throws { $null = Compare-ADAnalyzerAssessment -Reference $matching -Difference $path }
+        Assert-Throws { $null = Compare-ADAnalyzerAssessment -Reference $path -Difference $matching }
+        Assert-Throws { $null = Compare-ADAnalyzerAssessment -Reference $matching -Difference $documents }
+        Assert-Throws { $null = Compare-ADAnalyzerAssessment -Reference $documents -Difference $matching }
+    }
+    Invoke-Test 'shallow singleton documents receive kind-specific schema validation' {
+        $unsupported = [pscustomobject]@{
+            SchemaVersion = 2
+        }
+        $path = Join-Path $script:Temporary 'unsupported singleton [literal].json'
+        [IO.File]::WriteAllText($path, '[{"SchemaVersion":2}]', [Text.UTF8Encoding]::new($false))
+        $inputs = [ordered]@{
+            Record = $unsupported
+            Array = @($unsupported)
+            Json = $path
+        }
+        $accepted = 0
+        foreach ($kind in @('Assessment', 'Plan', 'Journal')) {
+            foreach ($inputCase in $inputs.Values) {
+                try {
+                    $null = Read-ADAnalyzerOperationDocument -InputObject $inputCase -Kind $kind
+                    $accepted++
+                }
+                catch {
+                    Assert-Equal "Unsupported $kind SchemaVersion" $_.Exception.Message
+                }
+            }
+        }
+        Assert-Equal 0 $accepted
+    }
+    Invoke-Test 'document reader preserves legacy records and native input diagnostics' {
+        $records = @(
+            [pscustomobject]@{ Label = 'absent schema' }
+            [ordered]@{
+                SchemaVersion = $null
+                Label = 'null schema'
+            }
+            @{
+                SchemaVersion = 1
+                Label = 'versioned dictionary'
+            }
+        )
+        foreach ($record in $records) {
+            $read = @(Read-ADAnalyzerOperationDocument -InputObject $record)
+            Assert-Equal 1 $read.Count
+            Assert-True ([object]::ReferenceEquals($record, $read[0])) 'The reader replaced the original structured record.'
+        }
+        Assert-Throws { $null = Read-ADAnalyzerOperationDocument -InputObject $null }
+        Assert-Throws { $null = Read-ADAnalyzerOperationDocument -InputObject 42 }
+        Assert-Throws { $null = Read-ADAnalyzerOperationDocument -InputObject $script:Temporary }
+
+        $path = Join-Path $script:Temporary 'invalid snapshot [literal].json'
+        $encoding = [Text.UTF8Encoding]::new($false)
+        try {
+            $null = Read-ADAnalyzerOperationDocument -InputObject $path -Kind Journal
+            throw 'Expected a missing file error.'
+        }
+        catch {
+            Assert-Equal 'Journal file does not exist' $_.Exception.Message
+        }
+        foreach ($text in @('', ' ', 'null', '42', 'false', '"fixture"')) {
+            [IO.File]::WriteAllText($path, $text, $encoding)
+            Assert-Throws { $null = Read-ADAnalyzerOperationDocument -InputObject $path }
+        }
+        [IO.File]::WriteAllText($path, '{"Label":', $encoding)
+        $parserError = $null
+        try {
+            $null = Read-ADAnalyzerOperationDocument -InputObject $path
+        }
+        catch {
+            $parserError = $_
+        }
+        Assert-True ($null -ne $parserError -and $parserError.FullyQualifiedErrorId -like '*ConvertFromJsonCommand*') 'Malformed JSON must retain its native parser error.'
+    }
     Invoke-Test 'default remediation profile never proposes a write' {
         $plan = New-ADAnalyzerRemediationPlan -Assessment $script:Assessment
         Assert-Equal 0 @($plan.Actions).Count
