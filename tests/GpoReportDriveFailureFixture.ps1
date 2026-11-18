@@ -418,6 +418,12 @@ function Assert-NativeCapture([object]$Observation, [string]$TypeMatch) {
     }
 }
 
+function Format-ReportHostDiagnostic([string]$Text) {
+    $plain = $Text -replace '\x1b\[[0-?]*[ -/]*[@-~]', ''
+    $unwrapped = $plain -replace '(?m)^[ \t]*\|[ \t]*', ''
+    return ($unwrapped -replace '\s+', ' ').Trim()
+}
+
 function Test-CompetingFailures(
     [string]$Fault, [string]$Only, [string]$Mode, [bool]$Preferences, [string]$CleanupType
 ) {
@@ -439,13 +445,18 @@ function Test-CompetingFailures(
     $expectedKinds = @($control.Status.Items | ForEach-Object Kind) -join '|'
     Assert-BaseObservation $actual 'Mount|Read|Unmount' $expectedKinds $control.Status.Continued ($control.ExitCode -ne 0)
     if ($Mode -eq 'Uncaught') {
-        # Hosts may wrap the native message and add continuation formatting.
-        $diagnosticText = ($actual.Diagnostics -replace '(?m)^\s*\|\s*', '') -replace '\s+', ' '
-        $primaryMessage = $expected.Message -replace '\s+', ' '
+        $controlText = Format-ReportHostDiagnostic $control.Diagnostics
+        $actualText = Format-ReportHostDiagnostic $actual.Diagnostics
         Assert-ReportFixture (
-            $diagnosticText.Contains($primaryMessage) -and
-            -not $diagnosticText.Contains('Fixture cleanup failed.')
-        ) 'The uncaught host surfaced the cleanup diagnostic as its primary error.'
+            $control.ExitCode -ne 0 -and -not $control.Status.Continued -and
+            -not [string]::IsNullOrWhiteSpace($expected.Message) -and
+            $controlText -match '\p{L}' -and
+            -not $controlText.Contains('Fixture cleanup failed.')
+        ) 'The single-failure reference did not surface a terminal host diagnostic.'
+        Assert-ReportFixture (
+            $actualText -ceq $controlText -and
+            -not $actualText.Contains('Fixture cleanup failed.')
+        ) 'The uncaught host did not preserve its single-failure diagnostic.'
     }
 }
 
