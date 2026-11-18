@@ -1394,6 +1394,24 @@ foreach ($case in $policyValueCases.Keys) {
     }
 }
 
+$applicabilityCases = [ordered]@{
+    Records = 31
+    Faults = 12
+    Direct = 33
+}
+foreach ($case in $applicabilityCases.Keys) {
+    Test-Policy ('GPO applicability API: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'GpoApplicabilityFixture.ps1'
+        $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -Case $case 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw ($output -join [Environment]::NewLine)
+        }
+        $marker = 'PASS GPO applicability ' + $case + ' ' + $applicabilityCases[$case]
+        Assert-Policy ($marker -cin @($output)) 'Fresh process did not execute every GPO applicability API case.'
+    }
+}
+
 $registryReplayCases = [ordered]@{
     Records = 12
     Faults = 8

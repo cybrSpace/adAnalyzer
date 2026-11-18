@@ -674,31 +674,24 @@ function Get-ADAnalyzerPolicyApplicability {
         [switch]$Disabled
 
     )
+    $evaluator = [ADAnalyzerGpoPolicyEvaluator]::new()
     $flags = Get-ADAnalyzerPolicyValue $Gpo Flags 0
-    $bit = if ($Scope -eq 'User') {
-        1
-    }
-    else {
-        2
-    }
-    if ($Disabled -or ([int]$flags -band $bit)) {
+    # Keep the short-circuited cast in command scope for native errors.
+    if ($Disabled -or $evaluator.IsScopeDisabled([int]$flags, $Scope)) {
         return 'NotApplicable'
     }
+
     $links = @(Get-ADAnalyzerPolicyValue $Gpo Links @())
-    if ($links.Count -gt 0 -and @($links | Where-Object Enabled).Count -eq 0) {
+    if ($links.Count -gt 0 -and
+        $evaluator.NoEnabledLinks(@($links | Where-Object Enabled).Count)) {
         return 'NotApplicable'
     }
-    if ($Targeted) {
+    if ($Targeted -or $evaluator.HasUnresolvedFilter((Get-ADAnalyzerPolicyValue $Gpo WmiFilter ''))) {
         return 'Unknown'
     }
-    if (Get-ADAnalyzerPolicyValue $Gpo WmiFilter '') {
-        return 'Unknown'
-    }
+
     $analysis = Get-ADAnalyzerPolicyValue $Profile Analysis @{}
-    if (Get-ADAnalyzerPolicyValue $analysis AssumeGpoApplicable $false) {
-        return 'Applicable'
-    }
-    return 'Unknown'
+    return $evaluator.FromAssumption((Get-ADAnalyzerPolicyValue $analysis AssumeGpoApplicable $false))
 }
 
 function ConvertTo-ADAnalyzerPolicyNumber {
@@ -1320,6 +1313,58 @@ function Test-ADAnalyzerPolicyComparison {
 
 class ADAnalyzerGpoPolicyEvaluator {
     ADAnalyzerGpoPolicyEvaluator() {
+    }
+
+    [string] GetApplicability([object]$Gpo, [string]$Scope, [hashtable]$Profile) {
+        return $this.GetApplicability($Gpo, $Scope, $Profile, $false, $false)
+    }
+
+    [string] GetApplicability(
+        [object]$Gpo,
+        [string]$Scope,
+        [hashtable]$Profile,
+        [bool]$Targeted,
+        [bool]$Disabled
+    ) {
+        $flags = Get-ADAnalyzerPolicyValue $Gpo Flags 0
+        if ($Disabled -or $this.IsScopeDisabled([int]$flags, $Scope)) {
+            return 'NotApplicable'
+        }
+
+        $links = @(Get-ADAnalyzerPolicyValue $Gpo Links @())
+        if ($links.Count -gt 0 -and
+            $this.NoEnabledLinks(@($links | Where-Object Enabled).Count)) {
+            return 'NotApplicable'
+        }
+        if ($Targeted -or $this.HasUnresolvedFilter((Get-ADAnalyzerPolicyValue $Gpo WmiFilter ''))) {
+            return 'Unknown'
+        }
+
+        $analysis = Get-ADAnalyzerPolicyValue $Profile Analysis @{}
+        return $this.FromAssumption((Get-ADAnalyzerPolicyValue $analysis AssumeGpoApplicable $false))
+    }
+
+    hidden [bool] IsScopeDisabled([int]$Flags, [string]$Scope) {
+        $bit = 2
+        if ($Scope -eq 'User') {
+            $bit = 1
+        }
+        return [bool]($Flags -band $bit)
+    }
+
+    hidden [bool] NoEnabledLinks([int]$EnabledCount) {
+        return $EnabledCount -eq 0
+    }
+
+    hidden [bool] HasUnresolvedFilter([object]$Filter) {
+        return [bool]$Filter
+    }
+
+    hidden [string] FromAssumption([object]$Assumption) {
+        if ($Assumption) {
+            return 'Applicable'
+        }
+        return 'Unknown'
     }
 
     [object[]] Evaluate([object]$Gpo, [object]$Policy, [hashtable]$Profile) {

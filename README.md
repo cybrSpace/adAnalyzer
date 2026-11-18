@@ -163,6 +163,16 @@ The constructor validates and copies its in-memory profile without importing nat
 
 `ADAnalyzerGpoPolicyEvaluator` owns six rule phases: credential exposure, account settings, security options, membership/user rights, custom baselines, and coverage. Its constructor is inert and retains no inputs or results. `Evaluate(gpo, policy, profile)` accepts the same raw profile contract as the compatibility command, including partial profiles, and buffers results with exception semantics. `Test-ADAnalyzerGpoPolicy` retains named/common parameters and streamed checks before a late error. Effective registry records are computed at their original phase boundary and reused only within that call.
 
+Use the same evaluator to resolve applicability from stored GPO metadata and a profile. The overload with five arguments takes `Targeted` and `Disabled` in that order.
+
+```powershell
+$policyEvaluator = [ADAnalyzerGpoPolicyEvaluator]::new()
+$applicability = $policyEvaluator.GetApplicability($gpoMetadata, 'Computer', $profile)
+$targetedApplicability = $policyEvaluator.GetApplicability($gpoMetadata, 'Computer', $profile, $true, $false)
+```
+
+The method returns `Applicable`, `NotApplicable`, or `Unknown` from the policy scope, links, targeting, WMI filter and profile. The direct call surfaces a failed flag conversion as an exception. The compatibility command retains native error continuation.
+
 `ADAnalyzerMembershipGraph` captures a minimal, independent group graph and owns iterative membership resolution. `Resolve(object, domainSid, privilegedSids)` returns the existing membership DTO, including primary groups, ordered transitive SIDs, cycle witnesses, and unresolved evidence. Repeated resolutions reuse the index without retaining earlier results. The constructor retains only copied DN/SID/parent identities in private .NET state, so input credentials and unrelated group properties are not captured or serialized. Modern collection and SIDHistory evaluation reuse one graph per call. The compatibility index builder deliberately retains its original mutable `ByDn`/`BySid` maps and group references; the compatibility resolver honors supplied aliases transiently.
 
 `ADAnalyzerDirectoryPolicyEvaluator` owns directory rule evaluation across domain/coverage, accounts and duplicate SPNs, trusts/ACLs, resultant password policies, and host observations. Its inert constructor retains no data or configuration. `Evaluate(data, profile)` accepts the existing raw/partial profile contract and returns complete ordered checks or throws. `Test-ADAnalyzerDirectoryPolicy` remains the command interface, including streamed checks before a late error, common parameters, and the underlying diagnostic cause.
