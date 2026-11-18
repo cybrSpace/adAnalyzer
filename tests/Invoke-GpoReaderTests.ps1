@@ -226,22 +226,35 @@ try {
             }
         }
     }
-    $constructorFixtures = @(
-        [pscustomobject]@{
-            Name = 'GPO source normalizer'
-            Script = 'GpoSourceNormalizerClassFixture.ps1'
-        }
-        [pscustomobject]@{
-            Name = 'GPO XML writer'
-            Script = 'GpoXmlWriterClassFixture.ps1'
-        }
-    )
     $constructorCases = [ordered]@{
         Contracts = 10
         Direct = 10
     }
-    foreach ($fixture in $constructorFixtures) {
-        foreach ($case in $constructorCases.Keys) {
+    $gpoFixtures = @(
+        [pscustomobject]@{
+            Name = 'GPO source normalizer'
+            Script = 'GpoSourceNormalizerClassFixture.ps1'
+            Cases = $constructorCases
+            RequireExactCaseCount = $false
+        }
+        [pscustomobject]@{
+            Name = 'GPO XML writer'
+            Script = 'GpoXmlWriterClassFixture.ps1'
+            Cases = $constructorCases
+            RequireExactCaseCount = $false
+        }
+        [pscustomobject]@{
+            Name = 'GPO catalog row isolation'
+            Script = 'GpoCatalogRowIsolationFixture.ps1'
+            Cases = [ordered]@{
+                Regression = 24
+                Controls = 31
+            }
+            RequireExactCaseCount = $true
+        }
+    )
+    foreach ($fixture in $gpoFixtures) {
+        foreach ($case in $fixture.Cases.Keys) {
             Test-Gpo ('{0} API: {1}' -f $fixture.Name, $case) {
                 $executable = (Get-Process -Id $PID).Path
                 $arguments = @(
@@ -283,9 +296,12 @@ try {
                 Assert-True (
                     $summary.Success -and
                     [int]::TryParse($summary.Groups[1].Value, [ref]$executed) -and
-                    $executed -ge $constructorCases[$case]
+                    $executed -ge $fixture.Cases[$case]
                 ) ("Fresh process did not report at least {0} {1} {2} cases." -f
-                    $constructorCases[$case], $fixture.Name, $case)
+                    $fixture.Cases[$case], $fixture.Name, $case)
+                if ($fixture.RequireExactCaseCount) {
+                    Assert-Equal $fixture.Cases[$case] $executed
+                }
             }
         }
     }

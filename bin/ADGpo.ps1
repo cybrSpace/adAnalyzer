@@ -935,7 +935,12 @@ function Get-ADAnalyzerGpo {
             distinguishedName @connection)
     }
     foreach ($object in $objects) {
+        # A failed native cast under Continue leaves the variable unchanged.
+        $id = $null
         $id = [guid]([string]$object.Name).Trim('{}')
+        if ($null -eq $id) {
+            continue
+        }
         if ($PSCmdlet.ParameterSetName -eq 'Guid' -and $id -ne $Guid) {
             continue
         }
@@ -947,19 +952,26 @@ function Get-ADAnalyzerGpo {
             $storedIndex = 0
             foreach ($match in [regex]::Matches([string]$container.gPLink, '(?i)\[LDAP://(?<dn>[^;]+);(?<flags>\d+)\]')) {
                 if ($match.Groups['dn'].Value -ieq $object.DistinguishedName) {
+                    $options = $null
                     $options = [int]$match.Groups['flags'].Value
-                    $null = $policyLinks.Add([pscustomobject]@{
-                            SOMPath = $container.DistinguishedName
-                            Enabled = ($options -band 1) -eq 0
-                            Enforced = ($options -band 2) -ne 0
-                            StoredLinkIndex = $storedIndex
-                            BlockInheritance = ([int]$container.gPOptions -band 1) -ne 0
-                        })
+                    if ($null -ne $options) {
+                        $null = $policyLinks.Add([pscustomobject]@{
+                                SOMPath = $container.DistinguishedName
+                                Enabled = ($options -band 1) -eq 0
+                                Enforced = ($options -band 2) -ne 0
+                                StoredLinkIndex = $storedIndex
+                                BlockInheritance = ([int]$container.gPOptions -band 1) -ne 0
+                            })
+                    }
                 }
                 $storedIndex++
             }
         }
+        $flags = $null
         $flags = [int]$object.flags
+        if ($null -eq $flags) {
+            continue
+        }
         [pscustomobject]@{
             Id = $id
             DisplayName = $object.displayName
