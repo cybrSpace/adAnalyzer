@@ -2461,6 +2461,291 @@ function Get-ADAnalyzerOperationExclusion {
     return $null
 }
 
+class ADAnalyzerRemediationPlanner {
+    ADAnalyzerRemediationPlanner() {
+    }
+
+    [object] CreatePlan([object]$Assessment) {
+        return $this.CreatePlan($Assessment, $null)
+    }
+
+    [object] CreatePlan([object]$Assessment, [object]$Profile) {
+        $ErrorActionPreference = 'Stop'
+        $reader = [ADAnalyzerOperationDocumentReader]::new()
+        $assessmentObject = $reader.Read($Assessment)
+        $profileType = 'ADAnalyzerProfile' -as [type]
+        if ($null -eq $profileType) {
+            throw 'Load bin/ADAnalyzer.ps1 before creating a remediation plan'
+        }
+        $configuration = $profileType::new($Profile).ToHashtable()
+        $settings = $configuration.Remediation
+        $projector = [ADAnalyzerEvidenceProjector]::new()
+        $guard = [ADAnalyzerRemediationGuard]::new()
+
+        $data = Get-ADAnalyzerOperationValue $assessmentObject @('Data')
+        $directory = Get-ADAnalyzerOperationValue $data @('Directory')
+        $domain = Get-ADAnalyzerOperationValue $directory @('Domain')
+        $domainSid = [string](Get-ADAnalyzerOperationValue $domain @('SID', 'DomainSID'))
+        $rootDomainSid = [string](Get-ADAnalyzerOperationValue $domain @('RootDomainSID'))
+        $snapshotSids = @(Get-ADAnalyzerOperationValue $domain @('PrivilegedSids') @() | Where-Object { $null -ne $_ })
+        $privilege = $this.NewPrivilegePolicy()
+        foreach ($entry in $snapshotSids) {
+            if (-not $this.AddSnapshotSid($privilege, $entry)) {
+                throw 'Assessment privilege policy contains an unsupported SID value type'
+            }
+        }
+        foreach ($sid in @($configuration.Policy.PrivilegedSids)) {
+            $this.AddConfiguredSid($privilege, $sid, $domainSid, $rootDomainSid)
+        }
+
+        $work = $this.NewPlanState()
+        foreach ($record in @(Get-ADAnalyzerOperationValue $assessmentObject @('Objects') @())) {
+            if ($null -eq $record) {
+                continue
+            }
+            $guid = ConvertTo-ADAnalyzerOperationGuid (Get-ADAnalyzerOperationValue $record @('ObjectGuid'))
+            $this.IndexObject($work, $guid, $record)
+        }
+        $work.Approved = @(foreach ($value in @($settings.ApprovedObjectGuids)) {
+                ConvertTo-ADAnalyzerOperationGuid $value
+            })
+        foreach ($finding in @(Get-ADAnalyzerOperationValue $assessmentObject @('Findings') @())) {
+            if ($null -eq $finding) {
+                continue
+            }
+            $rule = [string](Get-ADAnalyzerOperationValue $finding @('RuleId'))
+            if (-not $guard.IsSupportedInactivityRule($rule) -or
+                [string](Get-ADAnalyzerOperationValue $finding @('Status')) -ne 'Fail') {
+                continue
+            }
+            $guid = ConvertTo-ADAnalyzerOperationGuid (Get-ADAnalyzerOperationValue $finding @('ObjectGuid'))
+            $reason = $this.GetScopeExclusion($settings.AllowDisable, $privilege.ContextMissing)
+            if (-not $reason) {
+                $suppressed = [bool](Get-ADAnalyzerOperationValue $finding @('Suppressed') $false)
+                $reason = $this.GetIdentityExclusion($work, $guid, $suppressed)
+            }
+            if (-not $reason) {
+                $record = $work.Objects[$guid]
+                $reason = $this.GetKindExclusion($rule, $guard.GetObjectKind($record))
+                if (-not $reason) {
+                    $reason = $guard.GetExclusion($record, $settings)
+                }
+            }
+            if (-not $reason) {
+                $reason = $this.GetLimitExclusion($work, $settings.MaximumActions)
+            }
+            if ($reason) {
+                $target = Get-ADAnalyzerOperationValue $finding @('Target')
+                $this.AddExclusion($work, $rule, $guid, $target, $reason)
+                continue
+            }
+            if (-not $this.RegisterAction($work, $guid)) {
+                continue
+            }
+
+            $record = $work.Objects[$guid]
+            $state = $guard.ReadState($record)
+            $action = $this.NewActionRecord($rule, $state)
+            $kind = $guard.GetObjectKind($record)
+            $accountType = Get-ADAnalyzerOperationValue $record @('AccountType')
+            $inactivityDays = $this.GetInactivityDays($guard.GetObjectKind($record), $configuration.Policy)
+            $this.AddAction($work, $action, $kind, $accountType, $inactivityDays, $state)
+        }
+
+        $header = $this.NewPlanRecord()
+        $metadata = @{
+            AssessmentRunId = Get-ADAnalyzerOperationValue $assessmentObject @('RunId')
+            Target = Get-ADAnalyzerOperationValue $assessmentObject @('Target')
+            Context = $projector.Project((Get-ADAnalyzerOperationValue $assessmentObject @('Context')))
+            Remediation = $projector.Project($settings)
+            AccountClassification = $projector.Project($configuration.AccountClassification)
+            PrivilegedSids = @($privilege.Sids | Select-Object -Unique)
+        }
+        $plan = $this.BuildPlan($header, $metadata, $work)
+        $this.ProjectPlanMetadata($plan, $projector)
+        return $plan
+    }
+
+    hidden [hashtable] NewPrivilegePolicy() {
+        return @{
+            Sids = [Collections.Generic.List[object]]::new()
+            ContextMissing = $false
+        }
+    }
+
+    hidden [bool] AddSnapshotSid([hashtable]$Privilege, [object]$Entry) {
+        if ($Entry -is [string]) {
+            $Privilege.Sids.Add([string]$Entry)
+            return $true
+        }
+        if ($Entry -is [System.Security.Principal.SecurityIdentifier]) {
+            $Privilege.Sids.Add([string]$Entry.PSBase.Value)
+            return $true
+        }
+        return $false
+    }
+
+    hidden [void] AddConfiguredSid(
+        [hashtable]$Privilege,
+        [object]$Sid,
+        [string]$DomainSid,
+        [string]$RootDomainSid
+    ) {
+        if (([string]$Sid).Contains('{DomainSid}') -and -not $DomainSid) {
+            $Privilege.ContextMissing = $true
+        }
+        if (([string]$Sid).Contains('{RootDomainSid}') -and -not $RootDomainSid) {
+            $Privilege.ContextMissing = $true
+        }
+        $expanded = ([string]$Sid).Replace('{DomainSid}', $DomainSid).Replace('{RootDomainSid}', $RootDomainSid)
+        if ($expanded -and $expanded -match '^S-\d-') {
+            $Privilege.Sids.Add($expanded)
+        }
+    }
+
+    hidden [hashtable] NewPlanState() {
+        return @{
+            Objects = @{}
+            Approved = @()
+            Seen = @{}
+            Actions = [Collections.Generic.List[object]]::new()
+            Excluded = [Collections.Generic.List[object]]::new()
+        }
+    }
+
+    hidden [void] IndexObject([hashtable]$Work, [object]$Guid, [object]$Record) {
+        if ($Guid) {
+            $Work.Objects[$Guid] = $Record
+        }
+    }
+
+    hidden [string] GetScopeExclusion([bool]$AllowDisable, [bool]$PrivilegeContextMissing) {
+        if (-not $AllowDisable) {
+            return 'RemediationDisabled'
+        }
+        if ($PrivilegeContextMissing) {
+            return 'PrivilegedPolicyContextMissing'
+        }
+        return ''
+    }
+
+    hidden [string] GetIdentityExclusion([hashtable]$Work, [object]$Guid, [bool]$Suppressed) {
+        if ($Suppressed) {
+            return 'SuppressedFinding'
+        }
+        if (-not $Guid -or -not $Work.Objects.ContainsKey($Guid)) {
+            return 'MissingObjectEvidence'
+        }
+        if ($Guid -notin $Work.Approved) {
+            return 'ObjectNotExplicitlyApproved'
+        }
+        return ''
+    }
+
+    hidden [string] GetKindExclusion([string]$Rule, [string]$Kind) {
+        if (($Rule -eq 'ACCOUNT.INACTIVE' -and $Kind -ne 'User') -or
+            ($Rule -eq 'COMPUTER.INACTIVE' -and $Kind -ne 'Computer')) {
+            return 'RuleObjectClassMismatch'
+        }
+        return ''
+    }
+
+    hidden [string] GetLimitExclusion([hashtable]$Work, [int]$MaximumActions) {
+        if ($Work.Actions.Count -ge $MaximumActions) {
+            return 'MaximumActionsReached'
+        }
+        return ''
+    }
+
+    hidden [bool] RegisterAction([hashtable]$Work, [object]$Guid) {
+        if ($Work.Seen.ContainsKey($Guid)) {
+            return $false
+        }
+        $Work.Seen[$Guid] = $true
+        return $true
+    }
+
+    hidden [void] AddExclusion(
+        [hashtable]$Work, [string]$Rule, [object]$Guid, [object]$Target, [string]$Reason
+    ) {
+        $Work.Excluded.Add([pscustomobject]@{
+                RuleId = $Rule
+                ObjectGuid = $Guid
+                Target = $Target
+                Reason = $Reason
+            })
+    }
+
+    hidden [object] GetInactivityDays([string]$Kind, [hashtable]$Policy) {
+        if ($Kind -eq 'Computer') {
+            return $Policy.ComputerInactivityDays
+        }
+        return $Policy.UserInactivityDays
+    }
+
+    hidden [System.Collections.Specialized.OrderedDictionary] NewActionRecord([string]$Rule, [object]$State) {
+        return [ordered]@{
+            ActionId = [guid]::NewGuid().ToString('D')
+            Action = 'DisableAccount'
+            RuleId = $Rule
+            ObjectGuid = $State.ObjectGuid
+            SID = $State.SID
+            DistinguishedName = $State.DistinguishedName
+        }
+    }
+
+    hidden [void] AddAction(
+        [hashtable]$Work,
+        [System.Collections.Specialized.OrderedDictionary]$Action,
+        [string]$Kind,
+        [object]$AccountType,
+        [object]$InactivityDays,
+        [object]$State
+    ) {
+        $Action.ObjectClass = $Kind
+        $Action.AccountType = $AccountType
+        $Action.InactivityDays = $InactivityDays
+        $Action.Preconditions = $State
+        $Work.Actions.Add([pscustomobject]$Action)
+    }
+
+    hidden [System.Collections.Specialized.OrderedDictionary] NewPlanRecord() {
+        return [ordered]@{
+            SchemaVersion = 1
+            PlanType = 'ADAnalyzerRemediationPlan'
+            PlanId = [guid]::NewGuid().ToString('D')
+            CreatedAt = [datetimeoffset]::UtcNow.ToString('o')
+        }
+    }
+
+    hidden [object] BuildPlan(
+        [System.Collections.Specialized.OrderedDictionary]$Header,
+        [hashtable]$Metadata,
+        [hashtable]$Work
+    ) {
+        $Header.AssessmentRunId = $Metadata.AssessmentRunId
+        $Header.Target = $Metadata.Target
+        $Header.Context = $Metadata.Context
+        $Header.Remediation = $Metadata.Remediation
+        $Header.AccountClassification = $Metadata.AccountClassification
+        $Header.PrivilegedSids = $Metadata.PrivilegedSids
+        $Header.Actions = $Work.Actions.ToArray()
+        $Header.Excluded = $Work.Excluded.ToArray()
+        return [pscustomobject]$Header
+    }
+
+    hidden [void] ProjectPlanMetadata([object]$Plan, [ADAnalyzerEvidenceProjector]$Projector) {
+        $Plan.AssessmentRunId = $Projector.ProjectIdentityMetadata($Plan.AssessmentRunId)
+        $Plan.Target = $Projector.ProjectIdentityMetadata($Plan.Target)
+        foreach ($item in $Plan.Excluded) {
+            $item.Target = $Projector.ProjectIdentityMetadata($item.Target)
+        }
+        foreach ($action in $Plan.Actions) {
+            $action.AccountType = $Projector.ProjectIdentityMetadata($action.AccountType)
+        }
+    }
+}
+
 function New-ADAnalyzerRemediationPlan {
     [CmdletBinding()]
     param(
@@ -2471,148 +2756,94 @@ function New-ADAnalyzerRemediationPlan {
     $assessmentObject = Read-ADAnalyzerOperationDocument $Assessment
     $configuration = Import-ADAnalyzerProfile -Profile $Profile
     $settings = $configuration.Remediation
+    $planner = [ADAnalyzerRemediationPlanner]::new()
+    $guard = [ADAnalyzerRemediationGuard]::new()
     $data = Get-ADAnalyzerOperationValue $assessmentObject @('Data')
     $directory = Get-ADAnalyzerOperationValue $data @('Directory')
     $domain = Get-ADAnalyzerOperationValue $directory @('Domain')
     $domainSid = [string](Get-ADAnalyzerOperationValue $domain @('SID', 'DomainSID'))
     $rootDomainSid = [string](Get-ADAnalyzerOperationValue $domain @('RootDomainSID'))
-    $privilegeContextMissing = $false
-    $privileged = @(Get-ADAnalyzerOperationValue $domain @('PrivilegedSids') @() | Where-Object { $null -ne $_ })
-    for ($index = 0; $index -lt $privileged.Count; $index++) {
-        $entry = $privileged[$index]
-        if ($entry -is [string]) {
-            $privileged[$index] = [string]$entry
-        }
-        elseif ($entry -is [System.Security.Principal.SecurityIdentifier]) {
-            $privileged[$index] = [string]$entry.PSBase.Value
-        }
-        else {
+    $snapshotSids = @(Get-ADAnalyzerOperationValue $domain @('PrivilegedSids') @() | Where-Object { $null -ne $_ })
+    $privilege = $planner.NewPrivilegePolicy()
+    for ($index = 0; $index -lt $snapshotSids.Count; $index++) {
+        $entry = $snapshotSids[$index]
+        if (-not $planner.AddSnapshotSid($privilege, $entry)) {
             throw 'Assessment privilege policy contains an unsupported SID value type'
         }
     }
     foreach ($sid in @($configuration.Policy.PrivilegedSids)) {
-        if (([string]$sid).Contains('{DomainSid}') -and -not $domainSid) {
-            $privilegeContextMissing = $true
-        }
-        if (([string]$sid).Contains('{RootDomainSid}') -and -not $rootDomainSid) {
-            $privilegeContextMissing = $true
-        }
-        $expanded = ([string]$sid).Replace('{DomainSid}', $domainSid).Replace('{RootDomainSid}', $rootDomainSid)
-        if ($expanded -and $expanded -match '^S-\d-') {
-            $privileged += , $expanded
-        }
+        $planner.AddConfiguredSid($privilege, $sid, $domainSid, $rootDomainSid)
     }
-    $objects = @{}
+
+    $work = $planner.NewPlanState()
     foreach ($object in @(Get-ADAnalyzerOperationValue $assessmentObject @('Objects') @())) {
         if ($null -eq $object) {
             continue
         }
         $guid = ConvertTo-ADAnalyzerOperationGuid (Get-ADAnalyzerOperationValue $object @('ObjectGuid'))
-        if ($guid) {
-            $objects[$guid] = $object
-        }
+        $planner.IndexObject($work, $guid, $object)
     }
-    $approved = @(foreach ($value in @($settings.ApprovedObjectGuids)) {
+    $work.Approved = @(foreach ($value in @($settings.ApprovedObjectGuids)) {
             ConvertTo-ADAnalyzerOperationGuid $value
         })
-    $actions = [Collections.ArrayList]::new()
-    $excluded = [Collections.ArrayList]::new()
-    $seen = @{}
     foreach ($finding in @(Get-ADAnalyzerOperationValue $assessmentObject @('Findings') @())) {
         if ($null -eq $finding) {
             continue
         }
         $rule = [string](Get-ADAnalyzerOperationValue $finding @('RuleId'))
-        if ($rule -notin @('ACCOUNT.INACTIVE',
-                'COMPUTER.INACTIVE') -or
+        if (-not $guard.IsSupportedInactivityRule($rule) -or
             [string](Get-ADAnalyzerOperationValue $finding @('Status')) -ne 'Fail') {
             continue
         }
         $guid = ConvertTo-ADAnalyzerOperationGuid (Get-ADAnalyzerOperationValue $finding @('ObjectGuid'))
-        $reason = $null
-        if (-not $settings.AllowDisable) {
-            $reason = 'RemediationDisabled'
+        $reason = $planner.GetScopeExclusion($settings.AllowDisable, $privilege.ContextMissing)
+        if (-not $reason -and [bool](Get-ADAnalyzerOperationValue $finding @('Suppressed') $false)) {
+            $reason = $planner.GetIdentityExclusion($work, $guid, $true)
         }
-        elseif ($privilegeContextMissing) {
-            $reason = 'PrivilegedPolicyContextMissing'
+        elseif (-not $reason) {
+            $reason = $planner.GetIdentityExclusion($work, $guid, $false)
         }
-        elseif ([bool](Get-ADAnalyzerOperationValue $finding @('Suppressed') $false)) {
-            $reason = 'SuppressedFinding'
+        # Keep the kind read in the native condition and the exclusion read at this scope.
+        if (-not $reason -and
+            -not ($reason = $planner.GetKindExclusion($rule, (Get-ADAnalyzerOperationKind $work.Objects[$guid])))) {
+            $reason = Get-ADAnalyzerOperationExclusion $work.Objects[$guid] $settings
         }
-        elseif (-not $guid -or -not $objects.ContainsKey($guid)) {
-            $reason = 'MissingObjectEvidence'
-        }
-        elseif ($guid -notin $approved) {
-            $reason = 'ObjectNotExplicitlyApproved'
-        }
-        elseif (($rule -eq 'ACCOUNT.INACTIVE' -and
-                (Get-ADAnalyzerOperationKind $objects[$guid]) -ne 'User') -or
-            ($rule -eq 'COMPUTER.INACTIVE' -and
-            (Get-ADAnalyzerOperationKind $objects[$guid]) -ne 'Computer')) {
-            $reason = 'RuleObjectClassMismatch'
-        }
-        else {
-            $reason = Get-ADAnalyzerOperationExclusion $objects[$guid] $settings
-        }
-        if (-not $reason -and $actions.Count -ge $settings.MaximumActions) {
-            $reason = 'MaximumActionsReached'
+        if (-not $reason) {
+            $reason = $planner.GetLimitExclusion($work, $settings.MaximumActions)
         }
         if ($reason) {
-            $null = $excluded.Add([pscustomobject]@{
-                    RuleId = $rule
-                    ObjectGuid = $guid
-                    Target = Get-ADAnalyzerOperationValue $finding @('Target')
-                    Reason = $reason
-                })
+            $target = Get-ADAnalyzerOperationValue $finding @('Target')
+            $planner.AddExclusion($work, $rule, $guid, $target, $reason)
             continue
         }
-        if ($seen.ContainsKey($guid)) {
+        if (-not $planner.RegisterAction($work, $guid)) {
             continue
         }
-        $seen[$guid] = $true
-        $object = $objects[$guid]
+
+        $object = $work.Objects[$guid]
         $state = Get-ADAnalyzerOperationState $object
-        $null = $actions.Add([pscustomobject][ordered]@{
-                ActionId = [guid]::NewGuid().ToString('D')
-                Action = 'DisableAccount'
-                RuleId = $rule
-                ObjectGuid = $state.ObjectGuid
-                SID = $state.SID
-                DistinguishedName = $state.DistinguishedName
-                ObjectClass = Get-ADAnalyzerOperationKind $object
-                AccountType = Get-ADAnalyzerOperationValue $object @('AccountType')
-                InactivityDays = $(if ((Get-ADAnalyzerOperationKind $object) -eq 'Computer') {
-                        $configuration.Policy.ComputerInactivityDays
-                    }
-                    else {
-                        $configuration.Policy.UserInactivityDays
-                    })
-                Preconditions = $state
-            })
+        $action = $planner.NewActionRecord($rule, $state)
+        $kind = Get-ADAnalyzerOperationKind $object
+        $accountType = Get-ADAnalyzerOperationValue $object @('AccountType')
+        $inactivityDays = $(
+            $thresholdKind = Get-ADAnalyzerOperationKind $object
+            $planner.GetInactivityDays($thresholdKind, $configuration.Policy)
+        )
+        $planner.AddAction($work, $action, $kind, $accountType, $inactivityDays, $state)
     }
-    $plan = [pscustomobject][ordered]@{
-        SchemaVersion = 1
-        PlanType = 'ADAnalyzerRemediationPlan'
-        PlanId = [guid]::NewGuid().ToString('D')
-        CreatedAt = [datetimeoffset]::UtcNow.ToString('o')
+
+    $header = $planner.NewPlanRecord()
+    $metadata = @{
         AssessmentRunId = Get-ADAnalyzerOperationValue $assessmentObject @('RunId')
         Target = Get-ADAnalyzerOperationValue $assessmentObject @('Target')
         Context = ConvertTo-ADAnalyzerSafeData (Get-ADAnalyzerOperationValue $assessmentObject @('Context'))
         Remediation = ConvertTo-ADAnalyzerSafeData $settings
         AccountClassification = ConvertTo-ADAnalyzerSafeData $configuration.AccountClassification
-        PrivilegedSids = @($privileged | Select-Object -Unique)
-        Actions = $actions.ToArray()
-        Excluded = $excluded.ToArray()
+        PrivilegedSids = @($privilege.Sids | Select-Object -Unique)
     }
     $projector = [ADAnalyzerEvidenceProjector]::new()
-    $plan.AssessmentRunId = $projector.ProjectIdentityMetadata($plan.AssessmentRunId)
-    $plan.Target = $projector.ProjectIdentityMetadata($plan.Target)
-    foreach ($item in $plan.Excluded) {
-        $item.Target = $projector.ProjectIdentityMetadata($item.Target)
-    }
-    foreach ($action in $plan.Actions) {
-        $action.AccountType = $projector.ProjectIdentityMetadata($action.AccountType)
-    }
+    $plan = $planner.BuildPlan($header, $metadata, $work)
+    $planner.ProjectPlanMetadata($plan, $projector)
     return $plan
 }
 

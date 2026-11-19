@@ -3096,6 +3096,46 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
         }
     }
 
+    $remediationPlannerCases = [ordered]@{
+        Native = 13
+        Construction = 2
+        Standalone = 1
+        Direct = 7
+        Isolation = 2
+    }
+    foreach ($case in $remediationPlannerCases.Keys) {
+        Invoke-Test ('Remediation planner API: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $arguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                (Join-Path $PSScriptRoot 'RemediationPlannerClassFixture.ps1')
+                '-Case'
+                $case
+                '-RepositoryRoot'
+                $RepositoryRoot
+            )
+            $previousPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $output = @(& $executable @arguments 2>&1)
+                $fixtureExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $previousPreference
+            }
+            if ($fixtureExitCode -ne 0) {
+                throw ("Remediation planner fixture exited with code {0}.{1}{2}" -f
+                    $fixtureExitCode, [Environment]::NewLine, ($output -join [Environment]::NewLine))
+            }
+
+            $marker = 'PASS remediation planner ' + $case + ' ' + $remediationPlannerCases[$case]
+            Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+        }
+    }
+
 
     $legacyValueCases = [ordered]@{
         Parity = 44

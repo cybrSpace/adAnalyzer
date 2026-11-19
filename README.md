@@ -225,6 +225,17 @@ $remediationGuard.AssertPlan($reviewedPlan)
 
 `ADAnalyzerAssessmentComparer` has an inert constructor. `Compare(reference, difference)` accepts in-memory snapshots, literal assessment JSON paths, or a mix. It checks target and search-base compatibility, groups rows by stable rule and target identities, and returns one ordered comparison with a UTC timestamp and summary counts. Compared check rows and structured run identifiers are detached and project recognized secrets to Boolean presence. The operation can read explicitly supplied files and has no write or directory effects. Each call uses fresh state. `Compare-ADAnalyzerAssessment` preserves native binding, input-read order, and diagnostics for existing callers.
 
+`ADAnalyzerRemediationPlanner` owns offline plan selection and assembly. Dot-source the full constructor loader, then call `CreatePlan(assessment)` for the default profile or `CreatePlan(assessment, profile)` with supplied profile settings. The assessment can be an in-memory record or a literal JSON path. Construction is inert. Each call builds an independent plan from the reviewed account identities, captured safety evidence, and profile policy. It preserves approved action order and returns detached display metadata with Boolean presence for recognized secrets. The method can read the supplied snapshot path and throws when the assessment or policy is invalid. Planning has no directory, journal, or mutation effects.
+
+```powershell
+. .\bin\ADAnalyzer.ps1
+$planner = [ADAnalyzerRemediationPlanner]::new()
+$plan = $planner.CreatePlan($scan, $profile)
+$plan.Actions
+```
+
+The `New-ADAnalyzerRemediationPlan` compatibility command preserves native parameter binding, input observation order, and diagnostics.
+
 `ADAnalyzerRemediationGuard` has an inert constructor and retains no plan or account state. `ReadState(object)` returns the normalized identity and enabled-state record, and `GetObjectKind(object)` selects the account class. `GetExclusion(object, settings)` takes the remediation settings from a normalized profile and returns the first exclusion reason or null. The privilege and service-account options must be actual Boolean values. `AssertPreconditions(expected, actual, enabled)` returns the verified state, and `AssertPlan(plan)` checks the supplied plan structure, reviewed identities, limits, and unique action IDs. These methods evaluate supplied observations and throw when an assertion fails.
 
 `AssertInactivity(object, action)` checks supplied directory activity against the reviewed threshold. It uses the latest known logon observation and falls back to the creation time when logon evidence is absent. A malformed observation or unavailable evidence fails the check. The method is also available when dot-sourcing `bin/ADOperations.ps1` on its own.
