@@ -1900,6 +1900,290 @@ class ADAnalyzerRemediationGuard {
         }
     }
 
+    [void] AssertPrivilege([object]$Object, [object]$Action, [object]$Plan, [string]$Server) {
+        $this.AssertPrivilege($Object, $Action, $Plan, $Server, [pscredential]::Empty)
+    }
+
+    [void] AssertPrivilege(
+        [object]$Object,
+        [object]$Action,
+        [object]$Plan,
+        [string]$Server,
+        [pscredential]$Credential
+    ) {
+        $ErrorActionPreference = 'Stop'
+        $connection = Get-ADAnalyzerOperationConnection $Server $Credential
+        $context = Get-ADAnalyzerOperationValue $Plan @('Context')
+        $reviewedServer = [string](Get-ADAnalyzerOperationValue $context @('Server'))
+        if ($reviewedServer -and $reviewedServer -ine $Server) {
+            throw 'Server differs from the DC recorded in the reviewed assessment'
+        }
+        if (-not (Get-Command Resolve-ADAnalyzerMembership -ErrorAction SilentlyContinue)) {
+            throw 'Fresh privilege resolver is unavailable; remediation is blocked'
+        }
+        if (-not $this.FreshClassMatches($this.GetObjectKind($Object), $Action.ObjectClass)) {
+            throw 'Current object class differs from the approved action'
+        }
+
+        $providerPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'lib/Microsoft.ActiveDirectory.Management.dll'
+        $provider = Import-Module -Name $providerPath -Scope Local -PassThru -ErrorAction Stop
+        $groupCommand = $provider.ExportedCmdlets['Get-ADGroup']
+        if ($groupCommand -isnot [Management.Automation.CommandInfo]) {
+            throw 'Bundled AD assembly does not provide the required Get-ADGroup command'
+        }
+        $groups = @(& $groupCommand -Filter * -Properties members, memberOf, primaryGroupToken, SID @connection)
+        $domainSid = $this.GetFreshDomainSid((Get-ADAnalyzerOperationSid $Object))
+        if (-not $domainSid) {
+            throw 'A domain SID is required for fresh privilege resolution'
+        }
+        $privileged = $this.StartFreshPrivilegedSids(@($Plan.PrivilegedSids))
+        foreach ($group in $groups) {
+            $this.AddFreshPrivilegedGroup($privileged, (Get-ADAnalyzerOperationSid $group))
+        }
+        $resolution = @{
+            Object = $Object
+            Groups = $groups
+            DomainSid = $domainSid
+            PrivilegedSids = @($privileged | Select-Object -Unique)
+        }
+        $membership = Resolve-ADAnalyzerMembership @resolution
+        if ($null -eq $membership -or
+            $this.HasUnresolvedFreshMembership(@(Get-ADAnalyzerOperationValue $membership @('Unresolved') @()))) {
+            throw 'Fresh privilege resolution is incomplete; remediation is blocked'
+        }
+        $isPrivileged = Get-ADAnalyzerOperationValue $membership @('IsPrivileged')
+        if ($isPrivileged -isnot [bool]) {
+            throw 'Fresh privilege resolution did not return a definite result'
+        }
+        $state = $this.ReadState($Object)
+        $safe = $this.CreateFreshSafetyRecord($state, $isPrivileged, $Action.AccountType, $Action.ObjectClass)
+        foreach ($name in $this.FreshSafetyPropertyNames()) {
+            $safe[$name] = Get-ADAnalyzerOperationValue $Object @($name)
+        }
+        $this.NormalizeFreshSafetyRecord($safe)
+        $safe.TransitiveGroups = @(Get-ADAnalyzerOperationValue $membership @('EffectiveSids') @())
+        $safe.IsDomainController = ([long]$safe.UserAccountControl -band $this.DomainControllerFlag()) -ne 0 -or
+            [int]$safe.PrimaryGroupID -in $this.DomainControllerPrimaryGroups()
+
+        if ($this.NeedsFreshClassification($Action.ObjectClass)) {
+            if (-not (Get-Command Get-ADAnalyzerAccountType -ErrorAction SilentlyContinue)) {
+                throw 'Fresh account classification is unavailable; remediation is blocked'
+            }
+            $classificationObject = $this.BuildFreshClassificationRecord(
+                $state,
+                (Get-ADAnalyzerOperationValue $Object @('MemberOf') @()),
+                [string](Get-ADAnalyzerOperationValue $Object @('ObjectClass'))
+            )
+            foreach ($rule in @($Plan.AccountClassification.AttributeRules)) {
+                if ($null -eq $rule) {
+                    continue
+                }
+                $attribute = [string](Get-ADAnalyzerOperationValue $rule @('Attribute'))
+                if (-not (Test-ADAnalyzerClassificationAttribute $attribute)) {
+                    throw 'Classification attribute cannot be safely re-queried'
+                }
+                $classificationObject[$attribute] = Get-ADAnalyzerOperationValue $Object @($attribute)
+            }
+            $classificationInput = @{
+                Object = [pscustomobject]$classificationObject
+                Profile = @{
+                    AccountClassification = ConvertTo-ADAnalyzerHashtable $Plan.AccountClassification
+                }
+                Membership = $membership
+            }
+            $classification = Get-ADAnalyzerAccountType @classificationInput
+            $safe.AccountType = [string](Get-ADAnalyzerOperationValue $classification @('Type') 'Unknown')
+            if (-not $this.HasFreshClassification($safe.AccountType)) {
+                throw 'Fresh account classification is unknown or conflicting'
+            }
+        }
+        $reason = $this.GetExclusion($safe, $Plan.Remediation)
+        if ($reason) {
+            throw "Fresh object safety check failed: $reason"
+        }
+    }
+
+    [void] AssertInactivity([object]$Object, [object]$Action) {
+        $ErrorActionPreference = 'Stop'
+        $days = 0L
+        if (-not [long]::TryParse([string]$Action.InactivityDays, [ref]$days) -or
+            -not $this.IsInactivityThresholdValid($days)) {
+            throw 'The reviewed action is missing its inactivity threshold'
+        }
+        $dates = [Collections.Generic.List[datetime]]::new()
+        foreach ($name in $this.FreshActivityPropertyNames()) {
+            $value = Get-ADAnalyzerOperationValue $Object @($name)
+            if ($null -eq $value -or [string]$value -eq '0') {
+                continue
+            }
+            try {
+                $fileTime = 0L
+                if ([long]::TryParse([string]$value, [ref]$fileTime)) {
+                    $dates.Add([datetime]::FromFileTimeUtc($fileTime))
+                }
+                else {
+                    $dates.Add($this.ParseFreshDate($value))
+                }
+            }
+            catch {
+                throw 'Fresh activity metadata could not be interpreted'
+            }
+        }
+        if ($dates.Count) {
+            $latest = $this.LatestFreshActivity($dates)
+        }
+        else {
+            $created = Get-ADAnalyzerOperationValue $Object @('WhenCreated')
+            if ($null -eq $created) {
+                throw 'Fresh inactivity evidence is unavailable'
+            }
+            try {
+                $latest = $this.ParseFreshDate($created)
+            }
+            catch {
+                throw 'Fresh creation metadata could not be interpreted'
+            }
+        }
+        if (-not $this.MeetsFreshInactivityThreshold($latest, $days)) {
+            throw 'Fresh activity no longer satisfies the reviewed inactivity rule'
+        }
+    }
+
+    hidden [bool] FreshClassMatches([string]$Observed, [object]$Approved) {
+        return -not ($Observed -ne $Approved)
+    }
+
+    hidden [string] GetFreshDomainSid([string]$Sid) {
+        if ($Sid -match '^(S-1-5-21-\d+-\d+-\d+)-\d+$') {
+            return $Matches[1]
+        }
+        return ''
+    }
+
+    hidden [Collections.Generic.List[object]] StartFreshPrivilegedSids([object[]]$Configured) {
+        $privileged = [Collections.Generic.List[object]]::new()
+        $privileged.AddRange($Configured)
+        $privileged.AddRange(@(
+            'S-1-5-32-544'
+            'S-1-5-32-548'
+            'S-1-5-32-549'
+            'S-1-5-32-550'
+            'S-1-5-32-551'
+            'S-1-5-32-552'
+        ))
+        return $privileged
+    }
+
+    hidden [void] AddFreshPrivilegedGroup([Collections.Generic.List[object]]$Privileged, [string]$GroupSid) {
+        if ($GroupSid -match '^S-1-5-21-(?:\d+-){3}(512|516|518|519|520|521|526|527)$') {
+            $Privileged.Add($GroupSid)
+        }
+    }
+
+    hidden [bool] HasUnresolvedFreshMembership([object[]]$Unresolved) {
+        foreach ($entry in $Unresolved) {
+            if ($this.IsFreshUnresolvedEntry($entry)) {
+                return $true
+            }
+        }
+        return $false
+    }
+
+    hidden [bool] IsFreshUnresolvedEntry([object]$Entry) {
+        return $null -ne $Entry
+    }
+
+    hidden [hashtable] CreateFreshSafetyRecord(
+        [object]$State,
+        [bool]$IsPrivileged,
+        [object]$AccountType,
+        [object]$ObjectClass
+    ) {
+        return @{
+            ObjectGuid = $State.ObjectGuid
+            SID = $State.SID
+            DistinguishedName = $State.DistinguishedName
+            WhenChanged = $State.WhenChanged
+            Enabled = $true
+            Privileged = $IsPrivileged
+            PrivilegeResolutionStatus = 'Complete'
+            AccountType = $AccountType
+            ObjectClass = $ObjectClass
+        }
+    }
+
+    hidden [string[]] FreshSafetyPropertyNames() {
+        return @(
+            'AdminCount'
+            'ProtectedFromAccidentalDeletion'
+            'ProtectedUser'
+            'Protected'
+            'IsCriticalSystemObject'
+            'IsDomainController'
+            'UserAccountControl'
+            'PrimaryGroupID'
+            'WellKnownSID'
+            'SIDHistory'
+        )
+    }
+
+    hidden [void] NormalizeFreshSafetyRecord([hashtable]$Record) {
+        # A successfully requested optional schema attribute can be unset.
+        if ($null -eq $Record.AdminCount) {
+            $Record.AdminCount = 0
+        }
+        if ($null -eq $Record.IsCriticalSystemObject) {
+            $Record.IsCriticalSystemObject = $false
+        }
+        $Record.SafetyMetadataStatus = 'Collected'
+    }
+
+    hidden [bool] NeedsFreshClassification([object]$ObjectClass) {
+        return [bool]($ObjectClass -eq 'User')
+    }
+
+    hidden [hashtable] BuildFreshClassificationRecord(
+        [object]$State,
+        [object]$MemberOf,
+        [string]$DirectoryObjectClass
+    ) {
+        return @{
+            DistinguishedName = $State.DistinguishedName
+            MemberOf = $MemberOf
+            DirectoryObjectClass = $DirectoryObjectClass
+        }
+    }
+
+    hidden [bool] HasFreshClassification([string]$AccountType) {
+        return $AccountType -in 'User', 'Service'
+    }
+
+    hidden [string[]] FreshActivityPropertyNames() {
+        return @('lastLogonTimestamp', 'lastLogon', 'LastLogonDate')
+    }
+
+    hidden [datetime] ParseFreshDate([object]$Value) {
+        return [datetime]::Parse(
+            (ConvertTo-ADAnalyzerOperationTime $Value),
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        ).ToUniversalTime()
+    }
+
+    hidden [datetime] LatestFreshActivity([Collections.Generic.List[datetime]]$Dates) {
+        $latest = $Dates[0]
+        foreach ($date in $Dates) {
+            if ($date -gt $latest) {
+                $latest = $date
+            }
+        }
+        return $latest
+    }
+
+    hidden [bool] MeetsFreshInactivityThreshold([datetime]$Activity, [long]$Days) {
+        return ([datetime]::UtcNow - $Activity).TotalDays -ge $Days
+    }
+
     hidden [object] BuildState([hashtable]$Fields) {
         return [pscustomobject][ordered]@{
             ObjectGuid = $Fields.ObjectGuid
@@ -2414,26 +2698,20 @@ function Assert-ADAnalyzerOperationPrivilege {
     if (-not (Get-Command Resolve-ADAnalyzerMembership -ErrorAction SilentlyContinue)) {
         throw 'Fresh privilege resolver is unavailable; remediation is blocked'
     }
-    if ((Get-ADAnalyzerOperationKind $Object) -ne $Action.ObjectClass) {
+    $guard = [ADAnalyzerRemediationGuard]::new()
+    if (-not $guard.FreshClassMatches((Get-ADAnalyzerOperationKind $Object), $Action.ObjectClass)) {
         throw 'Current object class differs from the approved action'
     }
     $groups = @(Get-ADGroup -Filter * -Properties members, memberOf, primaryGroupToken, SID @Connection)
     $sid = Get-ADAnalyzerOperationSid $Object
-    if ($sid -notmatch '^(S-1-5-21-\d+-\d+-\d+)-\d+$') {
+    $domainSid = $guard.GetFreshDomainSid($sid)
+    if (-not $domainSid) {
         throw 'A domain SID is required for fresh privilege resolution'
     }
-    $domainSid = $Matches[1]
-    $privileged = @($Plan.PrivilegedSids) + @('S-1-5-32-544',
-        'S-1-5-32-548',
-        'S-1-5-32-549',
-        'S-1-5-32-550',
-        'S-1-5-32-551',
-        'S-1-5-32-552')
+    $privileged = $guard.StartFreshPrivilegedSids(@($Plan.PrivilegedSids))
     foreach ($group in $groups) {
         $groupSid = Get-ADAnalyzerOperationSid $group
-        if ($groupSid -match '^S-1-5-21-(?:\d+-){3}(512|516|518|519|520|521|526|527)$') {
-            $privileged += , $groupSid
-        }
+        $guard.AddFreshPrivilegedGroup($privileged, $groupSid)
     }
     $membership = Resolve-ADAnalyzerMembership `
         -Object $Object `
@@ -2441,8 +2719,10 @@ function Assert-ADAnalyzerOperationPrivilege {
         -DomainSid $domainSid `
         -PrivilegedSids @($privileged | Select-Object `
             -Unique)
+    # Keep the native pipeline so getter errors retain the caller's capture.
     if ($null -eq $membership -or
-        @(Get-ADAnalyzerOperationValue $membership @('Unresolved') @() | Where-Object { $null -ne $_ }).Count -gt 0) {
+        @(Get-ADAnalyzerOperationValue $membership @('Unresolved') @() |
+            Where-Object { $guard.IsFreshUnresolvedEntry($_) }).Count -gt 0) {
         throw 'Fresh privilege resolution is incomplete; remediation is blocked'
     }
     $isPrivileged = Get-ADAnalyzerOperationValue $membership @('IsPrivileged')
@@ -2450,49 +2730,23 @@ function Assert-ADAnalyzerOperationPrivilege {
         throw 'Fresh privilege resolution did not return a definite result'
     }
     $state = Get-ADAnalyzerOperationState $Object
-    $safe = @{
-        ObjectGuid = $state.ObjectGuid
-        SID = $state.SID
-        DistinguishedName = $state.DistinguishedName
-        WhenChanged = $state.WhenChanged
-        Enabled = $true
-        Privileged = $isPrivileged
-        PrivilegeResolutionStatus = 'Complete'
-        AccountType = $Action.AccountType
-        ObjectClass = $Action.ObjectClass
-    }
-    foreach ($name in @('AdminCount',
-            'ProtectedFromAccidentalDeletion',
-            'ProtectedUser',
-            'Protected',
-            'IsCriticalSystemObject',
-            'IsDomainController',
-            'UserAccountControl',
-            'PrimaryGroupID',
-            'WellKnownSID',
-            'SIDHistory')) {
+    $safe = $guard.CreateFreshSafetyRecord($state, $isPrivileged, $Action.AccountType, $Action.ObjectClass)
+    foreach ($name in $guard.FreshSafetyPropertyNames()) {
         $safe[$name] = Get-ADAnalyzerOperationValue $Object @($name)
     }
-    # These optional schema attributes were explicitly requested by our successful
-    # query; an unset value differs from a missing or unreadable ACL-derived fact.
-    if ($null -eq $safe.AdminCount) {
-        $safe.AdminCount = 0
-    }
-    if ($null -eq $safe.IsCriticalSystemObject) {
-        $safe.IsCriticalSystemObject = $false
-    }
-    $safe.SafetyMetadataStatus = 'Collected'
+    $guard.NormalizeFreshSafetyRecord($safe)
     $safe.TransitiveGroups = @(Get-ADAnalyzerOperationValue $membership @('EffectiveSids') @())
-    $safe.IsDomainController = ([long]$safe.UserAccountControl -band 8192) -ne 0 -or [int]$safe.PrimaryGroupID -in @(516, 521)
-    if ($Action.ObjectClass -eq 'User') {
+    $safe.IsDomainController = ([long]$safe.UserAccountControl -band $guard.DomainControllerFlag()) -ne 0 -or
+        [int]$safe.PrimaryGroupID -in $guard.DomainControllerPrimaryGroups()
+    if ($guard.NeedsFreshClassification($Action.ObjectClass)) {
         if (-not (Get-Command Get-ADAnalyzerAccountType -ErrorAction SilentlyContinue)) {
             throw 'Fresh account classification is unavailable; remediation is blocked'
         }
-        $classificationObject = @{
-            DistinguishedName = $state.DistinguishedName
-            MemberOf = Get-ADAnalyzerOperationValue $Object @('MemberOf') @()
-            DirectoryObjectClass = [string](Get-ADAnalyzerOperationValue $Object @('ObjectClass'))
-        }
+        $classificationObject = $guard.BuildFreshClassificationRecord(
+            $state,
+            (Get-ADAnalyzerOperationValue $Object @('MemberOf') @()),
+            [string](Get-ADAnalyzerOperationValue $Object @('ObjectClass'))
+        )
         foreach ($rule in @($Plan.AccountClassification.AttributeRules)) {
             if ($null -ne $rule) {
                 $attribute = [string](Get-ADAnalyzerOperationValue $rule @('Attribute'))
@@ -2507,7 +2761,7 @@ function Assert-ADAnalyzerOperationPrivilege {
             -Profile $classificationProfile `
             -Membership $membership
         $safe.AccountType = [string](Get-ADAnalyzerOperationValue $classification @('Type') 'Unknown')
-        if ($safe.AccountType -notin @('User', 'Service')) {
+        if (-not $guard.HasFreshClassification($safe.AccountType)) {
             throw 'Fresh account classification is unknown or conflicting'
         }
     }
@@ -2523,12 +2777,14 @@ function Assert-ADAnalyzerOperationInactivity {
         $Action
 
     )
+    $guard = [ADAnalyzerRemediationGuard]::new()
     $days = 0L
-    if (-not [long]::TryParse([string]$Action.InactivityDays, [ref]$days) -or $days -lt 0) {
+    if (-not [long]::TryParse([string]$Action.InactivityDays, [ref]$days) -or
+        -not $guard.IsInactivityThresholdValid($days)) {
         throw 'The reviewed action is missing its inactivity threshold'
     }
     $dates = [Collections.Generic.List[datetime]]::new()
-    foreach ($name in @('lastLogonTimestamp', 'lastLogon', 'LastLogonDate')) {
+    foreach ($name in $guard.FreshActivityPropertyNames()) {
         $value = Get-ADAnalyzerOperationValue $Object @($name)
         if ($null -eq $value -or [string]$value -eq '0') {
             continue
@@ -2549,7 +2805,7 @@ function Assert-ADAnalyzerOperationInactivity {
         }
     }
     if ($dates.Count) {
-        $latest = $dates.ToArray() | Sort-Object -Descending | Select-Object -First 1
+        $latest = $guard.LatestFreshActivity($dates)
     }
     else {
         $created = Get-ADAnalyzerOperationValue $Object @('WhenCreated')
@@ -2565,7 +2821,7 @@ function Assert-ADAnalyzerOperationInactivity {
             throw 'Fresh creation metadata could not be interpreted'
         }
     }
-    if (([datetime]::UtcNow - $latest).TotalDays -lt $days) {
+    if (-not $guard.MeetsFreshInactivityThreshold($latest, $days)) {
         throw 'Fresh activity no longer satisfies the reviewed inactivity rule'
     }
     # This checks known activity on the pinned DC and its replicated timestamp;
