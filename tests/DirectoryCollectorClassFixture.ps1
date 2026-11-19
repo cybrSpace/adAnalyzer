@@ -356,20 +356,65 @@ function ConvertTo-FixtureError($Diagnostic) {
             Id = $null
         }
     }
+    $type = $Diagnostic.GetType().FullName
+    if ($Diagnostic -is [Collections.IList]) {
+        return [pscustomobject][ordered]@{
+            Type = $type
+            Id = $null
+            Entries = @(
+                foreach ($entry in $Diagnostic) {
+                    ConvertTo-FixtureError $entry
+                }
+            )
+        }
+    }
     $record = if ($Diagnostic -is [Management.Automation.IContainsErrorRecord]) {
         $Diagnostic.ErrorRecord
     }
     else {
         $Diagnostic
     }
-    [pscustomobject][ordered]@{
-        Type = $Diagnostic.GetType().FullName
-        Id = $record.FullyQualifiedErrorId
-        Category = [string]$record.CategoryInfo.Category
-        Message = $record.Exception.Message
-        ExceptionType = $record.Exception.GetType().FullName
-        Restore = $record.Exception.Data['ADAnalyzerLocationRestorationError']
-        Remove = $record.Exception.Data['ADAnalyzerDriveRemovalError']
+    if ($record -is [Management.Automation.ErrorRecord]) {
+        $exception = $record.Exception
+        return [pscustomobject][ordered]@{
+            Type = $type
+            Id = $record.FullyQualifiedErrorId
+            Category = [string]$record.CategoryInfo.Category
+            Message = if ($null -ne $exception) {
+                $exception.Message
+            }
+            ExceptionType = if ($null -ne $exception) {
+                $exception.GetType().FullName
+            }
+            Restore = if ($null -ne $exception) {
+                $exception.Data['ADAnalyzerLocationRestorationError']
+            }
+            Remove = if ($null -ne $exception) {
+                $exception.Data['ADAnalyzerDriveRemovalError']
+            }
+        }
+    }
+    if ($Diagnostic -is [Exception]) {
+        return [pscustomobject][ordered]@{
+            Type = $type
+            Id = $null
+            Message = $Diagnostic.Message
+        }
+    }
+    return [pscustomobject][ordered]@{
+        Type = $type
+        Id = $null
+    }
+}
+
+function Get-FixtureCapturedError([object[]]$Diagnostics) {
+    foreach ($diagnostic in $Diagnostics) {
+        if ($diagnostic.Id) {
+            $diagnostic
+        }
+        if ($null -ne $diagnostic.PSObject.Properties['Entries']) {
+            Get-FixtureCapturedError $diagnostic.Entries
+        }
     }
 }
 
@@ -444,7 +489,7 @@ if ($Case -eq 'Native') {
                         $script:Trace[2].Step -ceq 'Get-ADForest') 'Native Direct entered the provider drive.'
                 }
                 'Denied' {
-                    $denied = @($actual.Errors | Where-Object {
+                    $denied = @(Get-FixtureCapturedError $actual.Errors | Where-Object {
                             $_.Id -like 'Fixture.DirectoryDenied*' -and
                             $_.Message -ceq 'Fixture directory query denied.'
                         })
@@ -458,7 +503,7 @@ if ($Case -eq 'Native') {
                         $script:Ambient.Count -eq 2 -and $script:Trace[-1].Step -ceq 'Remove') 'Failed native drive entry skipped cleanup or fell back to bulk queries.'
                 }
                 'Competing' {
-                    $primary = @($actual.Errors | Where-Object {
+                    $primary = @(Get-FixtureCapturedError $actual.Errors | Where-Object {
                             $_.Id -like 'InvalidCastFromStringToInteger*' -and
                             $_.Message -like '*fixture invalid account flag*'
                         })
