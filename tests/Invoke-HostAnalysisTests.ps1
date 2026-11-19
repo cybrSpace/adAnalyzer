@@ -59,6 +59,9 @@ function Get-ADAnalyzerAuditPolicy {
 }
 $script:CertificateValid = $true
 $script:CertificateFails = $false
+$script:CertificateFailureHost = $null
+$script:CertificateRemainingDays = 90
+$script:TlsArguments = [Collections.Generic.List[string]]::new()
 
 function Get-ADAnalyzerTlsCertificate {
     param(
@@ -69,7 +72,8 @@ function Get-ADAnalyzerTlsCertificate {
 
     )
     $script:TlsCalls++
-    if ($script:CertificateFails) {
+    $script:TlsArguments.Add(('{0}:{1}/{2} timeout={3}' -f $HostName, $Port, $ServerName, $TimeoutSeconds))
+    if ($script:CertificateFails -or $HostName -ceq $script:CertificateFailureHost) {
         throw 'fixture TLS failed'
     }
     [pscustomobject]@{
@@ -78,7 +82,7 @@ function Get-ADAnalyzerTlsCertificate {
         NameValid = $script:CertificateValid
         ChainValid = $script:CertificateValid
         NotBefore = [datetime]::UtcNow.AddDays(-1)
-        NotAfter = [datetime]::UtcNow.AddDays(90)
+        NotAfter = [datetime]::UtcNow.AddDays($script:CertificateRemainingDays)
         Protocol = 'Tls12'
         RevocationChecked = $false
     }
@@ -668,6 +672,206 @@ Test-HostPolicy 'TLS handshake errors are visible and never produce a passing ce
     }
     finally {
         $script:CertificateFails = $false
+    }
+}
+Test-HostPolicy 'certificate endpoint defaults preserve validated options and TLS targets under StrictMode' {
+    $copy = Get-ADAnalyzerDefaultProfile
+    $copy.Analysis.HostTimeoutSeconds = 17
+    $endpointCases = @(
+        @{
+            Endpoint = @{
+                HostName = 'dc.example.invalid'
+            }
+            Target = 'dc.example.invalid:443/dc.example.invalid'
+        }
+        @{
+            Endpoint = @{
+                HostName = 'dc.example.invalid'
+                Port = 443
+                ServerName = $null
+                MinimumRemainingDays = 30
+            }
+            Target = 'dc.example.invalid:443/dc.example.invalid'
+        }
+        @{
+            Endpoint = @{
+                HostName = 'dc.example.invalid'
+                Port = 443
+                ServerName = 'dc.example.invalid'
+                MinimumRemainingDays = 30
+            }
+            Target = 'dc.example.invalid:443/dc.example.invalid'
+        }
+        @{
+            Endpoint = @{
+                HostName = 'dc.example.invalid'
+                Port = 636
+                MinimumRemainingDays = 30
+            }
+            Target = 'dc.example.invalid:636/dc.example.invalid'
+        }
+        @{
+            Endpoint = @{
+                HostName = 'dc.example.invalid'
+                ServerName = 'sni.example.invalid'
+                MinimumRemainingDays = 30
+            }
+            Target = 'dc.example.invalid:443/sni.example.invalid'
+        }
+    )
+    foreach ($case in $endpointCases) {
+        $copy.Host.CertificateEndpoints = @($case.Endpoint)
+        $profileBefore = ConvertTo-Json -InputObject $copy -Depth 30 -Compress
+        foreach ($strict in @($false, $true)) {
+            & {
+                if ($strict) {
+                    Set-StrictMode -Version Latest
+                }
+                $configuration = [ADAnalyzerProfile]::new($copy).ToHashtable()
+                $endpoint = $configuration.Host.CertificateEndpoints[0]
+                $expectedKeys = ($case.Endpoint.Keys | Sort-Object) -join ','
+                $actualKeys = ($endpoint.Keys | Sort-Object) -join ','
+                Assert-Equal $expectedKeys $actualKeys
+                foreach ($key in $case.Endpoint.Keys) {
+                    Assert-True ([object]::Equals($case.Endpoint[$key], $endpoint[$key])) ('Endpoint option changed: ' + $key)
+                }
+
+                $tls = $script:TlsCalls
+                $checks = @(Test-ADAnalyzerHostPolicy -Profile $copy)
+                Assert-Equal ($tls + 1) $script:TlsCalls
+                Assert-Equal ($case.Target + ' timeout=17') $script:TlsArguments[-1]
+                Assert-Equal 'HOST.TLS_CERTIFICATE,HOST.CERTIFICATE_REVOCATION' ($checks.RuleId -join ',')
+                Assert-Equal 'Pass,Unknown' ($checks.Status -join ',')
+                Assert-Equal $case.Target $checks[0].Target
+                Assert-Equal $case.Target $checks[1].Target
+                Assert-Equal 30 $checks[0].Expected.MinimumRemainingDays
+                $expectedId = (New-ADAnalyzerCheck -RuleId 'HOST.TLS_CERTIFICATE' -Target $case.Target -Status Pass).CheckId
+                Assert-Equal $expectedId $checks[0].CheckId
+                Assert-Equal $profileBefore (ConvertTo-Json -InputObject $copy -Depth 30 -Compress)
+            }
+        }
+    }
+}
+Test-HostPolicy 'certificate thresholds distinguish default null and explicit zero under StrictMode' {
+    $copy = Get-ADAnalyzerDefaultProfile
+    $endpoint = @{
+        HostName = 'dc.example.invalid'
+        Port = 636
+        ServerName = 'sni.example.invalid'
+    }
+    $script:CertificateRemainingDays = 10
+    try {
+        foreach ($strict in @($false, $true)) {
+            & {
+                if ($strict) {
+                    Set-StrictMode -Version Latest
+                }
+                foreach ($threshold in @('omitted', $null, 0, 30)) {
+                    $copy.Host.CertificateEndpoints = @($endpoint.Clone())
+                    if ($threshold -cne 'omitted') {
+                        $copy.Host.CertificateEndpoints[0]['MinimumRemainingDays'] = $threshold
+                    }
+                    $expectedStatus = 'Fail'
+                    $expectedThreshold = 30
+                    if ($null -ne $threshold -and $threshold -eq 0) {
+                        $expectedStatus = 'Pass'
+                        $expectedThreshold = 0
+                    }
+                    $tls = $script:TlsCalls
+                    $checks = @(Test-ADAnalyzerHostPolicy -Profile $copy)
+                    Assert-Equal ($tls + 1) $script:TlsCalls
+                    Assert-Equal ($expectedStatus + ',Unknown') ($checks.Status -join ',')
+                    Assert-Equal $expectedThreshold $checks[0].Expected.MinimumRemainingDays
+                }
+            }
+        }
+    }
+    finally {
+        $script:CertificateRemainingDays = 90
+    }
+}
+Test-HostPolicy 'invalid ports and equivalent default certificate endpoints are rejected before TLS' {
+    $copy = Get-ADAnalyzerDefaultProfile
+    foreach ($strict in @($false, $true)) {
+        & {
+            if ($strict) {
+                Set-StrictMode -Version Latest
+            }
+            foreach ($port in @($null, 0, 65536)) {
+                $copy.Host.CertificateEndpoints = @(@{
+                        HostName = 'dc.example.invalid'
+                        Port = $port
+                    })
+                $tls = $script:TlsCalls
+                $failure = $null
+                try {
+                    $null = Test-ADAnalyzerHostPolicy -Profile $copy
+                }
+                catch {
+                    $failure = $_.Exception.GetBaseException().Message
+                }
+                Assert-Equal 'Certificate endpoint Port must be 1..65535' $failure
+                Assert-Equal $tls $script:TlsCalls
+            }
+
+            $copy.Host.CertificateEndpoints = @(
+                @{
+                    HostName = 'dc.example.invalid'
+                }
+                @{
+                    HostName = 'DC.EXAMPLE.INVALID'
+                    Port = 443
+                    ServerName = 'DC.EXAMPLE.INVALID'
+                    MinimumRemainingDays = 0
+                }
+            )
+            $tls = $script:TlsCalls
+            $failure = $null
+            try {
+                $null = Test-ADAnalyzerHostPolicy -Profile $copy
+            }
+            catch {
+                $failure = $_.Exception.GetBaseException().Message
+            }
+            Assert-Equal 'Duplicate host certificate endpoint identity; use one rule per host, port, and server name' $failure
+            Assert-Equal $tls $script:TlsCalls
+        }
+    }
+}
+Test-HostPolicy 'certificate defaults preserve a true TLS failure and continue to a later endpoint' {
+    $copy = Get-ADAnalyzerDefaultProfile
+    $copy.Host.CertificateEndpoints = @(
+        @{
+            HostName = 'fault.example.invalid'
+        }
+        @{
+            HostName = 'next.example.invalid'
+            Port = 636
+            ServerName = 'sni.example.invalid'
+            MinimumRemainingDays = 30
+        }
+    )
+    $script:CertificateFailureHost = 'fault.example.invalid'
+    try {
+        foreach ($strict in @($false, $true)) {
+            & {
+                if ($strict) {
+                    Set-StrictMode -Version Latest
+                }
+                $tls = $script:TlsCalls
+                $checks = @(Test-ADAnalyzerHostPolicy -Profile $copy)
+                Assert-Equal ($tls + 2) $script:TlsCalls
+                Assert-Equal 'fault.example.invalid:443/fault.example.invalid timeout=30' $script:TlsArguments[$tls]
+                Assert-Equal 'next.example.invalid:636/sni.example.invalid timeout=30' $script:TlsArguments[$tls + 1]
+                Assert-Equal 'HOST.TLS_CERTIFICATE,HOST.TLS_CERTIFICATE,HOST.CERTIFICATE_REVOCATION' ($checks.RuleId -join ',')
+                Assert-Equal 'Unreadable,Pass,Unknown' ($checks.Status -join ',')
+                Assert-Equal 'fixture TLS failed' $checks[0].Message
+                Assert-Equal 'fault.example.invalid:443/fault.example.invalid' $checks[0].Target
+            }
+        }
+    }
+    finally {
+        $script:CertificateFailureHost = $null
     }
 }
 Test-HostPolicy 'missing registry overrides remain unknown and unconfigured audit causes no read' {

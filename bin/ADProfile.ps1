@@ -418,14 +418,14 @@ class ADAnalyzerProfile {
                 throw 'Certificate minimum remaining days must be nonnegative'
             }
             $hostName = [string]$endpoint.HostName
-            $port = if ($endpoint.Port) {
-                [int]$endpoint.Port
+            $port = if ($endpoint['Port']) {
+                [int]$endpoint['Port']
             }
             else {
                 443
             }
-            $serverName = if ($endpoint.ServerName) {
-                [string]$endpoint.ServerName
+            $serverName = if ($endpoint['ServerName']) {
+                [string]$endpoint['ServerName']
             }
             else {
                 $hostName

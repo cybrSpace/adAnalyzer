@@ -281,14 +281,14 @@ function Test-ADAnalyzerHostPolicy {
     }
     foreach ($endpoint in @($rules.CertificateEndpoints)) {
         $hostName = [string]$endpoint.HostName
-        $port = if ($endpoint.Port) {
-            [int]$endpoint.Port
+        $port = if ($endpoint['Port']) {
+            [int]$endpoint['Port']
         }
         else {
             443
         }
-        $serverName = if ($endpoint.ServerName) {
-            [string]$endpoint.ServerName
+        $serverName = if ($endpoint['ServerName']) {
+            [string]$endpoint['ServerName']
         }
         else {
             $hostName
@@ -301,8 +301,8 @@ function Test-ADAnalyzerHostPolicy {
                 -ServerName $serverName `
                 -TimeoutSeconds $configuration.Analysis.HostTimeoutSeconds
             $remaining = ([datetime]$certificate.NotAfter - [datetime]::UtcNow).TotalDays
-            $minimum = if ($null -ne $endpoint.MinimumRemainingDays) {
-                [int]$endpoint.MinimumRemainingDays
+            $minimum = if ($null -ne $endpoint['MinimumRemainingDays']) {
+                [int]$endpoint['MinimumRemainingDays']
             }
             else {
                 30
