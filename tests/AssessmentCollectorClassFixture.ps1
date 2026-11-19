@@ -1273,6 +1273,46 @@ if ($Case -eq 'Direct') {
             }
         }
 
+        Test-Fixture 'empty and BOM-only JSON profiles preserve bootstrap defaults and overrides' {
+            $expectedDomain = 'empty-profile.fixture.invalid'
+            $explicitServer = 'selected.empty-profile.fixture.invalid'
+            $profileBytes = [ordered]@{
+                Empty = [byte[]]@()
+                BomOnly = [Text.UTF8Encoding]::new($true).GetPreamble()
+            }
+            $priorDomain = $env:USERDNSDOMAIN
+            try {
+                $env:USERDNSDOMAIN = $expectedDomain
+                foreach ($label in $profileBytes.Keys) {
+                    $path = Join-Path $directProfileDirectory ($label + '-profile.json')
+                    $bytes = $profileBytes[$label]
+                    [IO.File]::WriteAllBytes($path, $bytes)
+                    Invoke-FixtureExpectedFailure {
+                        $collector.Collect(@{ ProfilePath = $path })
+                    } 'Stopped at the fixture root boundary.' 'Import,Root'
+                    $ambientCall = $script:bootstrapTrace[1]
+
+                    $options = @{
+                        ProfilePath = $path
+                        Server = $explicitServer
+                    }
+                    Invoke-FixtureExpectedFailure {
+                        $collector.Collect($options)
+                    } 'Stopped at the fixture root boundary.' 'Import,Root'
+                    $explicitCall = $script:bootstrapTrace[1]
+                    Assert-Fixture (
+                        $ambientCall.Server -ceq $expectedDomain -and $explicitCall.Server -ceq $explicitServer -and
+                        -not $ambientCall.CredentialBound -and -not $explicitCall.CredentialBound -and
+                        $ambientCall.ErrorAction -eq 'Stop' -and $explicitCall.ErrorAction -eq 'Stop' -and
+                        [Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) -ceq [Convert]::ToBase64String($bytes)
+                    ) ("The {0} profile changed the bootstrap target, options, or bytes." -f $label)
+                }
+            }
+            finally {
+                $env:USERDNSDOMAIN = $priorDomain
+            }
+        }
+
         Test-Fixture 'profile read and format errors precede provider import' {
             $unsupported = Join-Path $directProfileDirectory 'fixture.ini'
             $malformed = Join-Path $directProfileDirectory 'malformed.json'
@@ -1361,7 +1401,7 @@ $ErrorActionPreference = 'Stop'
 '@
                 $output = @($worker.AddScript($child).AddArgument($PSCommandPath).AddArgument($RepositoryRoot).Invoke())
                 Assert-Fixture (
-                    $output.Count -eq 1 -and [string]$output[0] -ceq 'PASS assessment collector Direct 10' -and
+                    $output.Count -eq 1 -and [string]$output[0] -ceq 'PASS assessment collector Direct 11' -and
                     $worker.Streams.Error.Count -eq 0
                 ) ('Secondary assessment process failed: ' + ($worker.Streams.Error -join [Environment]::NewLine))
             }

@@ -160,7 +160,7 @@ class ADAnalyzerProfileDefinition {
         }
     }
 
-    [object] ReadOverrides([string]$Path) {
+    [ADAnalyzerProfile] ReadProfile([string]$Path) {
         $loaded = $null
         switch ([IO.Path]::GetExtension($Path).ToLowerInvariant()) {
             '.psd1' {
@@ -177,7 +177,10 @@ class ADAnalyzerProfileDefinition {
                 throw 'Profiles must be .json or restricted .psd1 data files'
             }
         }
-        return $loaded
+        if ($null -eq $loaded) {
+            return [ADAnalyzerProfile]::new()
+        }
+        return [ADAnalyzerProfile]::new($loaded)
     }
 }
 
@@ -232,7 +235,7 @@ class ADAnalyzerProfile {
 
     static [ADAnalyzerProfile] Load([string]$Path) {
         $definition = [ADAnalyzerProfileDefinition]::new()
-        return [ADAnalyzerProfile]::new($definition.ReadOverrides($Path))
+        return $definition.ReadProfile($Path)
     }
 
     hidden [void] ValidateCommon([hashtable]$result) {

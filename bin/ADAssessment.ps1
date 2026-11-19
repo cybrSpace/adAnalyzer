@@ -388,7 +388,7 @@ class ADAnalyzerAssessmentCollector {
         }
         if ($ProfilePath) {
             $definition = [ADAnalyzerProfileDefinition]::new()
-            $Profile = $definition.ReadOverrides($ProfilePath)
+            return $definition.ReadProfile($ProfilePath).ToHashtable()
         }
         return [ADAnalyzerProfile]::new($Profile).ToHashtable()
     }

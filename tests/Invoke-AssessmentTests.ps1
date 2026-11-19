@@ -1628,7 +1628,7 @@ foreach ($case in $baselineImporterCases.Keys) {
 $assessmentCollectorCases = [ordered]@{
     Native = 52
     Construction = 2
-    Direct = 10
+    Direct = 11
     Isolation = 2
     Composition = 3
 }
