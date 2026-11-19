@@ -394,6 +394,38 @@ try {
             Assert-True (($output -join ' ') -match ('PASS group inventory ' + $mode)) 'Group inventory child did not finish'
         }
     }
+    $groupInventoryCases = [ordered]@{
+        Construction = 2
+        Traversal = 5
+        Failures = 3
+        Export = 5
+        Isolation = 2
+    }
+    foreach ($case in $groupInventoryCases.Keys) {
+        Invoke-AuxiliaryTest ('AD group inventory class: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $fixture = Join-Path $PSScriptRoot 'GroupInventoryClassFixture.ps1'
+            $savedErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -RepositoryRoot $RepositoryRoot -Mode $case 2>&1
+                $childExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $savedErrorActionPreference
+            }
+            if ($childExitCode -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw ($output -join [Environment]::NewLine)
+            }
+            $expected = 'PASS AD group inventory class {0} {1}' -f $case, $groupInventoryCases[$case]
+            $sentinels = @($output | Where-Object { [string]$_ -clike 'PASS AD group inventory class *' })
+            Assert-True ($sentinels.Count -eq 1 -and [string]$sentinels[0] -ceq $expected) 'Fresh process did not execute every selected group inventory control.'
+        }
+    }
+
     foreach ($mode in @('Inert',
             'Comparison',
             'Sets',
