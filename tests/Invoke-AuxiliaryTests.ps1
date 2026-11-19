@@ -263,6 +263,37 @@ try {
             Assert-True (($output -join ' ') -match ('PASS user import ' + $mode)) 'User import child did not finish'
         }
     }
+    $pasImportCases = [ordered]@{
+        Construction = 2
+        Preview = 4
+        Guards = 4
+        Apply = 4
+    }
+    foreach ($case in $pasImportCases.Keys) {
+        Invoke-AuxiliaryTest ('PAS user import class: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $fixture = Join-Path $PSScriptRoot 'UserImportClassFixture.ps1'
+            $savedErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -RepositoryRoot $RepositoryRoot -Mode $case 2>&1
+                $childExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $savedErrorActionPreference
+            }
+            if ($childExitCode -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw ($output -join [Environment]::NewLine)
+            }
+            $expected = 'PASS PAS user import class {0} {1}' -f $case, $pasImportCases[$case]
+            $sentinels = @($output | Where-Object { [string]$_ -clike 'PASS PAS user import class *' })
+            Assert-True ($sentinels.Count -eq 1 -and [string]$sentinels[0] -ceq $expected) 'Fresh process did not execute every selected PAS import control.'
+        }
+    }
+
     foreach ($mode in @('Known', 'Unknown', 'Limits', 'Concurrent', 'ConcurrentLimit', 'Direct', 'ActualPool')) {
         Invoke-AuxiliaryTest ('formatter contract: ' + $mode) {
             $output = @(& (Get-Process `

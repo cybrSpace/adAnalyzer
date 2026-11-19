@@ -65,6 +65,19 @@ This is a file-based policy reader, not a GPMC HTML report generator or an ADMX 
 
 `etc/New-ADPASUser.ps1` defines `New-ADPASUser -CsvPath <file>` with optional `Server`, `Credential`, and `WhatIf`; CLI input is explicit and dot sourcing is inert. It imports the bundled AD module locally, uses the target naming context for exact SAM existence checks, warns and skips existing users, and stops after lookup errors. Creation requires `name`, `username`, `password`, and `path`; existing-user rows need only `username`. Optional given/surname/display/department/employee/UPN fields retain their CSV meaning. Absent users get one `New-ADUser` invocation with enabled/change-password-at-logon flags, without an extra enable call or returned password/account payload. `WhatIf` reads and validates but does not create users. The batch is not transactional: earlier rows and even the failing row may persist after an error. There is no automatic retry, rollback, or resumption of partially created existing users.
 
+```powershell
+. .\etc\New-ADPASUser.ps1
+$importer = [ADAnalyzerPasUserImporter]::new()
+$options = @{ Server = 'dc01.example.com' }
+$plan = $importer.Preview('.\pas-users.csv', $options)
+$plan.Actions | Select-Object ActionId, Username, Path, Status, PasswordPresent
+
+$approvedId = '<reviewed pending action ID>'
+$result = $importer.Apply('.\pas-users.csv', $plan, @($approvedId), $options)
+```
+
+The constructor is inert. `Preview` reads the CSV and checks account existence. Its detached plan reports password presence as a Boolean. `Apply` requires explicit IDs from the reviewed pending actions, validates the current file and target against the plan, and checks the account again before one creation attempt. Approve at most one pending action per account. Approval covers the visible account fields and password presence. The current CSV supplies the password during the approved operation. `Preview` is the class dry-run method. Use `New-ADPASUser -WhatIf` for native PowerShell confirmation and warning behavior.
+
 `etc/Test-Runspace.ps1` now loads without opening authentication contexts. `Connect-WindowsServer -context <host> -principal <SAM-group>` delegates to `Get-ServerHPA` and accepts optional `Credential`; the legacy `domain` argument is unused and borrowed. CLI requires an explicit host and group. `Initialize-RunspacePool` returns an unopened `jobs/init/pool` dictionary, with positive `MaxRunspaces` defaulting to `Environment.ProcessorCount`; callers own opening and disposing the pool. Absolute sibling-reader configuration is copied into workers so cloned connection functions can load their dependency. `Invoke-Cmdlet` runs once unless `Retry` is set, then uses `Max` total attempts (default 3) and `DelaySeconds` between attempts (default 1). It preserves successful output and terminal errors; callers own retry safety and block completion.
 
 The prototype's `Format-WindowsServerException` uses local classification state and synchronizes both authentication-error categories against the shared attempt counter. The configured threshold is checked atomically with each increment; unknown diagnostics retain their input evidence.
