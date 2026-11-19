@@ -451,7 +451,10 @@ function Invoke-GuardNativeRoute {
         }
         'BadExclusionEvidence' {
             $record = New-GuardRecord
-            $record.AdminCount = 'nonnumeric evidence fixture'
+            $record | Add-Member -MemberType ScriptProperty -Name AdminCount -Force -Value {
+                $script:guardTrace.Add('Read AdminCount')
+                return 'nonnumeric evidence fixture'
+            }
             Get-ADAnalyzerOperationExclusion $record (New-GuardSettings)
         }
         'PreconditionPriority' {
@@ -562,13 +565,30 @@ function Assert-GuardNativeParity([string]$Scenario, [string]$Action) {
 
     $faults = @{
         BadUac = 'InvalidCastFromStringToInteger'
-        BadExclusionEvidence = 'nonnumeric evidence fixture'
         PreconditionPriority = 'Remediation precondition failed: SID'
         BadPlanBool = 'Invalid plan boolean setting: IncludeServiceAccounts'
         BadPlanStructure = 'Plan includes an unsupported, unapproved, or unbound action'
         DuplicateAction = 'Plan contains duplicate action IDs'
     }
-    if ($faults.ContainsKey($Scenario)) {
+    if ($Scenario -eq 'BadExclusionEvidence') {
+        $witness = ConvertFrom-Json -InputObject $expected
+        $referenceCast = Get-FixtureFailure { [int]'nonnumeric cast control' }
+        $castId = ($referenceCast.FullyQualifiedErrorId -split ',', 2)[0]
+        $diagnostics = @($witness.History.Entries) + @($witness.Caught) + @($witness.Stream)
+        $observedCast = $false
+        foreach ($diagnostic in $diagnostics) {
+            if ($null -ne $diagnostic -and $diagnostic.Id -and
+                ($diagnostic.Id -split ',', 2)[0] -ceq $castId) {
+                $observedCast = $true
+                break
+            }
+        }
+        Assert-Fixture ($observedCast -and ($witness.Trace -join ',') -ceq 'Read AdminCount') (
+            "The archived helper did not read AdminCount once and record the native cast ${castId} with ErrorAction=$Action." +
+            [Environment]::NewLine + $expected
+        )
+    }
+    elseif ($faults.ContainsKey($Scenario)) {
         if ($Action -ne 'Ignore') {
             Assert-Fixture ($expected.Contains($faults[$Scenario])) ('The archived helper did not reach ' + $Scenario + '.')
         }
