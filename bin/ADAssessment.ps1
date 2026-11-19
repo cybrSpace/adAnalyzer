@@ -108,11 +108,18 @@ class ADAnalyzerAssessmentEngine {
         foreach ($check in $directoryChecks) {
             $null = $checks.Add($check)
         }
-        foreach ($check in @($DirectoryData.HostChecks | Where-Object { $null -ne $_ })) {
-            $null = $checks.Add($check)
+        # A snapshot can omit HostChecks when host policy was not requested.
+        if (Test-ADAnalyzerOptionalSecretRecordMember @{ Record = $DirectoryData } 'HostChecks') {
+            foreach ($check in @($DirectoryData.HostChecks | Where-Object { $null -ne $_ })) {
+                $null = $checks.Add($check)
+            }
         }
+        $unreadablePolicyIndexes = [Collections.Generic.HashSet[int]]::new()
+        $policyIndex = -1
         foreach ($gpo in $GpoData) {
+            $policyIndex++
             if ($gpo.Error) {
+                $null = $unreadablePolicyIndexes.Add($policyIndex)
                 $identity = if ($gpo.Gpo.Id) {
                     [string]$gpo.Gpo.Id
                 }
@@ -218,6 +225,7 @@ class ADAnalyzerAssessmentEngine {
         if (-not $DirectoryData.Domain -and $Target -ne 'offline') {
             $state = 'Failed'
         }
+        $reportIndex = -1
         $result = [pscustomobject][ordered]@{
             SchemaVersion = 1
             RunId = [guid]::NewGuid().ToString()
@@ -237,12 +245,31 @@ class ADAnalyzerAssessmentEngine {
             Errors = $errors
             Data = [pscustomobject]@{
                 Directory = $DirectoryData
-                Policies = @($GpoData | ForEach-Object { [pscustomobject]@{
-                            Gpo = $_.Gpo
-                            Files = $_.Policy.Files
-                            UnparsedFiles = $_.Policy.UnparsedFiles
+                Policies = @(
+                    $GpoData | ForEach-Object {
+                        $reportIndex++
+                        $unreadable = $unreadablePolicyIndexes.Contains($reportIndex)
+                        $gpoMetadata = $_.Gpo
+
+                        # Each field uses its own native Policy observation.
+                        $policy = $_.Policy
+                        $files = $null
+                        if ($null -ne $policy -or -not $unreadable) {
+                            $files = $policy.Files
+                        }
+                        $policy = $_.Policy
+                        $unparsedFiles = $null
+                        if ($null -ne $policy -or -not $unreadable) {
+                            $unparsedFiles = $policy.UnparsedFiles
+                        }
+                        [pscustomobject]@{
+                            Gpo = $gpoMetadata
+                            Files = $files
+                            UnparsedFiles = $unparsedFiles
                             ReadError = $_.Error
-                        } })
+                        }
+                    }
+                )
             }
         }
         # No credentials or secret-bearing native records escape the assessment boundary.

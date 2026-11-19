@@ -1953,6 +1953,10 @@ if ($Case -eq 'Composition') {
             Invoke-AssessmentCompositionFixture $transport $compositionCollector
         }
     }
+    Test-Fixture 'actual strict composition retains unreadable and healthy GPOs' {
+        Set-StrictMode -Version Latest
+        Invoke-AssessmentCompositionFixture Direct $compositionCollector
+    }
     Test-Fixture 'SkipGpo and terminal evaluation preserve the borrowed host observation' {
         function script:Test-ADAnalyzerDirectoryPolicy {
             [CmdletBinding()]

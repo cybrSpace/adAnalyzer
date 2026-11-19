@@ -1528,6 +1528,339 @@ finally {
     Remove-Item -LiteralPath $temp -Recurse -Force -WhatIf:$false -Confirm:$false
 }
 
+# U124 optional assessment fields meet the same StrictMode contract on both entry paths.
+function Invoke-AssessmentOptionalFieldFixture([string]$Route, $Directory, [object[]]$Policies = @()) {
+    Set-StrictMode -Version Latest
+    if ($Route -eq 'Engine') {
+        $engine = [ADAnalyzerAssessmentEngine]::new()
+        return $engine.Evaluate($Directory, $Policies, 'assessment.fixture.invalid')
+    }
+    Invoke-ADAnalyzerAssessment -DirectoryData $Directory -GpoData $Policies -Target 'assessment.fixture.invalid'
+}
+
+function New-AssessmentOptionalPolicyRow([string]$Id, $Policy, [string]$ReadError = '') {
+    [pscustomobject]@{
+        Gpo = [pscustomobject]@{
+            Id = $Id
+            Version = 1
+        }
+        Policy = $Policy
+        Error = $ReadError
+    }
+}
+
+$originalOptionalDirectoryPolicy = (Get-Command Test-ADAnalyzerDirectoryPolicy).ScriptBlock
+$originalOptionalGpoPolicy = (Get-Command Test-ADAnalyzerGpoPolicy).ScriptBlock
+$script:OptionalAssessmentEvents = [Collections.Generic.List[string]]::new()
+try {
+    function script:Test-ADAnalyzerDirectoryPolicy {
+        [CmdletBinding()]
+        param($Data, $Profile)
+
+        $script:OptionalAssessmentEvents.Add('DirectoryPolicy')
+        New-ADAnalyzerCheck -RuleId 'FIXTURE.DIRECTORY' -Status Pass -Target 'directory fixture'
+    }
+
+    function script:Test-ADAnalyzerGpoPolicy {
+        [CmdletBinding()]
+        param($Gpo, $Policy, $Profile)
+
+        $script:OptionalAssessmentEvents.Add('GpoPolicy')
+        New-ADAnalyzerCheck -RuleId 'FIXTURE.GPO' -Status Pass -Target ([string]$Gpo.Id)
+    }
+
+    foreach ($route in 'Engine', 'Command') {
+        Test-Assessment ("StrictMode {0} preserves omitted HostChecks" -f $route) {
+            $directory = New-AssessmentFixture
+            $result = Invoke-AssessmentOptionalFieldFixture $route $directory
+
+            Assert-Equal Complete $result.State
+            Assert-Equal 'FIXTURE.DIRECTORY' ($result.Checks.RuleId -join ',')
+            Assert-True ($null -eq $directory.PSObject.Properties['HostChecks']) 'The input gained HostChecks.'
+            Assert-True ($null -eq $result.Data.Directory.PSObject.Properties['HostChecks']) 'The detached snapshot gained HostChecks.'
+            Assert-True (
+                -not [object]::ReferenceEquals($directory, $result.Data.Directory)
+            ) 'The snapshot reused the caller-owned directory record.'
+        }
+
+        Test-Assessment ("StrictMode {0} preserves present HostChecks shapes" -f $route) {
+            $first = New-ADAnalyzerCheck -RuleId 'FIXTURE.HOST' -Status Pass -Target 'first'
+            $second = New-ADAnalyzerCheck -RuleId 'FIXTURE.HOST' -Status Pass -Target 'second'
+            $shapes = [ordered]@{
+                Null = $null
+                Empty = @()
+                Scalar = $first
+                Singleton = @($first)
+                Multiple = @($first, $null, $second)
+            }
+            foreach ($shape in $shapes.Keys) {
+                $directory = New-AssessmentFixture
+                $inputChecks = $shapes[$shape]
+                $directory | Add-Member -NotePropertyName HostChecks -NotePropertyValue $inputChecks
+                $result = Invoke-AssessmentOptionalFieldFixture $route $directory
+                $property = $result.Data.Directory.PSObject.Properties['HostChecks']
+                Assert-True ($null -ne $property) ('The snapshot lost explicit HostChecks ' + $shape + '.')
+                $expected = 'directory fixture'
+                if ($shape -in 'Scalar', 'Singleton') {
+                    $expected += ',first'
+                }
+                elseif ($shape -eq 'Multiple') {
+                    $expected += ',first,second'
+                }
+                Assert-Equal $expected ($result.Checks.Target -join ',')
+                Assert-Equal Complete $result.State
+
+                $detached = $property.Value
+                if ($shape -eq 'Null') {
+                    Assert-True ($null -eq $detached) 'Explicit null HostChecks was changed.'
+                }
+                elseif ($shape -eq 'Scalar') {
+                    Assert-True ($detached -is [pscustomobject]) 'The scalar HostChecks record changed shape.'
+                    Assert-Equal $first.CheckId $detached.CheckId
+                }
+                else {
+                    Assert-True ($detached -is [array]) ('The snapshot changed the HostChecks array for ' + $shape + '.')
+                    Assert-Equal $inputChecks.Count $detached.Count
+                    if ($shape -eq 'Singleton') {
+                        Assert-Equal $first.CheckId $detached[0].CheckId
+                    }
+                    elseif ($shape -eq 'Multiple') {
+                        Assert-True ($null -eq $detached[1]) 'The detached snapshot removed an input null observation.'
+                        Assert-Equal $first.CheckId $detached[0].CheckId
+                        Assert-Equal $second.CheckId $detached[2].CheckId
+                        $detached[0].Target = 'changed result'
+                        Assert-Equal 'first' $directory.HostChecks[0].Target
+                        Assert-Equal 'first' $result.Checks[1].Target
+                    }
+                }
+            }
+        }
+
+        Test-Assessment ("StrictMode {0} reports unreadable and healthy GPOs together" -f $route) {
+            $readError = 'fixture policy read failed'
+            $failedId = '11111111-1111-1111-1111-111111111111'
+            $healthyId = '22222222-2222-2222-2222-222222222222'
+            $directory = New-AssessmentFixture
+            $directory | Add-Member -NotePropertyName HostChecks -NotePropertyValue $null
+            $fileShapes = [ordered]@{
+                Null = $null
+                Empty = @()
+                Single = @([pscustomobject]@{ Path = 'Machine/one.inf' })
+                Multiple = @(
+                    [pscustomobject]@{ Path = 'Machine/one.inf' }
+                    [pscustomobject]@{ Path = 'Machine/two.inf' }
+                )
+            }
+            foreach ($shape in $fileShapes.Keys) {
+                $policy = New-PolicyFixture
+                $policy.Files = $fileShapes[$shape]
+                $policy.UnparsedFiles = $fileShapes[$shape]
+                $rows = @(
+                    New-AssessmentOptionalPolicyRow $failedId $null $readError
+                    New-AssessmentOptionalPolicyRow $healthyId $policy
+                )
+                $result = Invoke-AssessmentOptionalFieldFixture $route $directory $rows
+
+                Assert-Equal Partial $result.State
+                Assert-Equal 1 $result.Coverage.Unreadable
+                Assert-Equal 1 $result.Errors.Count
+                Assert-Equal GroupPolicy $result.Errors[0].Collection
+                Assert-Equal $failedId $result.Errors[0].Target
+                Assert-Equal $readError $result.Errors[0].Message
+                Assert-Equal 'FIXTURE.DIRECTORY,GPO.READ,GPO.VERSION_CONSISTENCY,FIXTURE.GPO' ($result.Checks.RuleId -join ',')
+                Assert-Equal $failedId $result.Checks[1].Target
+                Assert-Equal ($healthyId + '/Version') $result.Checks[2].Target
+                Assert-Equal Pass $result.Checks[2].Status
+
+                Assert-Equal 2 $result.Data.Policies.Count
+                $failed = $result.Data.Policies[0]
+                $healthy = $result.Data.Policies[1]
+                Assert-Equal $failedId $failed.Gpo.Id
+                Assert-Equal $readError $failed.ReadError
+                Assert-True ($null -eq $failed.Files -and $null -eq $failed.UnparsedFiles) 'Unreadable policy metadata changed.'
+                Assert-Equal $healthyId $healthy.Gpo.Id
+                Assert-Equal '' $healthy.ReadError
+                foreach ($name in 'Files', 'UnparsedFiles') {
+                    $expected = ConvertTo-Json -InputObject $policy.$name -Depth 6 -Compress
+                    $actual = ConvertTo-Json -InputObject $healthy.$name -Depth 6 -Compress
+                    Assert-Equal $expected $actual
+                }
+                if ($shape -eq 'Multiple') {
+                    $healthy.Files[0].Path = 'changed result'
+                    Assert-Equal 'Machine/one.inf' $policy.Files[0].Path
+                    Assert-Equal 'Machine/one.inf' $healthy.UnparsedFiles[0].Path
+                }
+            }
+        }
+
+        Test-Assessment ("StrictMode {0} retains required readable GPO member errors" -f $route) {
+            $directory = New-AssessmentFixture
+            $directory | Add-Member -NotePropertyName HostChecks -NotePropertyValue $null
+            foreach ($member in 'Policy', 'Files', 'UnparsedFiles') {
+                $policy = New-PolicyFixture
+                $row = New-AssessmentOptionalPolicyRow '33333333-3333-3333-3333-333333333333' $policy
+                $owner = $policy
+                if ($member -eq 'Policy') {
+                    $owner = $row
+                }
+                $owner.PSObject.Properties.Remove($member)
+                $caught = $null
+                try {
+                    $null = Invoke-AssessmentOptionalFieldFixture $route $directory @($row)
+                }
+                catch {
+                    $caught = $_
+                }
+                Assert-True (
+                    $null -ne $caught -and $caught.FullyQualifiedErrorId -like 'PropertyNotFoundStrict*' -and
+                    $caught.Exception.GetBaseException().Message -like ("*'{0}'*" -f $member)
+                ) ("Required member {0} did not retain its native property error. Received {1}" -f $member, $caught)
+            }
+        }
+
+        Test-Assessment ("StrictMode {0} preserves HostChecks and Policy getter order" -f $route) {
+            $script:OptionalAssessmentEvents.Clear()
+            $script:OptionalHostReads = 0
+            $script:OptionalPolicyReads = 0
+            $script:OptionalHostFirst = New-ADAnalyzerCheck -RuleId 'FIXTURE.HOST' -Status Pass -Target 'first'
+            $script:OptionalHostLater = New-ADAnalyzerCheck -RuleId 'FIXTURE.HOST' -Status Pass -Target 'later'
+            $directory = New-AssessmentFixture
+            $directory | Add-Member -MemberType ScriptProperty -Name HostChecks -Value {
+                $script:OptionalHostReads++
+                $script:OptionalAssessmentEvents.Add('HostChecks:' + $script:OptionalHostReads)
+                if ($script:OptionalHostReads -eq 1) {
+                    return $script:OptionalHostFirst
+                }
+                return $script:OptionalHostLater
+            }
+            $script:OptionalPolicyHealth = New-PolicyFixture
+            $script:OptionalPolicyFiles = [pscustomobject]@{}
+            $script:OptionalPolicyOther = [pscustomobject]@{}
+            $script:OptionalPolicyFiles | Add-Member -MemberType ScriptProperty -Name Files -Value {
+                $script:OptionalAssessmentEvents.Add('Files')
+                return 'files from fifth read'
+            }
+            $script:OptionalPolicyOther | Add-Member -MemberType ScriptProperty -Name UnparsedFiles -Value {
+                $script:OptionalAssessmentEvents.Add('UnparsedFiles')
+                return 'unparsed from sixth read'
+            }
+            $row = New-AssessmentOptionalPolicyRow '44444444-4444-4444-4444-444444444444' $null
+            $row.PSObject.Properties.Remove('Policy')
+            $row | Add-Member -MemberType ScriptProperty -Name Policy -Value {
+                $script:OptionalPolicyReads++
+                $script:OptionalAssessmentEvents.Add('Policy:' + $script:OptionalPolicyReads)
+                if ($script:OptionalPolicyReads -le 4) {
+                    return $script:OptionalPolicyHealth
+                }
+                if ($script:OptionalPolicyReads -eq 5) {
+                    return $script:OptionalPolicyFiles
+                }
+                return $script:OptionalPolicyOther
+            }
+
+            $result = Invoke-AssessmentOptionalFieldFixture $route $directory @($row)
+            $expectedEvents = @(
+                'DirectoryPolicy', 'HostChecks:1'
+                'Policy:1', 'Policy:2', 'Policy:3', 'Policy:4', 'GpoPolicy'
+                'Policy:5', 'Files', 'Policy:6', 'UnparsedFiles', 'HostChecks:2'
+            )
+            Assert-Equal ($expectedEvents -join ',') ($script:OptionalAssessmentEvents -join ',')
+            Assert-Equal 'first' $result.Checks[1].Target
+            Assert-Equal 'later' $result.Data.Directory.HostChecks.Target
+            Assert-Equal 'files from fifth read' $result.Data.Policies[0].Files
+            Assert-Equal 'unparsed from sixth read' $result.Data.Policies[0].UnparsedFiles
+        }
+    }
+
+    Test-Assessment 'StrictMode native collector handles host-disabled and unreadable GPO rows' {
+        $savedIntegrations = @{}
+        $integrations = @{
+            'Get-ADRootDSE' = {
+                [CmdletBinding()]
+                param($Server, $Credential)
+
+                Assert-Equal 'assessment.fixture.invalid' $Server
+                [pscustomobject]@{ DnsHostName = 'dc.assessment.fixture.invalid' }
+            }
+            'Get-ADAnalyzerDirectoryData' = {
+                [CmdletBinding()]
+                param($Context, $Profile)
+
+                Assert-Equal 'dc.assessment.fixture.invalid' $Context.Server
+                Assert-True (-not $Context.IncludeHostChecks) 'This fixture must keep host collection disabled.'
+                New-AssessmentFixture $Context.Domain
+            }
+            'Get-ADAnalyzerGpo' = {
+                [CmdletBinding()]
+                param([switch]$All, $Domain, $Server, $Credential)
+
+                Assert-True (
+                    $All -and $Domain -ceq 'assessment.fixture.invalid' -and $Server -ceq 'dc.assessment.fixture.invalid'
+                ) 'The fixture catalog request used an unexpected target.'
+                foreach ($id in '55555555-5555-5555-5555-555555555555', '66666666-6666-6666-6666-666666666666') {
+                    [pscustomobject]@{
+                        Id = $id
+                        Version = 1
+                    }
+                }
+            }
+            'Get-ADAnalyzerGpoReport' = {
+                [CmdletBinding()]
+                param($Gpo, $Credential, [switch]$AsObject)
+
+                Assert-True $AsObject 'The fixture expected an object report.'
+                if ($Gpo.Id -eq '55555555-5555-5555-5555-555555555555') {
+                    throw 'fixture policy read failed'
+                }
+                [pscustomobject]@{ Policy = New-PolicyFixture }
+            }
+        }
+        try {
+            foreach ($name in $integrations.Keys) {
+                $path = 'Function:script:' + $name
+                $previous = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+                if ($null -ne $previous) {
+                    $savedIntegrations[$path] = $previous.ScriptBlock
+                }
+                else {
+                    $savedIntegrations[$path] = $null
+                }
+                Set-Item -LiteralPath $path -Value $integrations[$name]
+            }
+            Set-StrictMode -Version Latest
+            $result = Get-ADAnalyzerAssessment -Domain 'assessment.fixture.invalid'
+
+            Assert-Equal Partial $result.State
+            Assert-Equal 'dc.assessment.fixture.invalid' $result.Context.Server
+            Assert-True ($null -eq $result.Data.Directory.PSObject.Properties['HostChecks']) 'Unexpected host configuration in snapshot.'
+            Assert-Equal 2 $result.Data.Policies.Count
+            Assert-Equal '55555555-5555-5555-5555-555555555555' $result.Errors[0].Target
+            Assert-Equal 'fixture policy read failed' $result.Data.Policies[0].ReadError
+            Assert-True (
+                $null -eq $result.Data.Policies[0].Files -and $null -eq $result.Data.Policies[0].UnparsedFiles
+            ) 'The unreadable report did not preserve null metadata.'
+            Assert-True (
+                $result.Data.Policies[1].Files -is [array] -and $result.Data.Policies[1].Files.Count -eq 0 -and
+                $result.Data.Policies[1].UnparsedFiles -is [array] -and $result.Data.Policies[1].UnparsedFiles.Count -eq 0
+            ) 'The readable sibling did not retain its empty arrays.'
+        }
+        finally {
+            foreach ($path in $savedIntegrations.Keys) {
+                if ($null -eq $savedIntegrations[$path]) {
+                    Remove-Item -LiteralPath $path
+                }
+                else {
+                    Set-Item -LiteralPath $path -Value $savedIntegrations[$path]
+                }
+            }
+        }
+    }
+}
+finally {
+    Set-Item Function:script:Test-ADAnalyzerDirectoryPolicy $originalOptionalDirectoryPolicy
+    Set-Item Function:script:Test-ADAnalyzerGpoPolicy $originalOptionalGpoPolicy
+}
+
 foreach ($case in @(
         'Construction',
         'Parity',
@@ -1630,7 +1963,7 @@ $assessmentCollectorCases = [ordered]@{
     Construction = 2
     Direct = 11
     Isolation = 2
-    Composition = 3
+    Composition = 4
 }
 foreach ($case in $assessmentCollectorCases.Keys) {
     Test-Assessment ('assessment collector API: ' + $case) {
