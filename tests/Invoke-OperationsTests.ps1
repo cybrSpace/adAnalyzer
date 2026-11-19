@@ -171,6 +171,52 @@ function Assert-AssessmentCoverageExport {
     }
 }
 
+function Assert-StrictAssessmentComparison {
+    param(
+        [object]$Reference,
+        [object]$Difference
+    )
+
+    $ordinary = $null
+    $expected = $null
+    Set-StrictMode -Off
+    foreach ($mode in 'Off', '2.0', 'Latest') {
+        if ($mode -ne 'Off') {
+            Set-StrictMode -Version $mode
+        }
+        $captured = @()
+        $errorCount = $Error.Count
+        $arguments = @{
+            Reference = $Reference
+            Difference = $Difference
+            ErrorAction = 'Stop'
+            ErrorVariable = '+captured'
+        }
+        $results = @(Compare-ADAnalyzerAssessment @arguments)
+        Assert-Equal 1 $results.Count
+        Assert-Equal 0 $captured.Count
+        Assert-Equal $errorCount $Error.Count
+
+        $comparison = $results[0]
+        $time = [datetimeoffset]::ParseExact(
+            $comparison.Timestamp,
+            'o',
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        Assert-Equal ([timespan]::Zero) $time.Offset
+        $comparison.PSObject.Properties.Remove('Timestamp')
+        $actual = ConvertTo-Json -InputObject $comparison -Depth 20 -Compress
+        if ($mode -eq 'Off') {
+            $ordinary = $comparison
+            $expected = $actual
+        }
+        else {
+            Assert-True ($actual -ceq $expected) "StrictMode $mode changed the comparison result"
+        }
+    }
+    return $ordinary
+}
+
 Invoke-Test 'composite structs and typed pairs project nested secrets through every export' {
     Add-Type -TypeDefinition 'namespace ADAnalyzer.SafeStructFixture { public struct Evidence { public object Payload; } }'
     $marker = 'STRUCT_FIXTURE_SECRET'
@@ -831,6 +877,111 @@ try {
                 })
         }
         Assert-Equal 1 (Compare-ADAnalyzerAssessment $old $new).Summary.Changed
+    }
+    Invoke-Test 'strict comparison preserves empty evidence records and set members' {
+        $sides = [ordered]@{
+            Reference = [ordered]@{
+                'FIXTURE.EMPTY' = @{}
+                'FIXTURE.NULL' = $null
+                'FIXTURE.SET' = @{
+                    Members = @(@{}, 'ordinary')
+                    PolicySequence = @('first', 'second')
+                    Detail = [pscustomobject]@{
+                        State = 'observed'
+                    }
+                }
+            }
+            Difference = [ordered]@{
+                'FIXTURE.EMPTY' = [pscustomobject]@{}
+                'FIXTURE.NULL' = [pscustomobject]@{}
+                'FIXTURE.SET' = [ordered]@{
+                    Detail = @{
+                        State = 'observed'
+                    }
+                    PolicySequence = @('first', 'second')
+                    Members = @('ordinary', [pscustomobject]@{})
+                }
+            }
+        }
+        $snapshots = @(
+            foreach ($side in $sides.Keys) {
+                [ordered]@{
+                    SchemaVersion = 1
+                    RunId = $side
+                    Checks = @(
+                        foreach ($rule in $sides[$side].Keys) {
+                            [ordered]@{
+                                RuleId = $rule
+                                Target = 'fixture'
+                                Status = 'Pass'
+                                Evidence = $sides[$side][$rule]
+                            }
+                        }
+                    )
+                }
+            }
+        )
+
+        $comparison = Assert-StrictAssessmentComparison -Reference $snapshots[0] -Difference $snapshots[1]
+        Assert-Equal 3 $comparison.Changes.Count
+        Assert-Equal 2 $comparison.Summary.Unchanged
+        Assert-Equal 1 $comparison.Summary.Changed
+        $empty = $comparison.Changes[0]
+        Assert-Equal 'FIXTURE.EMPTY' $empty.RuleId
+        Assert-Equal 'Unchanged' $empty.Change
+        Assert-True ($empty.Reference -is [array] -and $empty.Difference -is [array]) 'Singleton change rows lost their array shape.'
+        Assert-True ($empty.Reference[0].Evidence -is [pscustomobject]) 'Empty dictionary evidence lost its record shape.'
+        Assert-True ($empty.Difference[0].Evidence -is [pscustomobject]) 'Empty adapted evidence lost its record shape.'
+        Assert-Equal '{}' (ConvertTo-Json -InputObject $empty.Reference[0].Evidence -Compress)
+        Assert-Equal '{}' (ConvertTo-Json -InputObject $empty.Difference[0].Evidence -Compress)
+
+        $nullChange = $comparison.Changes[1]
+        Assert-Equal 'FIXTURE.NULL' $nullChange.RuleId
+        Assert-Equal 'Changed' $nullChange.Change
+        Assert-Equal $null $nullChange.Reference[0].Evidence
+        Assert-Equal '{}' (ConvertTo-Json -InputObject $nullChange.Difference[0].Evidence -Compress)
+
+        $set = $comparison.Changes[2]
+        Assert-Equal 'FIXTURE.SET' $set.RuleId
+        Assert-Equal 'Unchanged' $set.Change
+        Assert-Equal '[{},"ordinary"]' (ConvertTo-Json -InputObject $set.Reference[0].Evidence.Members -Compress)
+        Assert-Equal '["ordinary",{}]' (ConvertTo-Json -InputObject $set.Difference[0].Evidence.Members -Compress)
+    }
+    Invoke-Test 'strict comparison reads empty evidence from literal JSON snapshots' {
+        $snapshot = [ordered]@{
+            SchemaVersion = 1
+            Checks = @(
+                [ordered]@{
+                    RuleId = 'FIXTURE.JSON'
+                    Target = 'fixture'
+                    Status = 'Pass'
+                    Evidence = [pscustomobject]@{}
+                }
+            )
+        }
+        $json = ConvertTo-Json -InputObject $snapshot -Depth 8 -Compress
+        $encoding = [Text.UTF8Encoding]::new($false)
+        $referencePath = Join-Path $script:Temporary 'comparison [reference].json'
+        $differencePath = Join-Path $script:Temporary 'comparison [difference].json'
+        [IO.File]::WriteAllText($referencePath, $json, $encoding)
+        [IO.File]::WriteAllText($differencePath, $json, $encoding)
+
+        $comparison = Assert-StrictAssessmentComparison -Reference $referencePath -Difference $differencePath
+        Assert-Equal 1 $comparison.Changes.Count
+        Assert-Equal 1 $comparison.Summary.Unchanged
+        Assert-Equal '{}' (ConvertTo-Json -InputObject $comparison.Changes[0].Reference[0].Evidence -Compress)
+        Assert-Equal '{}' (ConvertTo-Json -InputObject $comparison.Changes[0].Difference[0].Evidence -Compress)
+        Assert-Equal $json ([IO.File]::ReadAllText($referencePath, $encoding))
+        Assert-Equal $json ([IO.File]::ReadAllText($differencePath, $encoding))
+    }
+    Invoke-Test 'strict comparable helper returns an empty adapted record' {
+        foreach ($mode in '2.0', 'Latest') {
+            Set-StrictMode -Version $mode
+            $normalized = @(ConvertTo-ADAnalyzerComparableValue -Value ([pscustomobject]@{}))
+            Assert-Equal 1 $normalized.Count
+            Assert-True ($normalized[0] -is [pscustomobject]) 'Empty comparable evidence lost its record shape.'
+            Assert-Equal '{}' (ConvertTo-Json -InputObject $normalized[0] -Compress)
+        }
     }
     Invoke-Test 'export WhatIf has no filesystem effects' {
         $path = Join-Path $script:Temporary 'not-created/assessment.json'

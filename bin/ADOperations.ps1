@@ -921,7 +921,9 @@ function ConvertTo-ADAnalyzerComparableValue {
         @(([Collections.IDictionary].GetProperty('Keys')).GetValue($Value, $null))
     }
     else {
-        @($Value.PSObject.Properties.Name)
+        foreach ($property in $Value.PSObject.Properties) {
+            $property.Name
+        }
     }
     foreach ($name in @($names | Sort-Object)) {
         if ($name -in @('Timestamp',
