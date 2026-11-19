@@ -105,6 +105,19 @@ The constructor is inert. `Read()` uses the current Windows identity, closes the
 
 `etc/Get-MSSQLServers.ps1` exposes `Get-ADMSSQLServers` with optional `SearchBase`, `Server`, `Credential`, `OutputPath`, and `OperationTimeoutSeconds` (1–300, default 30 per CIM operation, not a global deadline). Its OS regex defaults to `Windows Server`. Discovery uses the bundled AD PSDrive by default (`DirectoryConnection=Direct` opts out), pins the resolved DC, and finishes drive cleanup before host probes. Each host owns a CIM session. The returned `Collection` retains `Export(path)` and the six existing columns: `computer.Status` means the service query succeeded; `service.Status` contains literal states such as `Running` or `Stopped`. A successful query with no SQL-named services has a blank-service row. Host failures and cleanup errors remain in `computer.Message`; cleanup-only failure preserves observed states. Discovery failures terminate, export uses atomic replacement, and `WhatIf` suppresses writes. Live AD/CIM needs Windows and reachable services. Dot sourcing is inert; CLI discovery requires explicit `SearchBase` or `Server`.
 
+```powershell
+. .\etc\Get-MSSQLServers.ps1
+$inventory = [ADAnalyzerSqlServiceInventory]::new()
+$services = $inventory.Read(@{
+    Server = 'dc01.example.com'
+    SearchBase = 'OU=Servers,DC=example,DC=com'
+    OperationTimeoutSeconds = 45
+})
+$services.Export('.\reports\sql-services.csv')
+```
+
+The constructor is inert. `Read()` uses ambient discovery and creates an owned AD PSDrive for the search. `Read(options)` accepts `SearchBase`, `Filter`, `Server`, `Credential`, `DirectoryConnection`, and `OperationTimeoutSeconds` as case-insensitive option names. An empty `Filter` matches all operating systems. Set `DirectoryConnection` to `Direct` to query without creating a drive. Both overloads return one `Collection` after directory cleanup and all CIM cleanup attempts. Host cleanup failures are recorded in `computer.Message`. Call `Export(path)` to write the result, or use the compatibility command for PowerShell confirmation and `WhatIf`.
+
 `etc/Get-GroupCNMember.ps1` exposes `Get-GroupCN -Array @('GroupA','GroupB')` with optional `Server`, `Credential`, and `OutputPath`. It uses the bundled library, escapes exact CN/SAM selectors, follows member DNs with a visited set per matched root, and caches repeated member reads within the call. Direct group/cycle edges and empty-group marker rows remain visible. CSV columns stay `group.DN,group.CN,member.SamAccountName,member.objectClass`: the first is the containing group's DN and the second the requested root label. Multiple matching roots are retained. Lookup/no-match/conversion/write failures prevent partial output/export; `WhatIf` suppresses writes. Dot sourcing is inert and CLI selectors are explicit.
 
 ```powershell

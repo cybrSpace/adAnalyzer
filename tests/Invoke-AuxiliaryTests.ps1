@@ -371,6 +371,38 @@ try {
             Assert-True (($output -join ' ') -match ('PASS SQL inventory ' + $mode)) 'SQL inventory child did not finish'
         }
     }
+    $sqlInventoryCases = [ordered]@{
+        Construction = 2
+        Validation = 4
+        Discovery = 3
+        Inventory = 4
+        Failures = 4
+    }
+    foreach ($case in $sqlInventoryCases.Keys) {
+        Invoke-AuxiliaryTest ('SQL inventory class: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $fixture = Join-Path $PSScriptRoot 'SqlInventoryClassFixture.ps1'
+            $savedErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -RepositoryRoot $RepositoryRoot -Mode $case 2>&1
+                $childExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $savedErrorActionPreference
+            }
+            if ($childExitCode -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw ($output -join [Environment]::NewLine)
+            }
+            $expected = 'PASS SQL inventory class {0} {1}' -f $case, $sqlInventoryCases[$case]
+            $sentinels = @($output | Where-Object { [string]$_ -clike 'PASS SQL inventory class *' })
+            Assert-True ($sentinels.Count -eq 1 -and [string]$sentinels[0] -ceq $expected) 'Fresh process did not execute every selected SQL inventory control.'
+        }
+    }
+
     foreach ($mode in @('Inert',
             'Traversal',
             'SharedRoots',
