@@ -36,6 +36,17 @@ function Assert-Throws([scriptblock]$Body) {
     }
 }
 
+function Assert-ThrowsMessage([scriptblock]$Body, [string]$Message) {
+    $caught = $null
+    try {
+        $null = & $Body
+    }
+    catch {
+        $caught = $_.Exception.Message
+    }
+    Assert-Equal $Message $caught
+}
+
 function Reset-Fixture {
     $script:Reads = 0
     $script:GroupReads = 0
@@ -404,6 +415,23 @@ function Enable-ADAccount {
 
 function New-FixturePlan {
     New-ADAnalyzerRemediationPlan -Assessment $script:Assessment -Profile $script:Profile
+}
+
+function New-ActionIdentityFixturePlan {
+    $plan = New-FixturePlan
+    $first = $plan.Actions[0]
+    $first.ActionId = 'aabbcdef-1234-4556-8687-98abcdef0123'
+    $second = ConvertTo-Json -InputObject $first -Depth 20 -Compress | ConvertFrom-Json
+    $second.ActionId = '{BBBCCDEF-1234-4556-8687-98ABCDEF0123}'
+    $second.ObjectGuid = '22222222-2222-2222-2222-222222222222'
+    $second.SID = 'S-1-5-21-10-20-30-1102'
+    $second.DistinguishedName = 'CN=Second,OU=People,DC=example,DC=invalid'
+    $second.Preconditions.ObjectGuid = $second.ObjectGuid
+    $second.Preconditions.SID = $second.SID
+    $second.Preconditions.DistinguishedName = $second.DistinguishedName
+    $plan.Remediation.ApprovedObjectGuids += , $second.ObjectGuid
+    $plan.Actions = @($first, $second)
+    return $plan
 }
 
 function Apply-FixturePlan {
@@ -1337,6 +1365,87 @@ try {
         Assert-Equal 0 $script:Disables
         Assert-Equal $false (Test-Path -LiteralPath $script:Journal)
         Assert-Equal $false (Test-Path -LiteralPath ($script:Journal + '.lock'))
+    }
+    Invoke-Test 'plan validation preserves distinct action IDs and prior error priority' {
+        $plan = New-ActionIdentityFixturePlan
+        $original = ConvertTo-Json -InputObject $plan -Depth 20 -Compress
+        $validation = @(Assert-ADAnalyzerOperationPlan $plan)
+        Assert-Equal 0 $validation.Count
+        Assert-True ((ConvertTo-Json -InputObject $plan -Depth 20 -Compress) -ceq $original) 'Validation rewrote a valid action ID.'
+
+        $plan.Actions[1].ObjectGuid = $plan.Actions[0].ObjectGuid
+        $plan.Actions[1].Preconditions.ObjectGuid = $plan.Actions[0].ObjectGuid
+        $plan.Actions[1].ActionId = 'not-a-guid'
+        Assert-ThrowsMessage { Assert-ADAnalyzerOperationPlan $plan } 'Plan includes an unsupported, unapproved, or unbound action'
+        $plan.Actions[1].ActionId = $plan.Actions[0].ActionId
+        Assert-ThrowsMessage { Assert-ADAnalyzerOperationPlan $plan } 'Plan contains duplicate object actions'
+    }
+    foreach ($spelling in 'literal', 'equivalent') {
+        Invoke-Test "plan validation rejects $spelling duplicate action IDs" {
+            $plan = New-ActionIdentityFixturePlan
+            $plan.Actions[1].ActionId = $plan.Actions[0].ActionId
+            if ($spelling -eq 'equivalent') {
+                $plan.Actions[1].ActionId = ([guid]$plan.Actions[0].ActionId).ToString('B').ToUpperInvariant()
+                Assert-True ($plan.Actions[1].ActionId -cne $plan.Actions[0].ActionId) 'Canonical-equivalence fixture used identical input text.'
+            }
+            $original = ConvertTo-Json -InputObject $plan -Depth 20 -Compress
+            Assert-ThrowsMessage { Assert-ADAnalyzerOperationPlan $plan } 'Plan contains duplicate action IDs'
+            Assert-True ((ConvertTo-Json -InputObject $plan -Depth 20 -Compress) -ceq $original) 'Validation rewrote a rejected action ID.'
+        }
+        Invoke-Test "plan WhatIf rejects $spelling duplicate action IDs before resolving the journal" {
+            $pathCalls = [Collections.Generic.List[string]]::new()
+            $resolvePath = ${function:Resolve-ADAnalyzerOperationFilePath}
+            function Resolve-ADAnalyzerOperationFilePath {
+                param([string]$Path)
+                $pathCalls.Add($Path)
+                & $resolvePath -Path $Path
+            }
+            function Enter-ADAnalyzerJournalLease {
+                throw 'WhatIf attempted to acquire a journal lease.'
+            }
+            function Get-ADObject {
+                throw 'WhatIf attempted a directory object read.'
+            }
+            function Get-ADGroup {
+                throw 'WhatIf attempted a directory group read.'
+            }
+            function Disable-ADAccount {
+                throw 'WhatIf attempted to disable an account.'
+            }
+            function Enable-ADAccount {
+                throw 'WhatIf attempted to enable an account.'
+            }
+
+            $plan = New-ActionIdentityFixturePlan
+            $journal = Join-Path $script:Temporary 'action-id-preview/journal.json'
+            $arguments = @{
+                Plan = $plan
+                Server = 'dc.example.invalid'
+                JournalPath = $journal
+                WhatIf = $true
+                ErrorAction = 'Stop'
+            }
+            $expectedIds = @($plan.Actions[0].ActionId, $plan.Actions[1].ActionId)
+            $preview = @(Invoke-ADAnalyzerRemediationPlan @arguments)
+            Assert-Equal 1 $pathCalls.Count
+            Assert-Equal $journal $pathCalls[0]
+            Assert-Equal 2 $preview.Count
+            for ($index = 0; $index -lt $preview.Count; $index++) {
+                Assert-Equal 'Skipped' $preview[$index].Status
+                Assert-Equal $plan.Actions[$index].ObjectGuid $preview[$index].ObjectGuid
+                Assert-True ($preview[$index].ActionId -ceq $expectedIds[$index]) 'WhatIf changed a valid action ID or order.'
+                Assert-Equal $null $preview[$index].JournalPath
+            }
+
+            $pathCalls.Clear()
+            $plan.Actions[1].ActionId = $plan.Actions[0].ActionId
+            if ($spelling -eq 'equivalent') {
+                $plan.Actions[1].ActionId = ([guid]$plan.Actions[0].ActionId).ToString('B').ToUpperInvariant()
+            }
+            Assert-ThrowsMessage { Invoke-ADAnalyzerRemediationPlan @arguments } 'Plan contains duplicate action IDs'
+            Assert-Equal 0 $pathCalls.Count
+            Assert-True (-not [IO.Directory]::Exists((Split-Path -Parent $journal))) 'WhatIf created a journal directory.'
+        }
     }
     Invoke-Test 'reviewed server context cannot be silently changed at execution' {
         $script:Assessment | Add-Member NoteProperty Context ([pscustomobject]@{

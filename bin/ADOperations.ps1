@@ -1991,6 +1991,7 @@ function Assert-ADAnalyzerOperationPlan {
             ConvertTo-ADAnalyzerOperationGuid $value
         })
     $seen = @{}
+    $seenActionIds = @{}
     foreach ($action in @($Plan.Actions)) {
         if ($null -eq $action) {
             continue
@@ -2000,7 +2001,7 @@ function Assert-ADAnalyzerOperationPlan {
             -not $guid -or
             $guid -notin $approved -or
             $action.Preconditions.ObjectGuid -ne $guid -or
-            -not (ConvertTo-ADAnalyzerOperationGuid $action.ActionId)) {
+            -not ($actionId = ConvertTo-ADAnalyzerOperationGuid $action.ActionId)) {
             throw 'Plan includes an unsupported, unapproved, or unbound action'
         }
         if (($action.RuleId -eq 'ACCOUNT.INACTIVE' -and
@@ -2018,7 +2019,11 @@ function Assert-ADAnalyzerOperationPlan {
         if ($seen.ContainsKey($guid)) {
             throw 'Plan contains duplicate object actions'
         }
+        if ($seenActionIds.ContainsKey($actionId)) {
+            throw 'Plan contains duplicate action IDs'
+        }
         $seen[$guid] = $true
+        $seenActionIds[$actionId] = $true
     }
 }
 
