@@ -1494,6 +1494,122 @@ try {
         Assert-Equal 0 $script:Disables
         Assert-Equal 0 $script:Enables
     }
+    & {
+        function Write-ADAnalyzerOperationFile {
+            throw 'Offline account metadata planning attempted a file write.'
+        }
+        function Enter-ADAnalyzerJournalLease {
+            throw 'Offline account metadata planning attempted to acquire a journal lease.'
+        }
+        function Set-ApprovedComputerFixture {
+            $script:Current.ObjectClass = 'Computer'
+            $script:Current.UserAccountControl = 4096
+            $script:Current.PrimaryGroupID = 515
+            $script:Assessment.Findings[0].RuleId = 'COMPUTER.INACTIVE'
+        }
+        function Assert-AccountMetadataPlanStayedOffline {
+            Assert-Equal 0 $script:Reads
+            Assert-Equal 0 $script:GroupReads
+            Assert-Equal 0 $script:Disables
+            Assert-Equal 0 $script:Enables
+            Assert-True (-not (Test-Path -LiteralPath $script:Journal)) 'Offline account metadata planning created a journal.'
+        }
+
+        Invoke-Test 'offline action projects detached presence from structured account metadata' {
+            Set-ApprovedComputerFixture
+            foreach ($shape in 'Dictionary', 'Adapted') {
+                $marker = 'account-metadata-fixture-value-' + $shape
+                $metadata = New-IdentityMetadataFixture $marker
+                if ($shape -eq 'Adapted') {
+                    $metadata = [pscustomobject]$metadata
+                }
+                $script:Current.AccountType = $metadata
+                $plan = New-FixturePlan
+                Assert-Equal 1 $plan.Actions.Count
+                Assert-Equal 0 $plan.Excluded.Count
+                $action = $plan.Actions[0]
+                Assert-Equal 'Computer' $action.ObjectClass
+                Assert-Equal 'COMPUTER.INACTIVE' $action.RuleId
+                Assert-Equal $script:Current.ObjectGuid $action.Preconditions.ObjectGuid
+                $json = ConvertTo-Json -InputObject $plan -Depth 20 -Compress
+                Assert-True (-not $json.Contains($marker)) 'Raw offline action exposed a fixture value.'
+                Assert-IdentityMetadataPresence $action.AccountType
+                Assert-IdentityMetadataValueTypes $action.AccountType $metadata
+                Assert-True (
+                    -not [object]::ReferenceEquals($action.AccountType, $metadata) -and
+                    -not [object]::ReferenceEquals($action.AccountType.Nested, $metadata.Nested) -and
+                    -not [object]::ReferenceEquals($action.AccountType.Nested.Values, $metadata.Nested.Values)
+                ) 'The offline action retained caller-owned account metadata.'
+                $action.AccountType.Nested.Label = 'altered result'
+                Assert-Equal 'identity fixture' $metadata.Nested.Label
+                Assert-Equal $marker $metadata.Nested.Password
+                Assert-True ([object]::ReferenceEquals($script:Current.AccountType, $metadata)) 'The planner replaced caller-owned account metadata.'
+            }
+            Assert-AccountMetadataPlanStayedOffline
+        }
+        Invoke-Test 'offline action projects account metadata from bracket-literal assessment JSON' {
+            Set-ApprovedComputerFixture
+            $marker = 'saved-account-metadata-fixture-value'
+            $script:Current.AccountType = New-IdentityMetadataFixture $marker
+            $path = Join-Path $script:Temporary 'assessment [account-type].json'
+            $encoding = [Text.UTF8Encoding]::new($false)
+            $source = ConvertTo-Json -InputObject $script:Assessment -Depth 20 -Compress
+            [IO.File]::WriteAllText($path, $source, $encoding)
+            $plan = New-ADAnalyzerRemediationPlan -Assessment $path -Profile $script:Profile
+            Assert-Equal 1 $plan.Actions.Count
+            Assert-Equal 0 $plan.Excluded.Count
+            Assert-Equal 'Computer' $plan.Actions[0].ObjectClass
+            $json = ConvertTo-Json -InputObject $plan -Depth 20 -Compress
+            Assert-True (-not $json.Contains($marker)) 'An offline action from saved assessment JSON exposed a fixture value.'
+            Assert-IdentityMetadataPresence $plan.Actions[0].AccountType
+            Assert-True ([IO.File]::ReadAllText($path, $encoding) -ceq $source) 'The offline planner rewrote the saved assessment.'
+            Assert-AccountMetadataPlanStayedOffline
+        }
+        Invoke-Test 'offline action keeps scalar null and excluded account metadata behavior' {
+            $user = New-FixturePlan
+            Assert-Equal 1 $user.Actions.Count
+            Assert-True ($user.Actions[0].AccountType -is [string]) 'A User classification lost its string type.'
+            Assert-Equal 'User' $user.Actions[0].AccountType
+
+            Set-ApprovedComputerFixture
+            $wrapped = Add-Member -InputObject 'Computer' -MemberType NoteProperty -Name cpassword -Value 'fixture-only' -PassThru
+            $script:Current.AccountType = $wrapped
+            $computer = New-FixturePlan
+            Assert-Equal 1 $computer.Actions.Count
+            Assert-True ($computer.Actions[0].AccountType -is [string]) 'A Computer classification lost its string type.'
+            Assert-Equal 'Computer' $computer.Actions[0].AccountType
+            Assert-True (
+                $null -eq $computer.Actions[0].AccountType.PSObject.Properties['cpassword']
+            ) 'The scalar classification retained its synthetic note.'
+            Assert-Equal 'fixture-only' $wrapped.cpassword
+
+            $script:Current.AccountType = $null
+            $explicit = New-FixturePlan
+            $script:Current.PSObject.Properties.Remove('AccountType')
+            $absent = New-FixturePlan
+            foreach ($plan in $explicit, $absent) {
+                Assert-Equal 1 $plan.Actions.Count
+                Assert-Equal 0 $plan.Excluded.Count
+                Assert-True (
+                    $null -ne $plan.Actions[0].PSObject.Properties['AccountType'] -and $null -eq $plan.Actions[0].AccountType
+                ) 'Null or absent Computer classification changed the action shape.'
+            }
+
+            $script:UnexpectedAccountTypeReads = 0
+            $script:Current | Add-Member -MemberType ScriptProperty -Name AccountType -Value {
+                $script:UnexpectedAccountTypeReads++
+                throw 'Excluded account metadata must never be evaluated.'
+            }
+            $script:Profile.Remediation.ApprovedObjectGuids = @()
+            $excluded = New-FixturePlan
+            Assert-Equal 0 $excluded.Actions.Count
+            Assert-Equal 1 $excluded.Excluded.Count
+            Assert-Equal 'ObjectNotExplicitlyApproved' $excluded.Excluded[0].Reason
+            Assert-Equal $null $excluded.Excluded[0].PSObject.Properties['AccountType']
+            Assert-Equal 0 $script:UnexpectedAccountTypeReads
+            Assert-AccountMetadataPlanStayedOffline
+        }
+    }
     Invoke-Test 'only explicitly approved Fail inactivity findings become DisableAccount actions' {
         $plan = New-FixturePlan
         Assert-Equal 1 @($plan.Actions).Count

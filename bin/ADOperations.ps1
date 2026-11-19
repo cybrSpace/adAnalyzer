@@ -2598,6 +2598,9 @@ function New-ADAnalyzerRemediationPlan {
     foreach ($item in $plan.Excluded) {
         $item.Target = $projector.ProjectIdentityMetadata($item.Target)
     }
+    foreach ($action in $plan.Actions) {
+        $action.AccountType = $projector.ProjectIdentityMetadata($action.AccountType)
+    }
     return $plan
 }
 
