@@ -3074,8 +3074,255 @@ function Assert-ADAnalyzerOperationInactivity {
     # it is not an authoritative all-DC lastLogon sweep.
 }
 
+class ADAnalyzerRemediationJournal : System.IDisposable {
+    hidden [object] $Lease
+    hidden [object] $OwnershipGate
+
+    ADAnalyzerRemediationJournal() {
+        $this.OwnershipGate = [object]::new()
+    }
+
+    [void] Open([object]$Plan, [string]$Server, [string]$Path) {
+        $ErrorActionPreference = 'Stop'
+        if ([Threading.Monitor]::IsEntered($this.OwnershipGate)) {
+            throw 'A remediation journal operation is active.'
+        }
+        [Threading.Monitor]::Enter($this.OwnershipGate)
+        try {
+            if ($null -ne $this.Lease) {
+                throw 'A remediation journal is already open'
+            }
+            $projector = [ADAnalyzerEvidenceProjector]::new()
+            $reviewedPlan = $projector.Project($Plan)
+            $guard = [ADAnalyzerRemediationGuard]::new()
+            $guard.AssertPlan($reviewedPlan)
+            $null = Get-ADAnalyzerOperationConnection $Server ([pscredential]::Empty)
+            $context = Get-ADAnalyzerOperationValue $reviewedPlan @('Context')
+            $reviewedServer = [string](Get-ADAnalyzerOperationValue $context @('Server'))
+            if ($reviewedServer -and $reviewedServer -ine $Server) {
+                throw 'Server differs from the DC recorded in the reviewed assessment'
+            }
+
+            $full = Resolve-ADAnalyzerOperationFilePath $Path
+            if ([IO.Directory]::Exists($full)) {
+                throw 'JournalPath must name a file'
+            }
+            $directory = [IO.Path]::GetDirectoryName($full)
+            if (-not [IO.Directory]::Exists($directory)) {
+                $null = [IO.Directory]::CreateDirectory($directory)
+            }
+            $leaseType = 'ADAnalyzer.JournalLease' -as [type]
+            if ($null -eq $leaseType) {
+                Add-Type -Path (Join-Path $PSScriptRoot 'ADJournalLease.cs') -ErrorAction Stop
+                $leaseType = [type]'ADAnalyzer.JournalLease'
+            }
+            try {
+                $owner = $leaseType::Open($full, [string]$reviewedPlan.PlanId, $Server, $this)
+            }
+            catch {
+                throw $this.LeaseOpenFailure($full, $_.Exception)
+            }
+
+            $opened = $false
+            try {
+                $fileExists = [IO.File]::Exists($full)
+                if ($fileExists) {
+                    $reader = [ADAnalyzerOperationDocumentReader]::new()
+                    $journal = $reader.Read($full, 'Journal')
+                    if (-not $this.IsJournalType($journal.JournalType) -or
+                        -not $this.MatchesPlanId($journal.PlanId, $reviewedPlan.PlanId) -or
+                        -not $this.MatchesServer($journal.Server, $Server)) {
+                        throw 'Existing journal belongs to a different plan or server'
+                    }
+                }
+                else {
+                    $journal = $this.CreateJournal($reviewedPlan, $Server)
+                }
+                if ($journal.JournalId -isnot [string] -or [string]::IsNullOrEmpty($journal.JournalId)) {
+                    throw 'The remediation journal is missing its identity'
+                }
+                $owner.BindInitialRecord($journal.JournalId, $this.SerializeJournal($journal), $fileExists)
+                $this.Lease = $owner
+                $opened = $true
+            }
+            finally {
+                if (-not $opened) {
+                    $owner.Dispose()
+                }
+            }
+        }
+        finally {
+            [Threading.Monitor]::Exit($this.OwnershipGate)
+        }
+    }
+
+    [object] Read() {
+        $ErrorActionPreference = 'Stop'
+        $owner = $this.RequireLease()
+        $operation = $owner.EnterOperation()
+        try {
+            $journal = $this.ReadOwnedJournal($owner)
+            return [ADAnalyzerEvidenceProjector]::new().Project($journal)
+        }
+        finally {
+            $operation.Dispose()
+        }
+    }
+
+    [void] Write([object]$Journal) {
+        $ErrorActionPreference = 'Stop'
+        $owner = $this.RequireLease()
+        $operation = $owner.EnterOperation()
+        try {
+            if ($null -eq $Journal -or $Journal -is [string]) {
+                throw 'Supply an in-memory remediation journal'
+            }
+            $reader = [ADAnalyzerOperationDocumentReader]::new()
+            $submitted = $reader.Read($Journal, 'Journal')
+            $this.AssertOwnedIdentity($owner, $submitted)
+            $null = $this.ReadOwnedJournal($owner)
+
+            $initialJson = $owner.GetInitialJson()
+            $record = ConvertFrom-Json -InputObject $initialJson -ErrorAction Stop
+            $record.Entries = @(Get-ADAnalyzerOperationValue $submitted @('Entries') @())
+            $record.UpdatedAt = $this.Timestamp()
+            $path = $owner.GetPath()
+            $content = $this.SerializeJournal($record)
+            $null = Write-ADAnalyzerOperationFile -Path $path -Content $content
+            $owner.MarkWritten()
+        }
+        finally {
+            $operation.Dispose()
+        }
+    }
+
+    [void] Dispose() {
+        $owner = $this.Lease
+        if (-not $this.IsOwnedLease($owner)) {
+            return
+        }
+        $owner.Dispose()
+        [Threading.Monitor]::Enter($this.OwnershipGate)
+        try {
+            if ([object]::ReferenceEquals($owner, $this.Lease)) {
+                $this.Lease = $null
+            }
+        }
+        finally {
+            [Threading.Monitor]::Exit($this.OwnershipGate)
+        }
+    }
+
+    hidden [object] RequireLease() {
+        $owner = $this.Lease
+        if (-not $this.IsOwnedLease($owner)) {
+            throw 'No remediation journal is open'
+        }
+        return $owner
+    }
+
+    hidden [bool] IsOwnedLease([object]$Owner) {
+        $leaseType = 'ADAnalyzer.JournalLease' -as [type]
+        return $null -ne $leaseType -and
+            $Owner -is $leaseType -and
+            $Owner.IsOwnedBy($this)
+    }
+
+    hidden [object] ReadOwnedJournal([object]$Owner) {
+        $path = $Owner.GetPath()
+        if ($Owner.ExpectsFile() -or [IO.File]::Exists($path)) {
+            $reader = [ADAnalyzerOperationDocumentReader]::new()
+            $journal = $reader.Read($path, 'Journal')
+            $this.AssertOwnedIdentity($Owner, $journal)
+            return $journal
+        }
+        $initialJson = $Owner.GetInitialJson()
+        return ConvertFrom-Json -InputObject $initialJson -ErrorAction Stop
+    }
+
+    hidden [void] AssertOwnedIdentity([object]$Owner, [object]$Journal) {
+        if (-not $this.IsJournalType($Journal.JournalType) -or
+            $Journal.PlanId -isnot [string] -or
+            $Journal.Server -isnot [string] -or
+            $Journal.JournalId -isnot [string] -or
+            -not $Owner.MatchesIdentity($Journal.PlanId, $Journal.Server, $Journal.JournalId)) {
+            throw 'Journal identity does not match the owned remediation journal'
+        }
+    }
+
+    hidden [object] CreateJournal([object]$Plan, [string]$Server) {
+        $header = $this.NewJournalHeader()
+        $projector = [ADAnalyzerEvidenceProjector]::new()
+        $fields = @{
+            PlanId = $Plan.PlanId
+            Server = $Server
+            CreatedAt = $this.Timestamp()
+            Remediation = $projector.Project($Plan.Remediation)
+            PrivilegedSids = @($Plan.PrivilegedSids)
+            AccountClassification = $projector.Project($Plan.AccountClassification)
+        }
+        return $this.BuildJournal($header, $fields)
+    }
+
+    hidden [string] SerializeJournal([object]$Journal) {
+        $projector = [ADAnalyzerEvidenceProjector]::new()
+        $stored = $projector.Project($Journal)
+        return ConvertTo-Json -InputObject $stored -Depth 100
+    }
+
+    hidden [string] LockPath([string]$Path) {
+        return $Path + '.lock'
+    }
+
+    hidden [IO.IOException] LeaseOpenFailure([string]$Path, [Exception]$Cause) {
+        $message = 'Unable to acquire journal lock for ' + $Path +
+            '. Another run may be active or the filesystem may be unavailable.'
+        return [IO.IOException]::new($message, $Cause)
+    }
+
+    hidden [bool] IsJournalType([object]$Type) {
+        return -not ($Type -ne 'ADAnalyzerRemediationJournal')
+    }
+
+    hidden [bool] MatchesPlanId([object]$Actual, [object]$Expected) {
+        return -not ($Actual -ne $Expected)
+    }
+
+    hidden [bool] MatchesServer([object]$Actual, [string]$Expected) {
+        return -not ($Actual -ine $Expected)
+    }
+
+    hidden [string] Timestamp() {
+        return [datetimeoffset]::UtcNow.ToString('o')
+    }
+
+    hidden [Collections.Specialized.OrderedDictionary] NewJournalHeader() {
+        return [ordered]@{
+            SchemaVersion = 1
+            JournalType = 'ADAnalyzerRemediationJournal'
+            JournalId = [guid]::NewGuid().ToString('D')
+        }
+    }
+
+    hidden [object] BuildJournal(
+        [Collections.Specialized.OrderedDictionary]$Header,
+        [hashtable]$Fields
+    ) {
+        $Header.PlanId = $Fields.PlanId
+        $Header.Server = $Fields.Server
+        $Header.CreatedAt = $Fields.CreatedAt
+        $Header.UpdatedAt = $null
+        $Header.Remediation = $Fields.Remediation
+        $Header.PrivilegedSids = $Fields.PrivilegedSids
+        $Header.AccountClassification = $Fields.AccountClassification
+        $Header.Entries = @()
+        return [pscustomobject]$Header
+    }
+}
+
 function Enter-ADAnalyzerJournalLease {
     param([Parameter(Mandatory)][string]$Path)
+    $storage = [ADAnalyzerRemediationJournal]::new()
     $full = Resolve-ADAnalyzerOperationFilePath $Path
     if (Test-Path -LiteralPath $full -PathType Container) {
         throw 'JournalPath must name a file'
@@ -3086,11 +3333,12 @@ function Enter-ADAnalyzerJournalLease {
     }
     try {
         # Keep the marker: unlinking after close can race the next owner.
-        return [IO.File]::Open(($full + '.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        return [IO.File]::Open(
+            $storage.LockPath($full), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None
+        )
     }
     catch {
-        throw [IO.IOException]::new(('Unable to acquire journal lock for ' + $full + '. Another run may be active or the filesystem may be unavailable.'),
-            $_.Exception)
+        throw $storage.LeaseOpenFailure($full, $_.Exception)
     }
 }
 
@@ -3101,29 +3349,29 @@ function Get-ADAnalyzerOperationJournal {
         [string]$Path
 
     )
+    $storage = [ADAnalyzerRemediationJournal]::new()
     if (Test-Path -LiteralPath $Path) {
         if (Test-Path -LiteralPath $Path -PathType Container) {
             throw 'JournalPath must name a file'
         }
         $journal = Read-ADAnalyzerOperationDocument $Path 'Journal'
-        if ($journal.JournalType -ne 'ADAnalyzerRemediationJournal' -or $journal.PlanId -ne $Plan.PlanId -or $journal.Server -ine $Server) {
+        if (-not $storage.IsJournalType($journal.JournalType) -or
+            -not $storage.MatchesPlanId($journal.PlanId, $Plan.PlanId) -or
+            -not $storage.MatchesServer($journal.Server, $Server)) {
             throw 'Existing journal belongs to a different plan or server'
         }
         return $journal
     }
-    [pscustomobject][ordered]@{
-        SchemaVersion = 1
-        JournalType = 'ADAnalyzerRemediationJournal'
-        JournalId = [guid]::NewGuid().ToString('D')
+    $header = $storage.NewJournalHeader()
+    $fields = @{
         PlanId = $Plan.PlanId
         Server = $Server
-        CreatedAt = [datetimeoffset]::UtcNow.ToString('o')
-        UpdatedAt = $null
+        CreatedAt = $storage.Timestamp()
         Remediation = ConvertTo-ADAnalyzerSafeData $Plan.Remediation
         PrivilegedSids = @($Plan.PrivilegedSids)
         AccountClassification = ConvertTo-ADAnalyzerSafeData $Plan.AccountClassification
-        Entries = @()
     }
+    return $storage.BuildJournal($header, $fields)
 }
 
 function Save-ADAnalyzerOperationJournal {
@@ -3132,7 +3380,8 @@ function Save-ADAnalyzerOperationJournal {
         [string]$Path
 
     )
-    $Journal.UpdatedAt = [datetimeoffset]::UtcNow.ToString('o')
+    $storage = [ADAnalyzerRemediationJournal]::new()
+    $Journal.UpdatedAt = $storage.Timestamp()
     $json = ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerSafeData $Journal) -Depth 100
     $null = Write-ADAnalyzerOperationFile -Path $Path -Content $json
 }

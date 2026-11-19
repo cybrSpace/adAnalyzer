@@ -242,6 +242,19 @@ The `New-ADAnalyzerRemediationPlan` compatibility command preserves native param
 
 `AssertPrivilege(object, action, plan, server)` accepts a current object from the selected controller and reads groups from that same controller with the bundled Windows Active Directory command. A trailing `PSCredential` supplies explicit credentials. The server must match the plan's recorded controller when one is recorded. The full constructor loader, `bin/ADAnalyzer.ps1`, makes the membership resolver and account classification available. The method checks effective privilege, fresh user classification, and exclusions. Successful eligibility checks return no output. Approval, identity verification, mutation, and journal operations belong to the guarded execution workflow.
 
+`ADAnalyzerRemediationJournal` manages a local journal. Its constructor is inert. `Open(plan, server, path)` validates the reviewed plan, resolves one PowerShell FileSystem path, and holds that path's exclusive lock. A newly opened journal stays in memory until the first write. `Read()` returns a detached record. `Write(journal)` checks the bound journal identity, persists the supplied entries with the bound settings, and sets the update time. Call `Dispose()` in a `finally` block to release the lease. Disposal is safe to repeat, preserves the empty lock marker, and allows the instance to be opened again.
+
+```powershell
+$journal = [ADAnalyzerRemediationJournal]::new()
+$journal.Open($plan, $scan.Context.Server, '.\journal.json')
+try {
+    $record = $journal.Read()
+}
+finally {
+    $journal.Dispose()
+}
+```
+
 `ADAnalyzerAssessmentEngine` validates and copies its in-memory profile at construction without importing native modules or connecting to AD. Instance methods own assessment composition, policy/version evidence, suppression, duplicate detection, coverage, state, and safe report projection. Reports retain the existing detached assessment shape; the engine stores no credentials or collected records. A bundled C# configuration holder uses a private field, so serializing an engine does not serialize its profile. The built-in `Add-Type` loads that small source component; no separate build tool or external package is required. Each instance owns its configuration, and evaluating again does not retain earlier results. Direct methods throw on evaluation errors. The existing `Invoke-ADAnalyzerAssessment` command is a thin compatibility adapter with its original parameters and a transient command context for PowerShell error-stream/common-parameter behavior. Other engine components are being converted in separate verified units.
 
 `ADAnalyzerGpoReader` owns the actual folder reader and INI, CSV, Registry.pol, XML, INF-flag, and security-option parsers. It retains no scan data or handles. `Read(path)` returns the existing policy DTO, and `ReadRegistryPolicy(path, scope)` returns typed registry records. Raw INI/XML and scalar parsing methods are internal implementation helpers; their compatibility functions retain the original source-parser contracts. Direct registry parsing buffers records and throws on invalid content; the compatibility `Read-AnalyzerRegistryPolicy` command preserves its earlier record streaming before a late parse failure. Existing reader commands delegate to the class; their consumer boundaries remain available. Reader construction is inert, and file/reader resources are closed before a successful direct return or after failure.
