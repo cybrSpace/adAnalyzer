@@ -877,7 +877,7 @@ class ADAnalyzerHostCollector {
                 $settings.Add(@{
                         Path = $rule.Key
                         Name = $rule.ValueName
-                        Type = $rule.Type
+                        Type = $rule['Type']
                         Method = $null
                     })
             }

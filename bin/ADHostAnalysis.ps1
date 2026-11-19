@@ -125,12 +125,13 @@ function Test-ADAnalyzerHostPolicy {
         }
         foreach ($serviceRule in @($rules.Services)) {
             $service = @($hostRecord.Services | Where-Object Name -eq $serviceRule.Name)
+            $expectedStartMode = $serviceRule['StartMode']
             $status = if ($service.Count -ne 1) {
                 'Unknown'
             }
             elseif ($service[0].State -eq $serviceRule.State -and
-                (!$serviceRule.StartMode -or
-                $service[0].StartMode -eq $serviceRule.StartMode)) {
+                (-not $expectedStartMode -or
+                $service[0].StartMode -eq $expectedStartMode)) {
                 'Pass'
             }
             else {
@@ -149,7 +150,7 @@ function Test-ADAnalyzerHostPolicy {
                 -Observed $service `
                 -Expected $serviceRule `
                 -Evidence @{
-                ProfileRuleId = $serviceRule.Id
+                ProfileRuleId = $serviceRule['Id']
             } `
                 -Applicability Applicable
             $check.Target = $target
@@ -159,18 +160,29 @@ function Test-ADAnalyzerHostPolicy {
             $record = @($hostRecord.Registry | Where-Object { $_.Path -ieq $rule.Key -and $_.Name -ieq $rule.ValueName })
             $status = 'Unknown'
             $observed = $null
+            $typeFrame = $null
+            if ($record.Count -eq 1) {
+                $typeFrame = @{
+                    Record = $record[0]
+                }
+            }
             if ($record.Count -eq 1 -and $record[0].Status -eq 'Observed') {
                 $observed = $record[0].Value
-                $operator = if ($rule.Operator) {
-                    $rule.Operator
+                $operator = if ($rule['Operator']) {
+                    $rule['Operator']
                 }
                 else {
                     'Equals'
                 }
-                if ($rule.Contains('Type') -and $null -eq $record[0].Type) {
+                # Check member presence without reading the value. Keep native access for adapted records.
+                if ($rule.Contains('Type') -and
+                    (-not (Test-ADAnalyzerOptionalSecretRecordMember $typeFrame 'Type') -or
+                    $null -eq $record[0].Type)) {
                     $status = 'Unknown'
                 }
-                elseif ($rule.Contains('Type') -and $record[0].Type -ne $rule.Type) {
+                elseif ($rule.Contains('Type') -and $(if (Test-ADAnalyzerOptionalSecretRecordMember $typeFrame 'Type') {
+                        , $record[0].Type
+                    }) -ne $rule['Type']) {
                     $status = 'Invalid'
                 }
                 else {
@@ -201,16 +213,17 @@ function Test-ADAnalyzerHostPolicy {
                 -Observed $observed `
                 -Expected $rule.Expected `
                 -Evidence @{
-                ProfileRuleId = $rule.Id
+                ProfileRuleId = $rule['Id']
                 RegistryPath = $rule.Key
                 ValueName = $rule.ValueName
-                RegistryType = $(if ($record.Count -eq 1) {
+                RegistryType = $(if ($null -ne $typeFrame -and
+                        (Test-ADAnalyzerOptionalSecretRecordMember $typeFrame 'Type')) {
                         $record[0].Type
                     }
                     else {
                         $null
                     })
-                ExpectedRegistryType = $rule.Type
+                ExpectedRegistryType = $rule['Type']
             } `
                 -Message 'An absent registry override does not establish the operating-system default or effective protocol behavior' `
                 -Applicability Configured

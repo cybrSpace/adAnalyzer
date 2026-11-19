@@ -1465,7 +1465,12 @@ Invoke-DirectoryTest 'missing LAPS schema is Unknown and never queries managed p
     Assert-DirectoryEqual 'Unknown' (Select-DirectoryCheck $checks 'LAPS.ROTATION_METADATA').Status
 }
 
-function Invoke-ConfiguredHostFixture([hashtable]$Profile, [string]$Mode = 'Normal', [switch]$Direct) {
+function Invoke-ConfiguredHostFixture(
+    [hashtable]$Profile,
+    [string]$Mode = 'Normal',
+    [switch]$Direct,
+    [switch]$HostObject
+) {
     $saved = @{}
     foreach ($name in @('New-CimSession', 'Get-CimInstance', 'Invoke-CimMethod', 'Remove-CimSession')) {
         $saved[$name] = (Get-Command $name).ScriptBlock
@@ -1667,7 +1672,16 @@ function Invoke-ConfiguredHostFixture([hashtable]$Profile, [string]$Mode = 'Norm
         ) $script:ConfiguredClosed++
     }
     try {
-        if ($Direct) {
+        if ($HostObject) {
+            $collector = [ADAnalyzerHostCollector]::new()
+            $data = $collector.Collect(
+                @('dc.example.invalid'),
+                $script:Credential,
+                $Profile.Analysis.HostTimeoutSeconds,
+                $Profile
+            )
+        }
+        elseif ($Direct) {
             $errors = [Collections.Generic.List[object]]::new()
             $data = [pscustomobject]@{
                 Hosts = @(Get-ADAnalyzerHostData `
@@ -1676,6 +1690,7 @@ function Invoke-ConfiguredHostFixture([hashtable]$Profile, [string]$Mode = 'Norm
                         -Errors $errors `
                         -Profile $Profile `
                         -TimeoutSeconds $Profile.Analysis.HostTimeoutSeconds)
+                Errors = $errors.ToArray()
             }
         }
         else {
@@ -1693,6 +1708,86 @@ function Invoke-ConfiguredHostFixture([hashtable]$Profile, [string]$Mode = 'Norm
         }
     }
 }
+
+foreach ($registryRoute in 'command', 'object', 'directory') {
+    Invoke-DirectoryTest ('strict host registry rules discover omitted type through ' + $registryRoute) {
+        Set-StrictMode -Version Latest
+        $profile = New-DirectoryProfile
+        $profile.Analysis.HostTimeoutSeconds = 17
+        $profile.Host.RegistryRules = @(
+            @{
+                Key = 'SYSTEM\Custom'
+                ValueName = 'Flag'
+                Expected = 0
+            }
+        )
+        $before = ConvertTo-Json -InputObject $profile -Depth 30 -Compress
+        $result = Invoke-ConfiguredHostFixture $profile -Direct:($registryRoute -eq 'command') `
+            -HostObject:($registryRoute -eq 'object')
+        Assert-DirectoryEqual 1 $result.Data.Hosts.Count
+        Assert-DirectoryEqual 0 $result.Data.Errors.Count
+        Assert-DirectoryEqual 1 $result.Closed
+        Assert-DirectoryEqual 1 @($result.Calls | Where-Object Command -eq Session).Count
+        $registryCalls = @($result.Calls | Where-Object {
+                $_.Command -eq 'Registry' -and $_.Parameters.Arguments.sSubKeyName -eq 'SYSTEM\Custom'
+            })
+        Assert-DirectoryEqual 'EnumValues,GetDWORDValue' ($registryCalls.Parameters.MethodName -join ',')
+        $rows = @($result.Data.Hosts[0].Registry | Where-Object Path -eq 'SYSTEM\Custom')
+        Assert-DirectoryEqual 1 $rows.Count
+        Assert-DirectoryEqual Observed $rows[0].Status
+        Assert-DirectoryEqual 4 $rows[0].Type
+        Assert-DirectoryTrue ($rows[0].Value -is [uint32] -and $rows[0].Value -eq 0) 'The discovered DWORD lost its typed value.'
+        Assert-DirectoryEqual $before (ConvertTo-Json -InputObject $profile -Depth 30 -Compress)
+
+        if ($registryRoute -eq 'directory') {
+            foreach ($file in 'ADGpo', 'ADPolicyAnalysis', 'ADHostAnalysis', 'ADOperations', 'ADAssessment') {
+                . (Join-Path $RepositoryRoot ('bin/' + $file + '.ps1'))
+            }
+            $checks = @(Test-ADAnalyzerHostPolicy -Hosts $result.Data.Hosts -Profile $profile)
+            $actual = @(Select-DirectoryCheck $checks 'HOST.REGISTRY')
+            Assert-DirectoryEqual 1 $actual.Count
+            Assert-DirectoryEqual Pass $actual[0].Status
+            Assert-DirectoryEqual 4 $actual[0].Evidence.RegistryType
+            Assert-DirectoryEqual $null $actual[0].Evidence.ExpectedRegistryType
+            $result.Data | Add-Member -NotePropertyName HostChecks -NotePropertyValue $checks
+            $assessment = Invoke-ADAnalyzerAssessment -DirectoryData $result.Data -Profile $profile
+            Assert-DirectoryEqual Pass (Select-DirectoryCheck $assessment.Checks 'HOST.REGISTRY').Status
+        }
+    }
+}
+
+Invoke-DirectoryTest 'strict host registry discovery preserves explicit fallback and unknown reported types' {
+    Set-StrictMode -Version Latest
+    $profile = New-DirectoryProfile
+    $profile.Host.RegistryRules = @(
+        @{
+            Key = 'SYSTEM\Custom'
+            ValueName = ''
+            Expected = 'default'
+            Type = 1
+        }
+        @{
+            Key = 'SYSTEM\Custom'
+            ValueName = 'Unsupported'
+            Expected = 0
+            Type = 4
+        }
+    )
+    $result = Invoke-ConfiguredHostFixture $profile -HostObject
+    $rows = @($result.Data.Hosts[0].Registry | Where-Object Path -eq 'SYSTEM\Custom')
+    Assert-DirectoryEqual 2 $rows.Count
+    Assert-DirectoryEqual Observed $rows[0].Status
+    Assert-DirectoryEqual 1 $rows[0].Type
+    Assert-DirectoryEqual default $rows[0].Value
+    Assert-DirectoryEqual Unknown $rows[1].Status
+    Assert-DirectoryEqual $null $rows[1].Value
+    $registryCalls = @($result.Calls | Where-Object {
+            $_.Command -eq 'Registry' -and $_.Parameters.Arguments.sSubKeyName -eq 'SYSTEM\Custom'
+        })
+    Assert-DirectoryEqual 'EnumValues,GetStringValue' ($registryCalls.Parameters.MethodName -join ',')
+    Assert-DirectoryEqual 1 $result.Closed
+}
+
 Invoke-DirectoryTest 'custom host configuration reaches bounded service and typed registry collection' {
     $profile = New-DirectoryProfile
     $profile.Analysis.HostTimeoutSeconds = 17

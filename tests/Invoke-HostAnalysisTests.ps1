@@ -229,26 +229,235 @@ Test-HostPolicy 'duplicate canonical audit and certificate identities fail befor
 Test-HostPolicy 'declared host registry types require observed matching type evidence' {
     $copy = Get-ADAnalyzerDefaultProfile
     $copy.Host.RegistryRules = @(@{
+            Id = 'typed'
             Key = 'SYSTEM\Fixture'
             ValueName = 'Enabled'
             Expected = 0
+            Operator = 'Equals'
             Type = 4
         })
     $record = [pscustomobject]@{
         ComputerName = 'fixture'
         Services = @()
-        Registry = @([pscustomobject]@{
+        Registry = @()
+    }
+    $observation = @{
+        Path = 'SYSTEM\Fixture'
+        Name = 'Enabled'
+        Status = 'Observed'
+        Value = 0
+    }
+    $cases = @(
+        @{
+            Name = 'absent Type on a custom object'
+            Rows = @([pscustomobject]$observation)
+            Status = 'Unknown'
+            Type = $null
+        }
+        @{
+            Name = 'absent Type on a hashtable'
+            Rows = @($observation.Clone())
+            Status = 'Unknown'
+            Type = $null
+        }
+        @{
+            Name = 'explicitly null Type'
+            Rows = @([pscustomobject]($observation + @{ Type = $null }))
+            Status = 'Unknown'
+            Type = $null
+        }
+        @{
+            Name = 'mismatching Type'
+            Rows = @([pscustomobject]($observation + @{ Type = 1 }))
+            Status = 'Invalid'
+            Type = 1
+        }
+        @{
+            Name = 'matching Type on a hashtable'
+            Rows = @($observation + @{ Type = 4 })
+            Status = 'Pass'
+            Type = 4
+        }
+        @{
+            Name = 'no matching value'
+            Rows = @()
+            Status = 'Unknown'
+            Type = $null
+        }
+        @{
+            Name = 'ambiguous matching value'
+            Rows = @($observation.Clone(), $observation.Clone())
+            Status = 'Unknown'
+            Type = $null
+        }
+        @{
+            Name = 'unavailable value with omitted Type'
+            Rows = @([pscustomobject]@{
+                    Path = 'SYSTEM\Fixture'
+                    Name = 'Enabled'
+                    Status = 'Unknown'
+                })
+            Status = 'Unknown'
+            Type = $null
+        }
+    )
+    foreach ($case in $cases) {
+        $record.Registry = $case.Rows
+        $profileBefore = ConvertTo-Json -InputObject $copy -Depth 30 -Compress
+        $recordBefore = ConvertTo-Json -InputObject $record -Depth 10 -Compress
+        $ordinary = @(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy)
+        $strict = @(& {
+                Set-StrictMode -Version Latest
+                Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy
+            })
+        $check = $strict | Where-Object RuleId -eq 'HOST.REGISTRY'
+        Assert-True ($check.Status -ceq $case.Status) ('Unexpected registry status for ' + $case.Name)
+        Assert-True ([object]::Equals($case.Type, $check.Evidence.RegistryType)) ('Unexpected registry evidence for ' + $case.Name)
+        Assert-Equal 4 $check.Evidence.ExpectedRegistryType
+        Assert-Equal (ConvertTo-Json -InputObject $ordinary -Depth 30 -Compress) (ConvertTo-Json -InputObject $strict -Depth 30 -Compress)
+        Assert-Equal $profileBefore (ConvertTo-Json -InputObject $copy -Depth 30 -Compress)
+        Assert-Equal $recordBefore (ConvertTo-Json -InputObject $record -Depth 10 -Compress)
+    }
+}
+Test-HostPolicy 'StrictMode service rules accept omitted or null startup expectations' {
+    $copy = Get-ADAnalyzerDefaultProfile
+    $copy.Host.Services = @(
+        @{
+            Name = 'Spooler'
+            State = 'Stopped'
+        }
+        @{
+            Id = 'state-only'
+            Name = 'Spooler'
+            State = 'Stopped'
+            StartMode = $null
+        }
+        @{
+            Id = 'startup-mismatch'
+            Name = 'Spooler'
+            State = 'Stopped'
+            StartMode = 'Auto'
+        }
+    )
+    $target = $hostRecord.ComputerName + '/Service/Spooler'
+    $profileBefore = ConvertTo-Json -InputObject $copy -Depth 30 -Compress
+    $recordBefore = ConvertTo-Json -InputObject $hostRecord -Depth 10 -Compress
+    $ordinary = @(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy)
+    $strict = @(& {
+            Set-StrictMode -Version Latest
+            Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $copy
+        })
+    Assert-Equal 'HOST.SERVICE,HOST.SERVICE,HOST.SERVICE,HOST.AUDIT_POLICY' ($strict.RuleId -join ',')
+    Assert-Equal 'Pass,Pass,Fail,NotConfigured' ($strict.Status -join ',')
+    Assert-Equal (New-ADAnalyzerCheck -RuleId 'HOST.SERVICE' -Target $target -Status Pass).CheckId $strict[0].CheckId
+    Assert-True ($null -eq $strict[0].Evidence.ProfileRuleId) 'Unnamed service rule acquired a profile rule ID'
+    Assert-Equal 'state-only' $strict[1].Evidence.ProfileRuleId
+    Assert-Equal 'startup-mismatch' $strict[2].Evidence.ProfileRuleId
+    Assert-Equal 3 @($strict[0..2] | Select-Object -ExpandProperty CheckId -Unique).Count
+    Assert-Equal ($target + ',' + $target + ',' + $target) ($strict[0..2].Target -join ',')
+    Assert-Equal (ConvertTo-Json -InputObject $ordinary -Depth 30 -Compress) (ConvertTo-Json -InputObject $strict -Depth 30 -Compress)
+    Assert-Equal $profileBefore (ConvertTo-Json -InputObject $copy -Depth 30 -Compress)
+    Assert-Equal $recordBefore (ConvertTo-Json -InputObject $hostRecord -Depth 10 -Compress)
+}
+Test-HostPolicy 'StrictMode registry rules preserve optional field defaults and evidence' {
+    $copy = Get-ADAnalyzerDefaultProfile
+    $copy.Host.RegistryRules = @(
+        @{
+            Key = 'SYSTEM\Fixture'
+            ValueName = 'Enabled'
+            Expected = 0
+        }
+        @{
+            Id = 'not-one'
+            Key = 'SYSTEM\Fixture'
+            ValueName = 'Enabled'
+            Expected = 1
+            Operator = 'NotEquals'
+            Type = 4
+        }
+    )
+    $record = [pscustomobject]@{
+        ComputerName = $hostRecord.ComputerName
+        Services = @()
+        Registry = @([ordered]@{
                 Path = 'SYSTEM\Fixture'
                 Name = 'Enabled'
                 Status = 'Observed'
                 Value = 0
+                Type = 4
             })
     }
-    Assert-Equal Unknown (@(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy) | Where-Object RuleId -eq HOST.REGISTRY).Status
-    $record.Registry[0] | Add-Member -NotePropertyName Type -NotePropertyValue 1
-    Assert-Equal Invalid (@(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy) | Where-Object RuleId -eq HOST.REGISTRY).Status
-    $record.Registry[0].Type = 4
-    Assert-Equal Pass (@(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy) | Where-Object RuleId -eq HOST.REGISTRY).Status
+    $target = $record.ComputerName + '/Registry/SYSTEM\Fixture/Enabled'
+    $profileBefore = ConvertTo-Json -InputObject $copy -Depth 30 -Compress
+    $recordBefore = ConvertTo-Json -InputObject $record -Depth 10 -Compress
+    $ordinary = @(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy)
+    $strict = @(& {
+            Set-StrictMode -Version Latest
+            Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy
+        })
+    Assert-Equal 'HOST.REGISTRY,HOST.REGISTRY,HOST.AUDIT_POLICY' ($strict.RuleId -join ',')
+    Assert-Equal 'Pass,Pass,NotConfigured' ($strict.Status -join ',')
+    Assert-Equal (New-ADAnalyzerCheck -RuleId 'HOST.REGISTRY' -Target $target -Status Pass).CheckId $strict[0].CheckId
+    Assert-True ($null -eq $strict[0].Evidence.ProfileRuleId) 'Unnamed registry rule acquired a profile rule ID'
+    Assert-True ($null -eq $strict[0].Evidence.ExpectedRegistryType) 'Untyped rule acquired an expected registry type'
+    Assert-Equal 4 $strict[0].Evidence.RegistryType
+    Assert-Equal 'not-one' $strict[1].Evidence.ProfileRuleId
+    Assert-Equal 4 $strict[1].Evidence.ExpectedRegistryType
+    Assert-True ($strict[0].CheckId -cne $strict[1].CheckId) 'Named and unnamed registry identities collided'
+    Assert-Equal (ConvertTo-Json -InputObject $ordinary -Depth 30 -Compress) (ConvertTo-Json -InputObject $strict -Depth 30 -Compress)
+    Assert-Equal $profileBefore (ConvertTo-Json -InputObject $copy -Depth 30 -Compress)
+    Assert-Equal $recordBefore (ConvertTo-Json -InputObject $record -Depth 10 -Compress)
+    $copy.Host.RegistryRules[0].Expected = 1
+    $strict = @(& {
+            Set-StrictMode -Version Latest
+            Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy
+        })
+    Assert-Equal Fail $strict[0].Status
+    Assert-Equal Pass $strict[1].Status
+}
+Test-HostPolicy 'registry type reads preserve custom getters and comparison cardinality' {
+    $copy = Get-ADAnalyzerDefaultProfile
+    $copy.Host.RegistryRules = @(@{
+            Id = 'typed'
+            Key = 'SYSTEM\Fixture'
+            ValueName = 'Enabled'
+            Expected = 0
+            Operator = 'Equals'
+            Type = 4
+        })
+    $observation = [pscustomobject]@{
+        Path = 'SYSTEM\Fixture'
+        Name = 'Enabled'
+        Status = 'Observed'
+        Value = 0
+        TypeReads = 0
+    }
+    $observation.PSObject.Properties.Add([Management.Automation.PSScriptProperty]::new('Type', {
+                $this.TypeReads++
+                if ($this.TypeReads -eq 1) {
+                    return 4
+                }
+                if ($this.TypeReads -eq 2) {
+                    return ,@(0)
+                }
+                return ,@(4)
+            }))
+    $record = [pscustomobject]@{
+        ComputerName = 'fixture'
+        Services = @()
+        Registry = @($observation)
+    }
+    $ordinary = @(Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy)
+    Assert-Equal 3 $observation.TypeReads
+    $observation.TypeReads = 0
+    $strict = @(& {
+            Set-StrictMode -Version Latest
+            Test-ADAnalyzerHostPolicy -Hosts @($record) -Profile $copy
+        })
+    Assert-Equal 3 $observation.TypeReads
+    Assert-Equal Pass $strict[0].Status
+    Assert-True ([object]::Equals(4, $strict[0].Evidence.RegistryType)) 'Registry evidence did not preserve the native scalar'
+    Assert-Equal (ConvertTo-Json -InputObject $ordinary -Depth 30 -Compress) (ConvertTo-Json -InputObject $strict -Depth 30 -Compress)
 }
 Test-HostPolicy 'optional profile rule IDs keep shared host targets independent and stable' {
     $copy = Get-ADAnalyzerDefaultProfile
