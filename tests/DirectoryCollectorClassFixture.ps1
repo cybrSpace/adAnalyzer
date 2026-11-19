@@ -350,6 +350,12 @@ function ConvertTo-FixtureJson($Value) {
 }
 
 function ConvertTo-FixtureError($Diagnostic) {
+    if ($null -eq $Diagnostic) {
+        return [pscustomobject][ordered]@{
+            Type = $null
+            Id = $null
+        }
+    }
     $record = if ($Diagnostic -is [Management.Automation.IContainsErrorRecord]) {
         $Diagnostic.ErrorRecord
     }
@@ -394,7 +400,11 @@ function Invoke-FixtureNative($Context, [hashtable]$Profile) {
         Rows = @($stream | Where-Object { $_ -isnot [Management.Automation.WarningRecord] })
         WarningStream = @($stream | Where-Object { $_ -is [Management.Automation.WarningRecord] } | ForEach-Object Message)
         Warnings = @($warnings | ForEach-Object Message)
-        Errors = @($errors | ForEach-Object { ConvertTo-FixtureError $_ })
+        Errors = @(
+            foreach ($diagnostic in $errors) {
+                ConvertTo-FixtureError $diagnostic
+            }
+        )
         Failure = $failure
         Restored = $restored
     }
@@ -434,9 +444,13 @@ if ($Case -eq 'Native') {
                         $script:Trace[2].Step -ceq 'Get-ADForest') 'Native Direct entered the provider drive.'
                 }
                 'Denied' {
+                    $denied = @($actual.Errors | Where-Object {
+                            $_.Id -like 'Fixture.DirectoryDenied*' -and
+                            $_.Message -ceq 'Fixture directory query denied.'
+                        })
                     Assert-DirectoryCollector ($actual.Rows.Count -eq 1 -and $actual.Rows[0].Coverage.Trusts -ceq 'Unreadable' -and
                         $actual.Rows[0].Errors[0].Collector -ceq 'Trusts' -and $actual.WarningStream.Count -eq 1 -and
-                        $actual.Errors.Count -gt 0) 'Native query failure or warning behavior changed.'
+                        $denied.Count -gt 0) 'Native query failure or warning behavior changed.'
                 }
                 'Enter' {
                     Assert-DirectoryCollector ($actual.Rows.Count -eq 1 -and
@@ -444,11 +458,15 @@ if ($Case -eq 'Native') {
                         $script:Ambient.Count -eq 2 -and $script:Trace[-1].Step -ceq 'Remove') 'Failed native drive entry skipped cleanup or fell back to bulk queries.'
                 }
                 'Competing' {
+                    $primary = @($actual.Errors | Where-Object {
+                            $_.Id -like 'InvalidCastFromStringToInteger*' -and
+                            $_.Message -like '*fixture invalid account flag*'
+                        })
                     Assert-DirectoryCollector ($actual.Rows.Count -eq 0 -and
                         $actual.Failure.Message -like '*fixture invalid account flag*' -and
                         $actual.Failure.Restore -ceq 'Fixture directory location restoration failure.' -and
                         $actual.Failure.Remove -ceq 'Fixture directory drive removal failure.' -and
-                        $actual.Errors.Count -gt 0) 'Native primary/cleanup error evidence changed.'
+                        $primary.Count -gt 0) 'Native primary/cleanup error evidence changed.'
                 }
                 'Invalid' {
                     Assert-DirectoryCollector ($actual.Rows.Count -eq 0 -and $script:Trace.Count -eq 0 -and
@@ -683,6 +701,15 @@ if ($Case -eq 'Isolation') {
     }
 
     Test-DirectoryCollector 'same-source loading in a disposed secondary runspace' {
+        $group = [pscustomobject]@{
+            DistinguishedName = 'CN=Runspace Fixture,' + $script:DomainDn
+            SID = 'S-1-5-21-1-2-3-6700'
+            MemberOf = @()
+        }
+        $staticIndex = [ADAnalyzerMembershipGraph]::BuildIndex(@($group))
+        Assert-DirectoryCollector ([object]::ReferenceEquals($staticIndex.ByDn[$group.DistinguishedName], $group) -and
+            [object]::ReferenceEquals($staticIndex.BySid[$group.SID], $group)) 'Legacy index no longer keeps its borrowed group references.'
+
         $worker = [powershell]::Create()
         try {
             $source = @'
@@ -714,6 +741,10 @@ $ErrorActionPreference = 'Stop'
         Assert-FixtureDirectTrace $script:SelectedServer $false
         Assert-DirectoryCollector ((ConvertTo-FixtureJson $reused) -ceq (ConvertTo-FixtureJson $independent)) `
             'Secondary runspace disposal changed the existing or new collector result.'
+
+        $index = New-ADAnalyzerMembershipIndex -Groups @($group)
+        Assert-DirectoryCollector ([object]::ReferenceEquals($index.ByDn[$group.DistinguishedName], $group) -and
+            [object]::ReferenceEquals($index.BySid[$group.SID], $group)) 'Secondary runspace disposal changed the compatibility index.'
     }
 }
 

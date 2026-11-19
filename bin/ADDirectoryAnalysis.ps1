@@ -80,6 +80,27 @@ function Test-ADAnalyzerClassificationAttribute {
     $Name -match '^[A-Za-z][A-Za-z0-9-]*$' -and -not (Test-ADAnalyzerSecretName $Name)
 }
 
+class ADAnalyzerMembershipIndexBuilder {
+    [object] Build([object[]]$Groups) {
+        $byDn = @{}
+        $bySid = @{}
+        foreach ($group in $Groups) {
+            $dn = [string](Get-ADAnalyzerDirectoryField $group 'DistinguishedName')
+            $sid = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $group 'SID' (Get-ADAnalyzerDirectoryField $group 'objectSid'))
+            if ($dn) {
+                $byDn[$dn] = $group
+            }
+            if ($sid) {
+                $bySid[$sid] = $group
+            }
+        }
+        return [pscustomobject]@{
+            ByDn = $byDn
+            BySid = $bySid
+        }
+    }
+}
+
 class ADAnalyzerMembershipGraph {
     hidden [object]$State
 
@@ -108,7 +129,8 @@ class ADAnalyzerMembershipGraph {
                 })
         }
 
-        $index = [ADAnalyzerMembershipGraph]::BuildIndex($snapshots.ToArray())
+        $builder = [ADAnalyzerMembershipIndexBuilder]::new()
+        $index = $builder.Build($snapshots.ToArray())
         $this.State = [Activator]::CreateInstance(
             ('ADAnalyzer.InternalState' -as [type]),
             [object[]]@($index)
@@ -117,22 +139,8 @@ class ADAnalyzerMembershipGraph {
 
     # Compatibility indexes deliberately preserve the original group references.
     static [object] BuildIndex([object[]]$Groups) {
-        $byDn = @{}
-        $bySid = @{}
-        foreach ($group in $Groups) {
-            $dn = [string](Get-ADAnalyzerDirectoryField $group 'DistinguishedName')
-            $sid = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $group 'SID' (Get-ADAnalyzerDirectoryField $group 'objectSid'))
-            if ($dn) {
-                $byDn[$dn] = $group
-            }
-            if ($sid) {
-                $bySid[$sid] = $group
-            }
-        }
-        return [pscustomobject]@{
-            ByDn = $byDn
-            BySid = $bySid
-        }
+        $builder = [ADAnalyzerMembershipIndexBuilder]::new()
+        return $builder.Build($Groups)
     }
 
     [object] Resolve([object]$Object) {
@@ -282,7 +290,8 @@ class ADAnalyzerMembershipGraph {
 function New-ADAnalyzerMembershipIndex {
     param([object[]]$Groups = @())
 
-    [ADAnalyzerMembershipGraph]::BuildIndex($Groups)
+    $builder = [ADAnalyzerMembershipIndexBuilder]::new()
+    $builder.Build($Groups)
 }
 
 function Resolve-ADAnalyzerMembership {
