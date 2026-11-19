@@ -228,6 +228,40 @@ function Assert-StrictAssessmentComparison {
     return $ordinary
 }
 
+function New-IdentityMetadataFixture([string]$Marker) {
+    return [ordered]@{
+        Nested = [pscustomobject][ordered]@{
+            Label = 'identity fixture'
+            Password = $Marker
+            Values = @(
+                [guid]'11111111-1111-4111-8111-111111111111'
+                [datetime]'2026-01-01T02:03:04Z'
+                [datetimeoffset]'2026-01-01T02:03:04+02:00'
+            )
+        }
+    }
+}
+
+function Assert-IdentityMetadataPresence($Metadata) {
+    Assert-Equal 'identity fixture' $Metadata.Nested.Label
+    Assert-True ($Metadata.Nested.PasswordPresent -is [bool] -and $Metadata.Nested.PasswordPresent) 'Identity metadata did not expose Boolean secret presence.'
+    Assert-Equal $null $Metadata.Nested.PSObject.Properties['Password']
+}
+
+function Assert-IdentityMetadataValueTypes($Metadata, $Source) {
+    $values = $Metadata.Nested.Values
+    Assert-True ($values -is [array]) 'Identity metadata lost its nested array.'
+    Assert-Equal 3 $values.Count
+    Assert-True ($values[0] -is [guid]) 'A nested GUID changed type.'
+    Assert-True ($values[1] -is [datetime]) 'A nested DateTime changed type.'
+    Assert-True ($values[2] -is [datetimeoffset]) 'A nested DateTimeOffset changed type.'
+    Assert-Equal $Source.Nested.Values[0] $values[0]
+    Assert-Equal $Source.Nested.Values[1] $values[1]
+    Assert-Equal $Source.Nested.Values[1].Kind $values[1].Kind
+    Assert-Equal $Source.Nested.Values[2] $values[2]
+    Assert-Equal $Source.Nested.Values[2].Offset $values[2].Offset
+}
+
 Invoke-Test 'composite structs and typed pairs project nested secrets through every export' {
     Add-Type -TypeDefinition 'namespace ADAnalyzer.SafeStructFixture { public struct Evidence { public object Payload; } }'
     $marker = 'STRUCT_FIXTURE_SECRET'
@@ -906,6 +940,138 @@ try {
         }
         Assert-Equal 1 (Compare-ADAnalyzerAssessment $old $new).Summary.Changed
     }
+    Invoke-Test 'native comparison projects and detaches both in-memory run identifiers' {
+        $marker = 'native-comparison-identity-fixture-value'
+        $metadata = New-IdentityMetadataFixture $marker
+        $assessment = @{
+            SchemaVersion = 1
+            RunId = $metadata
+        }
+        $comparison = Compare-ADAnalyzerAssessment -Reference $assessment -Difference $assessment
+        $json = ConvertTo-Json -InputObject $comparison -Depth 20 -Compress
+        Assert-True (-not $json.Contains($marker)) 'Raw native comparison exposed a fixture value.'
+        Assert-IdentityMetadataPresence $comparison.ReferenceRunId
+        Assert-IdentityMetadataPresence $comparison.DifferenceRunId
+        Assert-IdentityMetadataValueTypes $comparison.ReferenceRunId $metadata
+        Assert-IdentityMetadataValueTypes $comparison.DifferenceRunId $metadata
+        Assert-True (-not [object]::ReferenceEquals($metadata, $comparison.ReferenceRunId)) 'Native comparison retained the caller-owned identifier.'
+
+        $comparison.ReferenceRunId.Nested.Label = 'altered result'
+        Assert-Equal 'identity fixture' $comparison.DifferenceRunId.Nested.Label
+        Assert-Equal 'identity fixture' $metadata.Nested.Label
+        Assert-Equal $marker $metadata.Nested.Password
+        Assert-Equal 0 $comparison.Changes.Count
+    }
+    Invoke-Test 'direct comparison preserves typed identities nested in compound metadata' {
+        $marker = 'direct-comparison-identity-fixture-value'
+        $metadata = New-IdentityMetadataFixture $marker
+        $identifier = [guid]'22222222-2222-4222-8222-222222222222'
+        $assessment = @{
+            SchemaVersion = 1
+            RunId = @($identifier, $metadata)
+        }
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $comparison = $comparer.Compare($assessment, $assessment)
+        Assert-True ($comparison.ReferenceRunId -is [array]) 'Compound identity lost its captured array.'
+        Assert-Equal 2 $comparison.ReferenceRunId.Count
+        Assert-True ($comparison.ReferenceRunId[0] -is [guid]) 'A GUID beside a composite identity changed type.'
+        Assert-Equal $identifier $comparison.ReferenceRunId[0]
+        Assert-IdentityMetadataPresence $comparison.ReferenceRunId[1]
+        Assert-IdentityMetadataValueTypes $comparison.ReferenceRunId[1] $metadata
+        $json = ConvertTo-Json -InputObject $comparison -Depth 20 -Compress
+        Assert-True (-not $json.Contains($marker)) 'Raw direct comparison exposed a fixture value.'
+
+        $projector = [ADAnalyzerEvidenceProjector]::new()
+        $identity = $projector.ProjectIdentityMetadata($metadata)
+        Assert-IdentityMetadataPresence $identity
+        Assert-IdentityMetadataValueTypes $identity $metadata
+        $evidence = $projector.Project($metadata)
+        Assert-IdentityMetadataPresence $evidence
+        Assert-Equal $metadata.Nested.Values[0].ToString('D') $evidence.Nested.Values[0]
+        Assert-Equal $metadata.Nested.Values[1].ToUniversalTime().ToString('o') $evidence.Nested.Values[1]
+        Assert-Equal $metadata.Nested.Values[2].ToUniversalTime().ToString('o') $evidence.Nested.Values[2]
+        foreach ($value in $evidence.Nested.Values) {
+            Assert-True ($value -is [string]) 'Ordinary evidence projection changed its identifier encoding.'
+        }
+    }
+    Invoke-Test 'literal assessment JSON produces safe comparison and plan metadata' {
+        $marker = 'saved-assessment-identity-fixture-value'
+        $metadata = New-IdentityMetadataFixture $marker
+        $assessment = [ordered]@{
+            SchemaVersion = 1
+            RunId = $metadata
+            Target = $metadata
+        }
+        $path = Join-Path $script:Temporary 'assessment [identity].json'
+        $encoding = [Text.UTF8Encoding]::new($false)
+        $source = ConvertTo-Json -InputObject $assessment -Depth 20 -Compress
+        [IO.File]::WriteAllText($path, $source, $encoding)
+        $comparison = Compare-ADAnalyzerAssessment -Reference $path -Difference $path
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $direct = $comparer.Compare($path, $path)
+        $plan = New-ADAnalyzerRemediationPlan -Assessment $path
+        foreach ($result in @($comparison, $direct, $plan)) {
+            $json = ConvertTo-Json -InputObject $result -Depth 20 -Compress
+            Assert-True (-not $json.Contains($marker)) 'A raw result from a saved assessment exposed a fixture value.'
+        }
+        Assert-IdentityMetadataPresence $comparison.ReferenceRunId
+        Assert-IdentityMetadataPresence $comparison.DifferenceRunId
+        Assert-IdentityMetadataPresence $direct.ReferenceRunId
+        Assert-IdentityMetadataPresence $direct.DifferenceRunId
+        Assert-IdentityMetadataPresence $plan.AssessmentRunId
+        Assert-IdentityMetadataPresence $plan.Target
+        Assert-Equal 0 $plan.Actions.Count
+        Assert-True ([IO.File]::ReadAllText($path, $encoding) -ceq $source) 'The comparison or plan rewrote the saved assessment.'
+    }
+    Invoke-Test 'identity metadata retains native null singleton and multiple-value shapes' {
+        $identifier = [guid]'11111111-1111-4111-8111-111111111111'
+        $missing = @{
+            SchemaVersion = 1
+        }
+        $explicitNull = @{
+            SchemaVersion = 1
+            RunId = $null
+        }
+        $empty = @{
+            SchemaVersion = 1
+            RunId = @()
+        }
+        $singleton = @{
+            SchemaVersion = 1
+            RunId = @($identifier)
+        }
+        $multiple = @{
+            SchemaVersion = 1
+            RunId = @($identifier, $false, 17)
+        }
+        $nativeNull = Compare-ADAnalyzerAssessment $missing $explicitNull
+        Assert-Equal $null $nativeNull.ReferenceRunId
+        Assert-Equal $null $nativeNull.DifferenceRunId
+        $native = Compare-ADAnalyzerAssessment $empty $singleton
+        $direct = [ADAnalyzerAssessmentComparer]::new().Compare($singleton, $multiple)
+        $nativeMultiple = Compare-ADAnalyzerAssessment $missing $multiple
+        Assert-Equal $null $native.ReferenceRunId
+        Assert-True ($native.DifferenceRunId -is [guid] -and $direct.ReferenceRunId -is [guid]) 'A collapsed singleton lost its scalar GUID type.'
+        Assert-Equal $identifier $native.DifferenceRunId
+        Assert-Equal $identifier $direct.ReferenceRunId
+        $plan = New-ADAnalyzerRemediationPlan -Assessment @{
+            SchemaVersion = 1
+            RunId = @()
+            Target = @($identifier)
+        }
+        Assert-Equal $null $plan.AssessmentRunId
+        Assert-True ($plan.Target -is [guid]) 'Offline planning changed a collapsed singleton target.'
+        Assert-Equal $identifier $plan.Target
+        $multiplePlan = New-ADAnalyzerRemediationPlan -Assessment $multiple
+        foreach ($array in @($direct.DifferenceRunId, $nativeMultiple.DifferenceRunId, $multiplePlan.AssessmentRunId)) {
+            Assert-True ($array -is [array]) 'Multiple identifier values lost array shape.'
+            Assert-Equal 3 $array.Count
+            Assert-True ($array[0] -is [guid] -and $array[1] -is [bool] -and $array[2] -is [int]) 'Multiple identifier values lost scalar types or order.'
+            Assert-Equal $identifier $array[0]
+            Assert-Equal $false $array[1]
+            Assert-Equal 17 $array[2]
+        }
+    }
     Invoke-Test 'strict comparison preserves empty evidence records and set members' {
         $sides = [ordered]@{
             Reference = [ordered]@{
@@ -1279,6 +1445,54 @@ try {
         Assert-Equal 0 @($plan.Actions).Count
         Assert-Equal 'RemediationDisabled' $plan.Excluded[0].Reason
         Assert-Equal 0 $script:Reads
+    }
+    Invoke-Test 'offline plan projects run and assessment and exclusion target metadata' {
+        function Write-ADAnalyzerOperationFile {
+            throw 'Offline plan attempted a file write.'
+        }
+        function Enter-ADAnalyzerJournalLease {
+            throw 'Offline plan attempted to acquire a journal lease.'
+        }
+
+        $marker = 'offline-plan-identity-fixture-value'
+        $metadata = New-IdentityMetadataFixture $marker
+        $script:Assessment.RunId = $metadata
+        $script:Assessment.Target = $metadata
+        $script:Assessment.Findings[0].Target = $metadata
+        $plan = New-ADAnalyzerRemediationPlan -Assessment $script:Assessment
+        $json = ConvertTo-Json -InputObject $plan -Depth 20 -Compress
+        Assert-True (-not $json.Contains($marker)) 'Raw offline plan exposed a fixture value.'
+        Assert-Equal 0 $plan.Actions.Count
+        Assert-Equal 1 $plan.Excluded.Count
+        Assert-Equal 'RemediationDisabled' $plan.Excluded[0].Reason
+        foreach ($projected in $plan.AssessmentRunId, $plan.Target, $plan.Excluded[0].Target) {
+            Assert-IdentityMetadataPresence $projected
+            Assert-IdentityMetadataValueTypes $projected $metadata
+            Assert-True (-not [object]::ReferenceEquals($metadata, $projected)) 'The plan retained caller-owned identity metadata.'
+        }
+        $plan.Target.Nested.Label = 'altered plan'
+        Assert-Equal 'identity fixture' $plan.AssessmentRunId.Nested.Label
+        Assert-Equal 'identity fixture' $plan.Excluded[0].Target.Nested.Label
+        Assert-Equal 'identity fixture' $metadata.Nested.Label
+        Assert-Equal $marker $metadata.Nested.Password
+
+        $script:Assessment.RunId = 'approved-run'
+        $script:Assessment.Target = 'example.invalid'
+        $script:Assessment.Findings[0].Target = $script:Current.DistinguishedName
+        $approved = New-FixturePlan
+        Assert-Equal 'approved-run' $approved.AssessmentRunId
+        Assert-Equal 'example.invalid' $approved.Target
+        Assert-True ([guid]::Parse($approved.PlanId) -ne [guid]::Empty) 'The offline plan lost its generated ID.'
+        $created = [datetimeoffset]::ParseExact($approved.CreatedAt, 'o', [Globalization.CultureInfo]::InvariantCulture)
+        Assert-Equal ([timespan]::Zero) $created.Offset
+        Assert-Equal 1 $approved.Actions.Count
+        Assert-Equal 0 $approved.Excluded.Count
+        Assert-Equal 'DisableAccount' $approved.Actions[0].Action
+        Assert-Equal $script:Current.ObjectGuid $approved.Actions[0].Preconditions.ObjectGuid
+        Assert-Equal 0 $script:Reads
+        Assert-Equal 0 $script:GroupReads
+        Assert-Equal 0 $script:Disables
+        Assert-Equal 0 $script:Enables
     }
     Invoke-Test 'only explicitly approved Fail inactivity findings become DisableAccount actions' {
         $plan = New-FixturePlan

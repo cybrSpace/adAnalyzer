@@ -45,6 +45,14 @@ class ADAnalyzerEvidenceProjector {
         return $result
     }
 
+    [object] ProjectIdentityMetadata([object]$Value) {
+        return $this.ProjectBoundFrame(@{
+                Value = $Value
+                Depth = 0
+                PreserveIdentityTypes = $true
+            })
+    }
+
     hidden [object] ProjectBoundFrame([hashtable]$Frame) {
         $ErrorActionPreference = 'Stop'
         $state = $this.CreateState($Frame)
@@ -56,7 +64,8 @@ class ADAnalyzerEvidenceProjector {
                 }
                 switch ($request.Kind) {
                     Child {
-                        $result = $this.ProjectBoundFrame($this.ChildFrame($request.Arguments))
+                        $child = $this.ChildFrame($request.Arguments, $state.PreserveIdentityTypes)
+                        $result = $this.ProjectBoundFrame($child)
                         $this.Accept($state, @{
                                 Value = $result
                             })
@@ -72,7 +81,8 @@ class ADAnalyzerEvidenceProjector {
                             $arguments = $this.CreateItemRequest($state, @{
                                     Value = $item
                                 })
-                            $result = $this.ProjectBoundFrame($this.ChildFrame($arguments))
+                            $child = $this.ChildFrame($arguments, $state.PreserveIdentityTypes)
+                            $result = $this.ProjectBoundFrame($child)
                             $this.AcceptItem($state, @{
                                     Value = $result
                                 })
@@ -100,6 +110,7 @@ class ADAnalyzerEvidenceProjector {
         return @{
             Input = $Frame.Value
             Depth = [int]$Frame.Depth
+            PreserveIdentityTypes = [bool]$Frame['PreserveIdentityTypes']
             Stage = 'Start'
             Pending = $null
             Done = $false
@@ -108,10 +119,11 @@ class ADAnalyzerEvidenceProjector {
         }
     }
 
-    hidden [hashtable] ChildFrame([hashtable]$Arguments) {
+    hidden [hashtable] ChildFrame([hashtable]$Arguments, [bool]$PreserveIdentityTypes) {
         return @{
             Value = $Arguments.InputObject
             Depth = $Arguments.Depth
+            PreserveIdentityTypes = $PreserveIdentityTypes
         }
     }
 
@@ -263,6 +275,12 @@ class ADAnalyzerEvidenceProjector {
                     elseif ($InputObject -is [string]) {
                         $this.Complete($State, @{
                                 Value = $secretService.ProjectText($InputObject)
+                            })
+                    }
+                    elseif ($State.PreserveIdentityTypes -and
+                        ($InputObject -is [datetime] -or $InputObject -is [datetimeoffset] -or $InputObject -is [guid])) {
+                        $this.Complete($State, @{
+                                Value = $InputObject.PSObject.BaseObject
                             })
                     }
                     elseif ($InputObject -is [datetime] -or $InputObject -is [datetimeoffset]) {
@@ -1190,8 +1208,8 @@ class ADAnalyzerAssessmentComparer {
 
         $referenceRunId = Get-ADAnalyzerOperationValue $before @('RunId')
         $differenceRunId = Get-ADAnalyzerOperationValue $after @('RunId')
-        $referenceRunId = $this.ProjectRunId($referenceRunId, $projector)
-        $differenceRunId = $this.ProjectRunId($differenceRunId, $projector)
+        $referenceRunId = $projector.ProjectIdentityMetadata($referenceRunId)
+        $differenceRunId = $projector.ProjectIdentityMetadata($differenceRunId)
         $timestamp = $this.CreateTimestamp()
         return $this.BuildResult($referenceRunId, $differenceRunId, $timestamp, $changes, $this.CountChanges($changes))
     }
@@ -1348,13 +1366,6 @@ class ADAnalyzerAssessmentComparer {
 
     hidden [string] CreateTimestamp() {
         return [datetimeoffset]::UtcNow.ToString('o')
-    }
-
-    hidden [object] ProjectRunId([object]$RunId, [ADAnalyzerEvidenceProjector]$Projector) {
-        if ($RunId -is [guid] -or $RunId -is [datetime] -or $RunId -is [datetimeoffset]) {
-            return $RunId
-        }
-        return $Projector.Project($RunId)
     }
 
     hidden [hashtable] CountChanges([object[]]$Changes) {
@@ -1637,6 +1648,9 @@ function Compare-ADAnalyzerAssessment {
 
     $referenceRunId = Get-ADAnalyzerOperationValue $before @('RunId')
     $differenceRunId = Get-ADAnalyzerOperationValue $after @('RunId')
+    $projector = [ADAnalyzerEvidenceProjector]::new()
+    $referenceRunId = $projector.ProjectIdentityMetadata($referenceRunId)
+    $differenceRunId = $projector.ProjectIdentityMetadata($differenceRunId)
     $timestamp = $comparer.CreateTimestamp()
     $counts = @{
         New = @($changes | Where-Object Change -eq 'New').Count
@@ -1939,7 +1953,7 @@ function New-ADAnalyzerRemediationPlan {
                 Preconditions = $state
             })
     }
-    [pscustomobject][ordered]@{
+    $plan = [pscustomobject][ordered]@{
         SchemaVersion = 1
         PlanType = 'ADAnalyzerRemediationPlan'
         PlanId = [guid]::NewGuid().ToString('D')
@@ -1953,6 +1967,13 @@ function New-ADAnalyzerRemediationPlan {
         Actions = $actions.ToArray()
         Excluded = $excluded.ToArray()
     }
+    $projector = [ADAnalyzerEvidenceProjector]::new()
+    $plan.AssessmentRunId = $projector.ProjectIdentityMetadata($plan.AssessmentRunId)
+    $plan.Target = $projector.ProjectIdentityMetadata($plan.Target)
+    foreach ($item in $plan.Excluded) {
+        $item.Target = $projector.ProjectIdentityMetadata($item.Target)
+    }
+    return $plan
 }
 
 function Get-ADAnalyzerOperationConnection {
