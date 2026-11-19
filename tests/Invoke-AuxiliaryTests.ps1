@@ -1689,6 +1689,41 @@ Write-Output ('PASS legacy '+$Script+' '+$Mode)
         }
     }
 
+    $optionalMetadataCases = [ordered]@{
+        Healthy = 18
+        Unreadable = 36
+        Required = 6
+        Dictionary = 18
+        Getters = 84
+        Export = 60
+        Presence = 12
+    }
+    foreach ($case in $optionalMetadataCases.Keys) {
+        Invoke-AuxiliaryTest ('local-admin GPO optional metadata: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $savedErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $output = & $executable -NoLogo -NoProfile -NonInteractive -File (
+                    Join-Path $PSScriptRoot 'LocalAdminGpoOptionalMetadataFixture.ps1'
+                ) -RepositoryRoot $RepositoryRoot -Mode $case 2>&1
+                $childExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $savedErrorActionPreference
+            }
+            if ($childExitCode -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw ($output -join [Environment]::NewLine)
+            }
+            $expected = 'PASS local-admin GPO optional metadata {0} {1}' -f $case, $optionalMetadataCases[$case]
+            $sentinels = @($output | Where-Object { [string]$_ -clike 'PASS local-admin GPO optional metadata *' })
+            Assert-True ($sentinels.Count -eq 1 -and [string]$sentinels[0] -ceq $expected) 'Fresh process did not execute every selected optional metadata control.'
+        }
+    }
+
     Assert-Equal 0 $script:ExternalCalls
 }
 finally {

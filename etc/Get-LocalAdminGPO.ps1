@@ -115,7 +115,15 @@ function Get-ADAnalyzerLocalAdminGpo {
             foreach ($field in @('Id', 'DisplayName', 'Domain', 'Server', 'Flags', 'Version', 'Links', 'WmiFilter')) {
                 $metadata[$field] = $report.Gpo.$field
             }
-            if ($report.ReadError -or $null -eq $report.Policy) {
+            $reportFrame = @{
+                Record = $report
+            }
+            if (((Test-ADAnalyzerOptionalSecretRecordMember $reportFrame 'ReadError') -and $report.ReadError) -or
+                $null -eq $report.Policy) {
+                $errorType = $null
+                if (Test-ADAnalyzerOptionalSecretRecordMember $reportFrame 'ErrorType') {
+                    $errorType = $report.ErrorType
+                }
                 $checks = @(New-ADAnalyzerCheck `
                         -RuleId GPO.READ `
                         -Status Unreadable `
@@ -124,7 +132,7 @@ function Get-ADAnalyzerLocalAdminGpo {
                         -Target $id.ToString('D') `
                         -Message 'The selected GPO could not be read; configuration was not assessed.' `
                         -Evidence @{
-                        ErrorType = $report.ErrorType
+                        ErrorType = $errorType
                     })
             }
             else {
