@@ -1694,37 +1694,390 @@ function Get-ADAnalyzerOperationSid {
     return [string]$sid
 }
 
+class ADAnalyzerRemediationGuard {
+    ADAnalyzerRemediationGuard() {
+    }
+
+    [object] ReadState([object]$Object) {
+        $ErrorActionPreference = 'Stop'
+        $enabled = Get-ADAnalyzerOperationValue $Object @('Enabled')
+        if ($null -eq $enabled) {
+            $uac = Get-ADAnalyzerOperationValue $Object @('UserAccountControl')
+            if ($null -ne $uac) {
+                $enabled = ([long]$uac -band $this.DisabledAccountFlag()) -eq 0
+            }
+        }
+        $fields = @{
+            ObjectGuid = ConvertTo-ADAnalyzerOperationGuid (Get-ADAnalyzerOperationValue $Object @('ObjectGuid'))
+            SID = Get-ADAnalyzerOperationSid $Object
+            DistinguishedName = [string](Get-ADAnalyzerOperationValue $Object @('DistinguishedName', 'DN'))
+            Enabled = $enabled
+            WhenChanged = ConvertTo-ADAnalyzerOperationTime (Get-ADAnalyzerOperationValue $Object @('WhenChanged'))
+        }
+        return $this.BuildState($fields)
+    }
+
+    [string] GetObjectKind([object]$Object) {
+        $ErrorActionPreference = 'Stop'
+        $classes = @(Get-ADAnalyzerOperationValue $Object @('ObjectClass', 'Class'))
+        return $this.ClassifyKind($classes)
+    }
+
+    [object] GetExclusion([object]$Object, [object]$Settings) {
+        $ErrorActionPreference = 'Stop'
+        $reader = [ADAnalyzerEvidenceProjector]::new()
+        $includePrivileged = $reader.GetValue($Settings, @('IncludePrivilegedAccounts'), $null)
+        $includeService = $reader.GetValue($Settings, @('IncludeServiceAccounts'), $null)
+        if ($includePrivileged -isnot [bool] -or $includeService -isnot [bool]) {
+            throw 'Remediation exclusion options must be Boolean'
+        }
+
+        $state = $this.ReadState($Object)
+        $stateReason = $this.GetStateExclusion($state)
+        if ($stateReason) {
+            return $stateReason
+        }
+        $kind = $this.GetObjectKind($Object)
+        if (-not $this.SupportsObjectKind($kind)) {
+            return 'UnsupportedObjectClass'
+        }
+        $metadata = [string](Get-ADAnalyzerOperationValue $Object @('SafetyMetadataStatus'))
+        if (-not $this.HasCollectedSafetyMetadata($metadata)) {
+            return 'MissingSafetyEvidence'
+        }
+        foreach ($name in $this.RequiredSafetyFlags()) {
+            if ((Get-ADAnalyzerOperationValue $Object @($name)) -isnot [bool]) {
+                return 'MissingSafetyEvidence'
+            }
+        }
+        $critical = Get-ADAnalyzerOperationValue $Object @('IsCriticalSystemObject')
+        if ($null -ne $critical -and $critical -isnot [bool]) {
+            return 'MissingSafetyEvidence'
+        }
+        if ($null -eq (Get-ADAnalyzerOperationValue $Object @('UserAccountControl')) -or
+            $null -eq (Get-ADAnalyzerOperationValue $Object @('PrimaryGroupID'))) {
+            return 'MissingSafetyEvidence'
+        }
+        if ($this.IsWellKnownAccountSid($state.SID) -or
+            [bool](Get-ADAnalyzerOperationValue $Object @('WellKnownSID') $false)) {
+            return 'WellKnownAccount'
+        }
+        $uac = Get-ADAnalyzerOperationValue $Object @('UserAccountControl') 0
+        $primary = Get-ADAnalyzerOperationValue $Object @('PrimaryGroupID') 0
+        if ([bool](Get-ADAnalyzerOperationValue $Object @('IsDomainController') $false) -or
+            ([long]$uac -band $this.DomainControllerFlag()) -ne 0 -or
+            [int]$primary -in $this.DomainControllerPrimaryGroups()) {
+            return 'DomainController'
+        }
+        if ([int](Get-ADAnalyzerOperationValue $Object @('AdminCount') 0) -ne 0) {
+            return 'AdminCountProtected'
+        }
+        if (@(Get-ADAnalyzerOperationValue $Object @('SIDHistory') @() | Where-Object { $null -ne $_ -and
+                    -not [string]::IsNullOrWhiteSpace([string]$_) }).Count) {
+            return 'SidHistoryRequiresReview'
+        }
+        foreach ($name in $this.ProtectionFlags()) {
+            if ([bool](Get-ADAnalyzerOperationValue $Object @($name) $false)) {
+                return 'ProtectedOrCriticalObject'
+            }
+        }
+        $membership = Get-ADAnalyzerOperationValue $Object @('Membership')
+        $effective = @(Get-ADAnalyzerOperationValue $Object @('TransitiveGroups',
+                'EffectiveSids') @()) + @(Get-ADAnalyzerOperationValue $membership @('EffectiveSids') @())
+        if (@($effective | Where-Object { $this.IsProtectedGroupSid($_) }).Count) {
+            return 'ProtectedOrCriticalObject'
+        }
+        $resolution = [string](Get-ADAnalyzerOperationValue $Object @('PrivilegeResolutionStatus', 'MembershipResolutionStatus'))
+        if (-not $this.IsPrivilegeResolutionComplete($resolution)) {
+            return 'PrivilegeResolutionIncomplete'
+        }
+        $privileged = Get-ADAnalyzerOperationValue $Object @('Privileged', 'IsPrivileged')
+        if ($privileged -isnot [bool]) {
+            return 'PrivilegeResolutionIncomplete'
+        }
+        if ($privileged -and -not $includePrivileged) {
+            return 'PrivilegedAccount'
+        }
+        if ($kind -eq 'User') {
+            $accountType = [string](Get-ADAnalyzerOperationValue $Object @('AccountType'))
+            if (-not $this.HasKnownAccountClassification($accountType)) {
+                return 'UnknownAccountClassification'
+            }
+            if ($this.IsServiceAccount($accountType) -and -not $includeService) {
+                return 'ServiceAccount'
+            }
+        }
+        foreach ($excluded in @($Settings.ExcludedObjectGuids)) {
+            if ((ConvertTo-ADAnalyzerOperationGuid $excluded) -eq $state.ObjectGuid) {
+                return 'ExplicitObjectExclusion'
+            }
+        }
+        foreach ($ou in @($Settings.ExcludedOUs)) {
+            if ($ou -and
+                ($this.MatchesExcludedOrganizationalUnit($state.DistinguishedName, [string]$ou) -or
+                    $this.IsWithinExcludedOrganizationalUnit($state.DistinguishedName, [string]$ou))) {
+                return 'ExcludedOrganizationalUnit'
+            }
+        }
+        return $null
+    }
+
+    [object] AssertPreconditions([object]$Expected, [object]$Actual, [bool]$Enabled) {
+        $ErrorActionPreference = 'Stop'
+        $current = $this.ReadState($Actual)
+        foreach ($name in $this.PreconditionNames()) {
+            $wanted = Get-ADAnalyzerOperationValue $Expected @($name)
+            if ($name -eq 'WhenChanged') {
+                $wanted = ConvertTo-ADAnalyzerOperationTime $wanted
+            }
+            if ($name -eq 'ObjectGuid') {
+                $wanted = ConvertTo-ADAnalyzerOperationGuid $wanted
+            }
+            if (-not $wanted -or -not $this.IdentityMatches([string]$wanted, [string]$current.$name)) {
+                throw "Remediation precondition failed: $name changed or is missing"
+            }
+        }
+        if ($Expected.Enabled -isnot [bool] -or
+            $Expected.Enabled -ne $Enabled -or
+            $current.Enabled -isnot [bool] -or
+            $current.Enabled -ne $Enabled) {
+            throw 'Remediation precondition failed: Enabled changed or is missing'
+        }
+        return $current
+    }
+
+    [void] AssertPlan([object]$Plan) {
+        $ErrorActionPreference = 'Stop'
+        if (-not $this.IsReviewPlanType($Plan.PlanType) -or -not (ConvertTo-ADAnalyzerOperationGuid $Plan.PlanId)) {
+            throw 'Only an explicit ADAnalyzer remediation plan may be executed'
+        }
+        if ($Plan.Remediation.AllowDisable -isnot [bool] -or -not $Plan.Remediation.AllowDisable) {
+            throw 'The plan does not enable account disabling'
+        }
+        foreach ($name in $this.PlanBooleanNames()) {
+            if ($Plan.Remediation.$name -isnot [bool]) {
+                throw "Invalid plan boolean setting: $name"
+            }
+        }
+        $limit = 0
+        if (-not [int]::TryParse([string]$Plan.Remediation.MaximumActions,
+                [ref]$limit) -or
+            -not $this.IsActionLimitInRange($limit) -or
+            @($Plan.Actions).Count -gt $limit) {
+            throw 'Invalid remediation action limit'
+        }
+        $approved = @(foreach ($value in @($Plan.Remediation.ApprovedObjectGuids)) {
+                ConvertTo-ADAnalyzerOperationGuid $value
+            })
+        $seen = @{}
+        $seenActionIds = @{}
+        foreach ($action in @($Plan.Actions)) {
+            if ($null -eq $action) {
+                continue
+            }
+            $guid = ConvertTo-ADAnalyzerOperationGuid $action.ObjectGuid
+            $actionId = $null
+            if (-not $this.IsSupportedAction($action.Action) -or
+                -not $guid -or
+                $guid -notin $approved -or
+                $action.Preconditions.ObjectGuid -ne $guid -or
+                -not ($actionId = ConvertTo-ADAnalyzerOperationGuid $action.ActionId)) {
+                throw 'Plan includes an unsupported, unapproved, or unbound action'
+            }
+            if (($this.IsUserInactivityRule($action.RuleId) -and -not $this.ClassMatches($action.ObjectClass, 'User')) -or
+                ($this.IsComputerInactivityRule($action.RuleId) -and -not $this.ClassMatches($action.ObjectClass, 'Computer')) -or
+                -not $this.IsSupportedInactivityRule($action.RuleId)) {
+                throw 'Plan rule and object class do not match'
+            }
+            $days = 0L
+            if (-not [long]::TryParse([string]$action.InactivityDays, [ref]$days) -or -not $this.IsInactivityThresholdValid($days)) {
+                throw 'Plan action is missing its reviewed inactivity threshold'
+            }
+            $duplicate = $this.RegisterActionIdentity($seen, $seenActionIds, $guid, $actionId)
+            if ($duplicate) {
+                throw $duplicate
+            }
+        }
+    }
+
+    hidden [object] BuildState([hashtable]$Fields) {
+        return [pscustomobject][ordered]@{
+            ObjectGuid = $Fields.ObjectGuid
+            SID = $Fields.SID
+            DistinguishedName = $Fields.DistinguishedName
+            Enabled = $Fields.Enabled
+            WhenChanged = $Fields.WhenChanged
+        }
+    }
+
+    hidden [int] DisabledAccountFlag() {
+        return 2
+    }
+
+    hidden [string] ClassifyKind([object[]]$Classes) {
+        if ($Classes -contains 'computer') {
+            return 'Computer'
+        }
+        if ($Classes -contains 'group') {
+            return 'Group'
+        }
+        if ($Classes -contains 'user') {
+            return 'User'
+        }
+        return 'Unknown'
+    }
+
+    hidden [string] GetStateExclusion([object]$State) {
+        if (-not $State.ObjectGuid -or
+            $State.SID -notmatch '^S-\d+(?:-\d+)+$' -or
+            -not $State.DistinguishedName -or
+            -not $State.WhenChanged) {
+            return 'MissingIdentityOrPreconditions'
+        }
+        if ($State.Enabled -isnot [bool] -or -not $State.Enabled) {
+            return 'AccountNotEnabled'
+        }
+        return ''
+    }
+
+    hidden [bool] SupportsObjectKind([string]$Kind) {
+        return $Kind -in 'User', 'Computer'
+    }
+
+    hidden [bool] HasCollectedSafetyMetadata([string]$Status) {
+        return $Status -eq 'Collected'
+    }
+
+    hidden [string[]] RequiredSafetyFlags() {
+        return @('ProtectedFromAccidentalDeletion', 'IsDomainController')
+    }
+
+    hidden [bool] IsWellKnownAccountSid([string]$Sid) {
+        return ($Sid -match '^S-1-5-32-' -or $Sid -match '^S-1-5-21-(?:\d+-){3}(500|501|502)$')
+    }
+
+    hidden [int] DomainControllerFlag() {
+        return 8192
+    }
+
+    hidden [int[]] DomainControllerPrimaryGroups() {
+        return @(516, 521)
+    }
+
+    hidden [string[]] ProtectionFlags() {
+        return @('ProtectedFromAccidentalDeletion', 'ProtectedUser', 'Protected', 'IsCriticalSystemObject')
+    }
+
+    hidden [bool] IsProtectedGroupSid([object]$Sid) {
+        return [bool]($Sid -match '^S-1-5-21-(?:\d+-){3}525$')
+    }
+
+    hidden [bool] IsPrivilegeResolutionComplete([string]$Status) {
+        return $Status -eq 'Complete'
+    }
+
+    hidden [bool] HasKnownAccountClassification([string]$AccountType) {
+        return ($AccountType -in 'User', 'Personal', 'Human' -or $this.IsServiceAccount($AccountType))
+    }
+
+    hidden [bool] IsServiceAccount([string]$AccountType) {
+        return $AccountType -in 'Service', 'Non-Personal', 'gMSA', 'ManagedServiceAccount'
+    }
+
+    hidden [bool] MatchesExcludedOrganizationalUnit([string]$ObjectDn, [string]$ExcludedOu) {
+        return $ObjectDn.Equals($ExcludedOu, [StringComparison]::OrdinalIgnoreCase)
+    }
+
+    hidden [bool] IsWithinExcludedOrganizationalUnit([string]$ObjectDn, [string]$ExcludedOu) {
+        return $ObjectDn.EndsWith(',' + $ExcludedOu, [StringComparison]::OrdinalIgnoreCase)
+    }
+
+    hidden [string[]] PreconditionNames() {
+        return @('ObjectGuid', 'SID', 'DistinguishedName', 'WhenChanged')
+    }
+
+    hidden [bool] IdentityMatches([string]$Expected, [string]$Actual) {
+        return $Expected -ieq $Actual
+    }
+
+    hidden [bool] IsReviewPlanType([object]$Type) {
+        return -not ($Type -ne 'ADAnalyzerRemediationPlan')
+    }
+
+    hidden [string[]] PlanBooleanNames() {
+        return @('IncludeServiceAccounts', 'IncludePrivilegedAccounts')
+    }
+
+    hidden [bool] IsActionLimitInRange([int]$Limit) {
+        return $Limit -ge 1 -and $Limit -le 1000
+    }
+
+    hidden [bool] IsSupportedAction([object]$Action) {
+        return -not ($Action -ne 'DisableAccount')
+    }
+
+    hidden [bool] IsUserInactivityRule([object]$Rule) {
+        return [bool]($Rule -eq 'ACCOUNT.INACTIVE')
+    }
+
+    hidden [bool] IsComputerInactivityRule([object]$Rule) {
+        return [bool]($Rule -eq 'COMPUTER.INACTIVE')
+    }
+
+    hidden [bool] IsSupportedInactivityRule([object]$Rule) {
+        return $Rule -in 'ACCOUNT.INACTIVE', 'COMPUTER.INACTIVE'
+    }
+
+    hidden [bool] ClassMatches([object]$Actual, [string]$Expected) {
+        return -not ($Actual -ne $Expected)
+    }
+
+    hidden [bool] IsInactivityThresholdValid([long]$Days) {
+        return $Days -ge 0
+    }
+
+    hidden [string] RegisterActionIdentity(
+        [hashtable]$SeenObjects,
+        [hashtable]$SeenActionIds,
+        [string]$ObjectGuid,
+        [string]$ActionId
+    ) {
+        if ($SeenObjects.ContainsKey($ObjectGuid)) {
+            return 'Plan contains duplicate object actions'
+        }
+        if ($SeenActionIds.ContainsKey($ActionId)) {
+            return 'Plan contains duplicate action IDs'
+        }
+        $SeenObjects[$ObjectGuid] = $true
+        $SeenActionIds[$ActionId] = $true
+        return ''
+    }
+}
+
 function Get-ADAnalyzerOperationState {
     param([Parameter(Mandatory)]$Object)
+    $guard = [ADAnalyzerRemediationGuard]::new()
     $enabled = Get-ADAnalyzerOperationValue $Object @('Enabled')
     if ($null -eq $enabled) {
         $uac = Get-ADAnalyzerOperationValue $Object @('UserAccountControl')
         if ($null -ne $uac) {
-            $enabled = ([long]$uac -band 2) -eq 0
+            $enabled = ([long]$uac -band $guard.DisabledAccountFlag()) -eq 0
         }
     }
-    [pscustomobject][ordered]@{
+    $fields = @{
         ObjectGuid = ConvertTo-ADAnalyzerOperationGuid (Get-ADAnalyzerOperationValue $Object @('ObjectGuid'))
         SID = Get-ADAnalyzerOperationSid $Object
         DistinguishedName = [string](Get-ADAnalyzerOperationValue $Object @('DistinguishedName', 'DN'))
         Enabled = $enabled
         WhenChanged = ConvertTo-ADAnalyzerOperationTime (Get-ADAnalyzerOperationValue $Object @('WhenChanged'))
     }
+    return $guard.BuildState($fields)
 }
 
 function Get-ADAnalyzerOperationKind {
     param($Object)
     $classes = @(Get-ADAnalyzerOperationValue $Object @('ObjectClass', 'Class'))
-    if ($classes -contains 'computer') {
-        return 'Computer'
-    }
-    if ($classes -contains 'group') {
-        return 'Group'
-    }
-    if ($classes -contains 'user') {
-        return 'User'
-    }
-    return 'Unknown'
+    return [ADAnalyzerRemediationGuard]::new().ClassifyKind($classes)
 }
 
 function Get-ADAnalyzerOperationExclusion {
@@ -1733,22 +2086,21 @@ function Get-ADAnalyzerOperationExclusion {
         [Parameter(Mandatory)]$Settings
 
     )
+    $guard = [ADAnalyzerRemediationGuard]::new()
     $state = Get-ADAnalyzerOperationState $Object
-    if (-not $state.ObjectGuid -or $state.SID -notmatch '^S-\d+(?:-\d+)+$' -or -not $state.DistinguishedName -or -not $state.WhenChanged) {
-        return 'MissingIdentityOrPreconditions'
-    }
-    if ($state.Enabled -isnot [bool] -or -not $state.Enabled) {
-        return 'AccountNotEnabled'
+    $stateReason = $guard.GetStateExclusion($state)
+    if ($stateReason) {
+        return $stateReason
     }
     $kind = Get-ADAnalyzerOperationKind $Object
-    if ($kind -notin @('User', 'Computer')) {
+    if (-not $guard.SupportsObjectKind($kind)) {
         return 'UnsupportedObjectClass'
     }
     $metadata = [string](Get-ADAnalyzerOperationValue $Object @('SafetyMetadataStatus'))
-    if ($metadata -ne 'Collected') {
+    if (-not $guard.HasCollectedSafetyMetadata($metadata)) {
         return 'MissingSafetyEvidence'
     }
-    foreach ($name in @('ProtectedFromAccidentalDeletion', 'IsDomainController')) {
+    foreach ($name in $guard.RequiredSafetyFlags()) {
         if ((Get-ADAnalyzerOperationValue $Object @($name)) -isnot [bool]) {
             return 'MissingSafetyEvidence'
         }
@@ -1761,17 +2113,15 @@ function Get-ADAnalyzerOperationExclusion {
         $null -eq (Get-ADAnalyzerOperationValue $Object @('PrimaryGroupID'))) {
         return 'MissingSafetyEvidence'
     }
-    if ($state.SID -match '^S-1-5-32-' -or
-        $state.SID -match '^S-1-5-21-(?:\d+-){3}(500|501|502)$' -or
+    if ($guard.IsWellKnownAccountSid($state.SID) -or
         [bool](Get-ADAnalyzerOperationValue $Object @('WellKnownSID') $false)) {
         return 'WellKnownAccount'
     }
     $uac = Get-ADAnalyzerOperationValue $Object @('UserAccountControl') 0
     $primary = Get-ADAnalyzerOperationValue $Object @('PrimaryGroupID') 0
     if ([bool](Get-ADAnalyzerOperationValue $Object @('IsDomainController') $false) -or
-        ([long]$uac -band 8192) -ne 0 -or
-        [int]$primary -in @(516,
-            521)) {
+        ([long]$uac -band $guard.DomainControllerFlag()) -ne 0 -or
+        [int]$primary -in $guard.DomainControllerPrimaryGroups()) {
         return 'DomainController'
     }
     if ([int](Get-ADAnalyzerOperationValue $Object @('AdminCount') 0) -ne 0) {
@@ -1781,7 +2131,7 @@ function Get-ADAnalyzerOperationExclusion {
                 -not [string]::IsNullOrWhiteSpace([string]$_) }).Count) {
         return 'SidHistoryRequiresReview'
     }
-    foreach ($name in @('ProtectedFromAccidentalDeletion', 'ProtectedUser', 'Protected', 'IsCriticalSystemObject')) {
+    foreach ($name in $guard.ProtectionFlags()) {
         if ([bool](Get-ADAnalyzerOperationValue $Object @($name) $false)) {
             return 'ProtectedOrCriticalObject'
         }
@@ -1789,10 +2139,11 @@ function Get-ADAnalyzerOperationExclusion {
     $membership = Get-ADAnalyzerOperationValue $Object @('Membership')
     $effective = @(Get-ADAnalyzerOperationValue $Object @('TransitiveGroups',
             'EffectiveSids') @()) + @(Get-ADAnalyzerOperationValue $membership @('EffectiveSids') @())
-    if (@($effective | Where-Object { $_ -match '^S-1-5-21-(?:\d+-){3}525$' }).Count) {
+    if (@($effective | Where-Object { $guard.IsProtectedGroupSid($_) }).Count) {
         return 'ProtectedOrCriticalObject'
     }
-    if ([string](Get-ADAnalyzerOperationValue $Object @('PrivilegeResolutionStatus', 'MembershipResolutionStatus')) -ne 'Complete') {
+    $resolution = [string](Get-ADAnalyzerOperationValue $Object @('PrivilegeResolutionStatus', 'MembershipResolutionStatus'))
+    if (-not $guard.IsPrivilegeResolutionComplete($resolution)) {
         return 'PrivilegeResolutionIncomplete'
     }
     $privileged = Get-ADAnalyzerOperationValue $Object @('Privileged', 'IsPrivileged')
@@ -1804,18 +2155,10 @@ function Get-ADAnalyzerOperationExclusion {
     }
     if ($kind -eq 'User') {
         $accountType = [string](Get-ADAnalyzerOperationValue $Object @('AccountType'))
-        if ($accountType -in @('Unknown',
-                '') -or
-            $accountType -notin @('User',
-                'Personal',
-                'Human',
-                'Service',
-                'Non-Personal',
-                'gMSA',
-                'ManagedServiceAccount')) {
+        if (-not $guard.HasKnownAccountClassification($accountType)) {
             return 'UnknownAccountClassification'
         }
-        if ($accountType -in @('Service', 'Non-Personal', 'gMSA', 'ManagedServiceAccount') -and -not $Settings.IncludeServiceAccounts) {
+        if ($guard.IsServiceAccount($accountType) -and -not $Settings.IncludeServiceAccounts) {
             return 'ServiceAccount'
         }
     }
@@ -1826,10 +2169,8 @@ function Get-ADAnalyzerOperationExclusion {
     }
     foreach ($ou in @($Settings.ExcludedOUs)) {
         if ($ou -and
-            ($state.DistinguishedName.Equals([string]$ou,
-                [StringComparison]::OrdinalIgnoreCase) -or
-            $state.DistinguishedName.EndsWith(',' + [string]$ou,
-                [StringComparison]::OrdinalIgnoreCase))) {
+            ($guard.MatchesExcludedOrganizationalUnit($state.DistinguishedName, [string]$ou) -or
+                $guard.IsWithinExcludedOrganizationalUnit($state.DistinguishedName, [string]$ou))) {
             return 'ExcludedOrganizationalUnit'
         }
     }
@@ -2039,8 +2380,9 @@ function Assert-ADAnalyzerOperationPreconditions {
         [bool]$Enabled
 
     )
+    $guard = [ADAnalyzerRemediationGuard]::new()
     $current = Get-ADAnalyzerOperationState $Actual
-    foreach ($name in @('ObjectGuid', 'SID', 'DistinguishedName', 'WhenChanged')) {
+    foreach ($name in $guard.PreconditionNames()) {
         $wanted = Get-ADAnalyzerOperationValue $Expected @($name)
         if ($name -eq 'WhenChanged') {
             $wanted = ConvertTo-ADAnalyzerOperationTime $wanted
@@ -2048,7 +2390,7 @@ function Assert-ADAnalyzerOperationPreconditions {
         if ($name -eq 'ObjectGuid') {
             $wanted = ConvertTo-ADAnalyzerOperationGuid $wanted
         }
-        if (-not $wanted -or [string]$wanted -ine [string]$current.$name) {
+        if (-not $wanted -or -not $guard.IdentityMatches([string]$wanted, [string]$current.$name)) {
             throw "Remediation precondition failed: $name changed or is missing"
         }
     }
@@ -2295,13 +2637,15 @@ function Save-ADAnalyzerOperationJournal {
 
 function Assert-ADAnalyzerOperationPlan {
     param($Plan)
-    if ($Plan.PlanType -ne 'ADAnalyzerRemediationPlan' -or -not (ConvertTo-ADAnalyzerOperationGuid $Plan.PlanId)) {
+
+    $guard = [ADAnalyzerRemediationGuard]::new()
+    if (-not $guard.IsReviewPlanType($Plan.PlanType) -or -not (ConvertTo-ADAnalyzerOperationGuid $Plan.PlanId)) {
         throw 'Only an explicit ADAnalyzer remediation plan may be executed'
     }
     if ($Plan.Remediation.AllowDisable -isnot [bool] -or -not $Plan.Remediation.AllowDisable) {
         throw 'The plan does not enable account disabling'
     }
-    foreach ($name in @('IncludeServiceAccounts', 'IncludePrivilegedAccounts')) {
+    foreach ($name in $guard.PlanBooleanNames()) {
         if ($Plan.Remediation.$name -isnot [bool]) {
             throw "Invalid plan boolean setting: $name"
         }
@@ -2309,8 +2653,7 @@ function Assert-ADAnalyzerOperationPlan {
     $limit = 0
     if (-not [int]::TryParse([string]$Plan.Remediation.MaximumActions,
             [ref]$limit) -or
-        $limit -lt 1 -or
-        $limit -gt 1000 -or
+        -not $guard.IsActionLimitInRange($limit) -or
         @($Plan.Actions).Count -gt $limit) {
         throw 'Invalid remediation action limit'
     }
@@ -2324,33 +2667,26 @@ function Assert-ADAnalyzerOperationPlan {
             continue
         }
         $guid = ConvertTo-ADAnalyzerOperationGuid $action.ObjectGuid
-        if ($action.Action -ne 'DisableAccount' -or
+        if (-not $guard.IsSupportedAction($action.Action) -or
             -not $guid -or
             $guid -notin $approved -or
             $action.Preconditions.ObjectGuid -ne $guid -or
             -not ($actionId = ConvertTo-ADAnalyzerOperationGuid $action.ActionId)) {
             throw 'Plan includes an unsupported, unapproved, or unbound action'
         }
-        if (($action.RuleId -eq 'ACCOUNT.INACTIVE' -and
-                $action.ObjectClass -ne 'User') -or
-            ($action.RuleId -eq 'COMPUTER.INACTIVE' -and
-            $action.ObjectClass -ne 'Computer') -or
-            $action.RuleId -notin @('ACCOUNT.INACTIVE',
-                'COMPUTER.INACTIVE')) {
+        if (($guard.IsUserInactivityRule($action.RuleId) -and -not $guard.ClassMatches($action.ObjectClass, 'User')) -or
+            ($guard.IsComputerInactivityRule($action.RuleId) -and -not $guard.ClassMatches($action.ObjectClass, 'Computer')) -or
+            -not $guard.IsSupportedInactivityRule($action.RuleId)) {
             throw 'Plan rule and object class do not match'
         }
         $days = 0L
-        if (-not [long]::TryParse([string]$action.InactivityDays, [ref]$days) -or $days -lt 0) {
+        if (-not [long]::TryParse([string]$action.InactivityDays, [ref]$days) -or -not $guard.IsInactivityThresholdValid($days)) {
             throw 'Plan action is missing its reviewed inactivity threshold'
         }
-        if ($seen.ContainsKey($guid)) {
-            throw 'Plan contains duplicate object actions'
+        $duplicate = $guard.RegisterActionIdentity($seen, $seenActionIds, $guid, $actionId)
+        if ($duplicate) {
+            throw $duplicate
         }
-        if ($seenActionIds.ContainsKey($actionId)) {
-            throw 'Plan contains duplicate action IDs'
-        }
-        $seen[$guid] = $true
-        $seenActionIds[$actionId] = $true
     }
 }
 
