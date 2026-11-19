@@ -711,6 +711,301 @@ function Write-ADAnalyzerOperationFile {
     Write-ADAnalyzerFile -Path $Path -Content $Content
 }
 
+class ADAnalyzerAssessmentReport {
+    ADAnalyzerAssessmentReport() {
+    }
+
+    [string] Render([object]$Assessment, [string]$Format) {
+        $outputs = $this.RenderReports($Assessment, $Format, '', $false)
+        return $outputs[0]
+    }
+
+    [string[]] Write([object]$Assessment, [string]$Path, [string]$Format) {
+        return $this.Write($Assessment, $Path, $Format, $false)
+    }
+
+    [string[]] Write([object]$Assessment, [string]$Path, [string]$Format, [bool]$DryRun) {
+        if ([string]::IsNullOrEmpty($Path)) {
+            throw [ArgumentException]::new('An assessment report output path is required.', 'Path')
+        }
+        return $this.RenderReports($Assessment, $Format, $Path, $DryRun)
+    }
+
+    hidden [hashtable] Prepare([object]$Assessment) {
+        $document = [ADAnalyzerOperationDocumentReader]::new().Read($Assessment)
+        $safe = [ADAnalyzerEvidenceProjector]::new().Project($document)
+        $findings = @(Get-ADAnalyzerOperationValue $safe ($this.FindingNames()) @())
+        return @{
+            Safe = $safe
+            Findings = $findings
+        }
+    }
+
+    hidden [string[]] GetFormats([string]$Format, [bool]$AllowAll) {
+        if ($Format -in 'Json', 'Html', 'Csv') {
+            return @($Format)
+        }
+        if ($AllowAll -and $Format -eq 'All') {
+            return @('Json', 'Html', 'Csv')
+        }
+        if ($AllowAll) {
+            throw [ArgumentException]::new('Use Json, Html, Csv, or All.', 'Format')
+        }
+        throw [ArgumentException]::new('Use Json, Html, or Csv.', 'Format')
+    }
+
+    hidden [string] GetOutputPath([string]$Path, [string]$Format, [string]$Item) {
+        if ($Format -eq 'All') {
+            return $Path.TrimEnd('.') + '.' + $Item.ToLowerInvariant()
+        }
+        return $Path
+    }
+
+    hidden [string[]] FindingNames() {
+        return @('Findings', 'Checks')
+    }
+
+    hidden [string[]] StatusNames() {
+        return @('Pass', 'Fail', 'Unknown', 'Unreadable', 'Invalid', 'NotConfigured', 'NotApplicable')
+    }
+
+    hidden [string] GetReviewState([int]$CheckCount, [int]$ErrorCount, [hashtable]$Counts) {
+        if (-not $CheckCount) {
+            return 'No checks collected'
+        }
+        if ($ErrorCount -or $Counts.Unknown -or $Counts.Unreadable -or $Counts.Invalid) {
+            return 'Incomplete evidence: review unknowns and collection errors'
+        }
+        if ($Counts.Fail) {
+            return 'Failed checks require review'
+        }
+        return 'No failed checks recorded'
+    }
+
+    hidden [Text.StringBuilder] BeginHtml([hashtable]$Fields, [hashtable]$Counts, [string]$State) {
+        $builder = [Text.StringBuilder]::new()
+        $null = $builder.Append('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AD Analyzer assessment</title><style>body{font:15px system-ui,sans-serif;color:#1e293b;background:#f8fafc;max-width:1450px;margin:2rem auto;padding:0 1.2rem}h1{font-size:2rem;margin-bottom:.3rem}h2{margin-top:2rem}p{line-height:1.5}.meta{color:#475569}.state{border-left:4px solid #2563eb;padding:.8rem 1rem;background:white}.cards{display:flex;flex-wrap:wrap;gap:.6rem;margin:1.2rem 0}.card{background:white;border:1px solid #cbd5e1;border-radius:.4rem;padding:.6rem 1rem}.card b{font-size:1.4rem;display:block}.table{overflow-x:auto}table{width:100%;border-collapse:collapse;background:white;font-size:.9rem}th,td{border:1px solid #cbd5e1;text-align:left;vertical-align:top;padding:.6rem;overflow-wrap:anywhere}th{background:#e2e8f0}.fail{color:#9f1239;font-weight:700}.pass{color:#166534}.unknown{color:#92400e}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f5f9;padding:1rem}details{margin:.4rem 0}summary{cursor:pointer;color:#1d4ed8}.muted{color:#64748b}</style></head><body>')
+        $null = $builder.Append(
+            '<h1>Active Directory assessment</h1><p class="meta">Target: <strong>' +
+            $Fields.Target + '</strong><br>Profile: ' + $Fields.ProfileName + ' ' + $Fields.ProfileVersion +
+            '<br>State: ' + $Fields.RecordedState + '<br>Run: ' + $Fields.RunId +
+            '<br>Collected: ' + $Fields.Timestamp + '</p>'
+        )
+        $null = $builder.Append(
+            '<p class="state">' + [Net.WebUtility]::HtmlEncode($State) +
+            '. Findings are evidence for review, not authorization to change directory objects.</p><div class="cards">'
+        )
+        foreach ($status in $this.StatusNames()) {
+            $null = $builder.Append(
+                '<div class="card"><b>' + [string]$Counts[$status] + '</b>' +
+                [Net.WebUtility]::HtmlEncode($status) + '</div>'
+            )
+        }
+        $null = $builder.Append(
+            '</div><h2>Collection coverage</h2><div class="table"><table><thead><tr>' +
+            '<th>Source or capability</th><th>Collection state / evidence</th></tr></thead><tbody>'
+        )
+        return $builder
+    }
+
+    hidden [object[]] GetCoverageNames([object]$Coverage) {
+        $names = @(
+            if ($Coverage -is [Collections.IDictionary]) {
+                ([Collections.IDictionary].GetProperty('Keys')).GetValue($Coverage, $null)
+            }
+            elseif ($Coverage) {
+                foreach ($property in $Coverage.PSObject.Properties) {
+                    $property.Name
+                }
+            }
+        )
+        return $names
+    }
+
+    hidden [void] AddCoverageRow([Text.StringBuilder]$Builder, [string]$Name, [object]$Value) {
+        $null = $Builder.Append('<tr><td>' + $Name + '</td><td>' + $Value + '</td></tr>')
+    }
+
+    hidden [void] BeginChecks([Text.StringBuilder]$Builder, [int]$CoverageCount) {
+        if (-not $CoverageCount) {
+            $null = $Builder.Append('<tr><td colspan="2" class="muted">Coverage was not recorded.</td></tr>')
+        }
+        $null = $Builder.Append(
+            '</tbody></table></div><h2>Checks and findings</h2><div class="table"><table><thead><tr>' +
+            '<th>Rule</th><th>Target</th><th>Status</th><th>Severity</th><th>Expected</th>' +
+            '<th>Observed</th><th>Evidence</th></tr></thead><tbody>'
+        )
+    }
+
+    hidden [void] AddCheckRow([Text.StringBuilder]$Builder, [hashtable]$Fields) {
+        $statusClass = if ($Fields.Status -eq 'Fail') {
+            'fail'
+        }
+        elseif ($Fields.Status -eq 'Pass') {
+            'pass'
+        }
+        else {
+            'unknown'
+        }
+        $statusLabel = $Fields.Status
+        if ($Fields.Suppressed) {
+            $statusLabel += ' (suppressed)'
+        }
+
+        $null = $Builder.Append(
+            '<tr><td>' + $Fields.Rule + '</td><td>' + $Fields.Target + '</td><td class="' +
+            $statusClass + '">' + [Net.WebUtility]::HtmlEncode($statusLabel) + '</td><td>' +
+            $Fields.Severity + '</td><td>' + $Fields.Expected + '</td><td>' + $Fields.Observed +
+            '</td><td>' + $Fields.Message + '<details><summary>View evidence</summary><pre>' +
+            $Fields.Evidence + '</pre></details></td></tr>'
+        )
+    }
+
+    hidden [void] EndChecks([Text.StringBuilder]$Builder, [int]$CheckCount) {
+        if (-not $CheckCount) {
+            $null = $Builder.Append('<tr><td colspan="7" class="muted">No check results are present in this snapshot.</td></tr>')
+        }
+        $null = $Builder.Append('</tbody></table></div>')
+    }
+
+    hidden [void] AddCollectionErrors([Text.StringBuilder]$Builder, [object]$EncodedErrors) {
+        $null = $Builder.Append('<h2>Collection errors</h2><pre>' + $EncodedErrors + '</pre>')
+    }
+
+    hidden [string] FinishHtml([Text.StringBuilder]$Builder, [object]$EncodedSnapshot) {
+        $null = $Builder.Append(
+            '<details><summary>Full assessment snapshot (secret presence only)</summary><pre>' +
+            $EncodedSnapshot + '</pre></details><p class="muted">' +
+            'Standalone report. No external scripts, fonts, or resources are loaded.</p></body></html>'
+        )
+        return $Builder.ToString()
+    }
+
+    hidden [object] BuildCsvRow([hashtable]$Fields) {
+        return [pscustomobject][ordered]@{
+            RuleId = $Fields.RuleId
+            Target = $Fields.Target
+            Status = $Fields.Status
+            Severity = $Fields.Severity
+            Evidence = $Fields.Evidence
+        }
+    }
+
+    hidden [string] EmptyCsv() {
+        return '"RuleId","Target","Status","Severity","Evidence"'
+    }
+
+    hidden [string[]] RenderReports([object]$Assessment, [string]$Format, [string]$Path, [bool]$DryRun) {
+        $ErrorActionPreference = 'Stop'
+        $writeFiles = -not [string]::IsNullOrEmpty($Path)
+        $formats = $this.GetFormats($Format, $writeFiles)
+        if (-not $writeFiles -and $Assessment -is [string]) {
+            throw [ArgumentException]::new('Render requires an in-memory assessment.', 'Assessment')
+        }
+
+        $report = $this.Prepare($Assessment)
+        if ($DryRun) {
+            return [string[]]@()
+        }
+
+        $outputs = @(
+            foreach ($item in $formats) {
+                $content = switch ($item) {
+                    'Json' {
+                        ConvertTo-Json -InputObject $report.Safe -Depth 100
+                    }
+                    'Html' {
+                        $checks = @(Get-ADAnalyzerOperationValue $report.Safe @('Checks', 'Findings') @() | Where-Object { $null -ne $_ })
+                        $errors = @(Get-ADAnalyzerOperationValue $report.Safe @('Errors') @() | Where-Object { $null -ne $_ })
+                        $counts = @{}
+                        foreach ($status in $this.StatusNames()) {
+                            $counts[$status] = @($checks | Where-Object Status -eq $status).Count
+                        }
+                        $state = $this.GetReviewState($checks.Count, $errors.Count, $counts)
+                        $target = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $report.Safe @('Target'))
+                        $profile = Get-ADAnalyzerOperationValue $report.Safe @('Profile')
+                        $fields = @{
+                            Target = $target
+                            ProfileName = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $profile @('Name') 'Unspecified')
+                            ProfileVersion = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $profile @('Version') '')
+                            RunId = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $report.Safe @('RunId'))
+                            Timestamp = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $report.Safe @('Timestamp'))
+                            RecordedState = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $report.Safe @('State') 'Unspecified')
+                        }
+                        $html = $this.BeginHtml($fields, $counts, $state)
+
+                        $data = Get-ADAnalyzerOperationValue $report.Safe @('Data')
+                        $directory = Get-ADAnalyzerOperationValue $data @('Directory')
+                        $coverage = Get-ADAnalyzerOperationValue $directory @('Coverage') (Get-ADAnalyzerOperationValue $report.Safe @('Coverage'))
+                        $names = $this.GetCoverageNames($coverage)
+                        foreach ($name in @($names | Sort-Object)) {
+                            $label = [Net.WebUtility]::HtmlEncode([string]$name)
+                            $value = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $coverage @([string]$name))
+                            $this.AddCoverageRow($html, $label, $value)
+                        }
+
+                        $this.BeginChecks($html, $names.Count)
+                        foreach ($check in $checks) {
+                            $status = [string](Get-ADAnalyzerOperationValue $check @('Status'))
+                            $suppressed = [bool](Get-ADAnalyzerOperationValue $check @('Suppressed') $false)
+                            $evidence = Get-ADAnalyzerOperationValue $check @('Evidence')
+                            $encodedEvidence = [Net.WebUtility]::HtmlEncode((ConvertTo-Json -InputObject $evidence -Depth 100))
+                            $fields = @{
+                                Status = $status
+                                Suppressed = $suppressed
+                                Evidence = $encodedEvidence
+                                Message = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('Message'))
+                                Rule = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('RuleId', 'Finding'))
+                                Target = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('Target', 'DistinguishedName', 'SID'))
+                                Severity = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('Severity'))
+                                Expected = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('Expected'))
+                                Observed = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('Observed', 'Actual'))
+                            }
+                            $this.AddCheckRow($html, $fields)
+                        }
+                        $this.EndChecks($html, $checks.Count)
+
+                        if ($errors.Count) {
+                            $encodedErrors = [Net.WebUtility]::HtmlEncode((ConvertTo-Json -InputObject $errors -Depth 100))
+                            $this.AddCollectionErrors($html, $encodedErrors)
+                        }
+                        $encodedSnapshot = [Net.WebUtility]::HtmlEncode((ConvertTo-Json -InputObject $report.Safe -Depth 100))
+                        $this.FinishHtml($html, $encodedSnapshot)
+                    }
+                    'Csv' {
+                        $rows = @(
+                            foreach ($finding in $Report.Findings) {
+                                $fields = @{
+                                    RuleId = Get-ADAnalyzerOperationValue $finding @('RuleId', 'Finding')
+                                    Target = Get-ADAnalyzerOperationValue $finding @('Target', 'DistinguishedName', 'SID')
+                                    Status = Get-ADAnalyzerOperationValue $finding @('Status')
+                                    Severity = Get-ADAnalyzerOperationValue $finding @('Severity')
+                                    Evidence = ConvertTo-Json -InputObject (Get-ADAnalyzerOperationValue $finding @('Evidence', 'Observed')) -Depth 100 -Compress
+                                }
+                                $this.BuildCsvRow($fields)
+                            }
+                        )
+                        if ($rows.Count) {
+                            ($rows | ConvertTo-Csv -NoTypeInformation) -join [Environment]::NewLine
+                        }
+                        else {
+                            $this.EmptyCsv()
+                        }
+                    }
+                }
+                if ($writeFiles) {
+                    $outputPath = $this.GetOutputPath($Path, $Format, $item)
+                    Write-ADAnalyzerOperationFile -Path $outputPath -Content $content
+                }
+                else {
+                    $content
+                }
+            }
+        )
+        return $outputs
+    }
+}
+
 function ConvertTo-ADAnalyzerOperationHtmlValue {
     param([AllowNull()]$Value)
     if ($null -eq $Value) {
@@ -724,99 +1019,65 @@ function ConvertTo-ADAnalyzerOperationHtmlValue {
 
 function ConvertTo-ADAnalyzerAssessmentHtml {
     param([Parameter(Mandatory)]$Assessment)
+
+    # Observe and serialize in the original native scope for native stream and error capture.
+    $report = [ADAnalyzerAssessmentReport]::new()
     $checks = @(Get-ADAnalyzerOperationValue $Assessment @('Checks', 'Findings') @() | Where-Object { $null -ne $_ })
     $errors = @(Get-ADAnalyzerOperationValue $Assessment @('Errors') @() | Where-Object { $null -ne $_ })
     $counts = @{}
-    foreach ($status in @('Pass', 'Fail', 'Unknown', 'Unreadable', 'Invalid', 'NotConfigured', 'NotApplicable')) {
+    foreach ($status in $report.StatusNames()) {
         $counts[$status] = @($checks | Where-Object Status -eq $status).Count
     }
-    $state = if (-not $checks.Count) {
-        'No checks collected'
-    }
-    elseif ($errors.Count -or $counts.Unknown -or $counts.Unreadable -or $counts.Invalid) {
-        'Incomplete evidence: review unknowns and collection errors'
-    }
-    elseif ($counts.Fail) {
-        'Failed checks require review'
-    }
-    else {
-        'No failed checks recorded'
-    }
+    $state = $report.GetReviewState($checks.Count, $errors.Count, $counts)
+
     $target = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $Assessment @('Target'))
     $profile = Get-ADAnalyzerOperationValue $Assessment @('Profile')
-    $profileName = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $profile @('Name') 'Unspecified')
-    $profileVersion = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $profile @('Version') '')
-    $runId = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $Assessment @('RunId'))
-    $timestamp = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $Assessment @('Timestamp'))
-    $recordedState = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $Assessment @('State') 'Unspecified')
-    $html = [Text.StringBuilder]::new()
-    $null = $html.Append('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AD Analyzer assessment</title><style>body{font:15px system-ui,sans-serif;color:#1e293b;background:#f8fafc;max-width:1450px;margin:2rem auto;padding:0 1.2rem}h1{font-size:2rem;margin-bottom:.3rem}h2{margin-top:2rem}p{line-height:1.5}.meta{color:#475569}.state{border-left:4px solid #2563eb;padding:.8rem 1rem;background:white}.cards{display:flex;flex-wrap:wrap;gap:.6rem;margin:1.2rem 0}.card{background:white;border:1px solid #cbd5e1;border-radius:.4rem;padding:.6rem 1rem}.card b{font-size:1.4rem;display:block}.table{overflow-x:auto}table{width:100%;border-collapse:collapse;background:white;font-size:.9rem}th,td{border:1px solid #cbd5e1;text-align:left;vertical-align:top;padding:.6rem;overflow-wrap:anywhere}th{background:#e2e8f0}.fail{color:#9f1239;font-weight:700}.pass{color:#166534}.unknown{color:#92400e}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f5f9;padding:1rem}details{margin:.4rem 0}summary{cursor:pointer;color:#1d4ed8}.muted{color:#64748b}</style></head><body>')
-    $null = $html.Append('<h1>Active Directory assessment</h1><p class="meta">Target: <strong>' + $target + '</strong><br>Profile: ' + $profileName + ' ' + $profileVersion + '<br>State: ' + $recordedState + '<br>Run: ' + $runId + '<br>Collected: ' + $timestamp + '</p>')
-    $null = $html.Append('<p class="state">' + [Net.WebUtility]::HtmlEncode($state) + '. Findings are evidence for review, not authorization to change directory objects.</p><div class="cards">')
-    foreach ($status in @('Pass', 'Fail', 'Unknown', 'Unreadable', 'Invalid', 'NotConfigured', 'NotApplicable')) {
-        $null = $html.Append('<div class="card"><b>' + [string]$counts[$status] + '</b>' + [Net.WebUtility]::HtmlEncode($status) + '</div>')
+    $fields = @{
+        Target = $target
+        ProfileName = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $profile @('Name') 'Unspecified')
+        ProfileVersion = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $profile @('Version') '')
+        RunId = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $Assessment @('RunId'))
+        Timestamp = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $Assessment @('Timestamp'))
+        RecordedState = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $Assessment @('State') 'Unspecified')
     }
-    $null = $html.Append('</div><h2>Collection coverage</h2><div class="table"><table><thead><tr><th>Source or capability</th><th>Collection state / evidence</th></tr></thead><tbody>')
+    $html = $report.BeginHtml($fields, $counts, $state)
+
     $data = Get-ADAnalyzerOperationValue $Assessment @('Data')
     $directory = Get-ADAnalyzerOperationValue $data @('Directory')
     $coverage = Get-ADAnalyzerOperationValue $directory @('Coverage') (Get-ADAnalyzerOperationValue $Assessment @('Coverage'))
-    $names = @(
-        if ($coverage -is [Collections.IDictionary]) {
-            ([Collections.IDictionary].GetProperty('Keys')).GetValue($coverage, $null)
-        }
-        elseif ($coverage) {
-            foreach ($property in $coverage.PSObject.Properties) {
-                $property.Name
-            }
-        }
-    )
+    $names = $report.GetCoverageNames($coverage)
     foreach ($name in @($names | Sort-Object)) {
-        $null = $html.Append('<tr><td>' + [Net.WebUtility]::HtmlEncode([string]$name) + '</td><td>' + (ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $coverage @([string]$name))) + '</td></tr>')
+        $label = [Net.WebUtility]::HtmlEncode([string]$name)
+        $value = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $coverage @([string]$name))
+        $report.AddCoverageRow($html, $label, $value)
     }
-    if (-not $names.Count) {
-        $null = $html.Append('<tr><td colspan="2" class="muted">Coverage was not recorded.</td></tr>')
-    }
-    $null = $html.Append('</tbody></table></div><h2>Checks and findings</h2><div class="table"><table><thead><tr><th>Rule</th><th>Target</th><th>Status</th><th>Severity</th><th>Expected</th><th>Observed</th><th>Evidence</th></tr></thead><tbody>')
+
+    $report.BeginChecks($html, $names.Count)
     foreach ($check in $checks) {
         $status = [string](Get-ADAnalyzerOperationValue $check @('Status'))
-        $statusClass = if ($status -eq 'Fail') {
-            'fail'
+        $suppressed = [bool](Get-ADAnalyzerOperationValue $check @('Suppressed') $false)
+        $evidence = [Net.WebUtility]::HtmlEncode((ConvertTo-Json -InputObject (Get-ADAnalyzerOperationValue $check @('Evidence')) -Depth 100))
+        $fields = @{
+            Status = $status
+            Suppressed = $suppressed
+            Evidence = $evidence
+            Message = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('Message'))
+            Rule = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('RuleId', 'Finding'))
+            Target = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('Target', 'DistinguishedName', 'SID'))
+            Severity = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('Severity'))
+            Expected = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('Expected'))
+            Observed = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('Observed', 'Actual'))
         }
-        elseif ($status -eq 'Pass') {
-            'pass'
-        }
-        else {
-            'unknown'
-        }
-        $statusLabel = $status + $(if ([bool](Get-ADAnalyzerOperationValue $check @('Suppressed') $false)) {
-                ' (suppressed)'
-            }
-            else {
-                ''
-            })
-        $evidence = [Net.WebUtility]::HtmlEncode((ConvertTo-Json `
-                    -InputObject (Get-ADAnalyzerOperationValue $check @('Evidence')) `
-                    -Depth 100))
-        $message = ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('Message'))
-        $null = $html.Append('<tr><td>' + (ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('RuleId',
-                        'Finding'))) + '</td><td>' + (ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('Target',
-                        'DistinguishedName',
-                        'SID'))) + '</td><td class="' + $statusClass + '">' + [Net.WebUtility]::HtmlEncode($statusLabel) + '</td><td>' + (ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('Severity'))) + '</td><td>' + (ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('Expected'))) + '</td><td>' + (ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $check @('Observed',
-                        'Actual'))) + '</td><td>' + $message + '<details><summary>View evidence</summary><pre>' + $evidence + '</pre></details></td></tr>')
+        $report.AddCheckRow($html, $fields)
     }
-    if (-not $checks.Count) {
-        $null = $html.Append('<tr><td colspan="7" class="muted">No check results are present in this snapshot.</td></tr>')
-    }
-    $null = $html.Append('</tbody></table></div>')
+    $report.EndChecks($html, $checks.Count)
+
     if ($errors.Count) {
-        $null = $html.Append('<h2>Collection errors</h2><pre>' + [Net.WebUtility]::HtmlEncode((ConvertTo-Json `
-                        -InputObject $errors `
-                        -Depth 100)) + '</pre>')
+        $encodedErrors = [Net.WebUtility]::HtmlEncode((ConvertTo-Json -InputObject $errors -Depth 100))
+        $report.AddCollectionErrors($html, $encodedErrors)
     }
-    $null = $html.Append('<details><summary>Full assessment snapshot (secret presence only)</summary><pre>' + [Net.WebUtility]::HtmlEncode((ConvertTo-Json `
-                    -InputObject $Assessment `
-                    -Depth 100)) + '</pre></details><p class="muted">Standalone report. No external scripts, fonts, or resources are loaded.</p></body></html>')
-    return $html.ToString()
+    $encodedSnapshot = [Net.WebUtility]::HtmlEncode((ConvertTo-Json -InputObject $Assessment -Depth 100))
+    return $report.FinishHtml($html, $encodedSnapshot)
 }
 
 function Export-ADAnalyzerAssessment {
@@ -827,25 +1088,18 @@ function Export-ADAnalyzerAssessment {
         [ValidateSet('Json', 'Html', 'Csv', 'All')][string]$Format = 'Json'
 
     )
+
     $document = Read-ADAnalyzerOperationDocument $Assessment
     $safe = ConvertTo-ADAnalyzerSafeData -InputObject $document
-    $findings = @(Get-ADAnalyzerOperationValue $safe @('Findings', 'Checks') @())
-    $formats = if ($Format -eq 'All') {
-        @('Json', 'Html', 'Csv')
-    }
-    else {
-        @($Format)
-    }
+    $report = [ADAnalyzerAssessmentReport]::new()
+    $findings = @(Get-ADAnalyzerOperationValue $safe ($report.FindingNames()) @())
+    $formats = $report.GetFormats($Format, $true)
     foreach ($item in $formats) {
-        $outputPath = if ($Format -eq 'All') {
-            $Path.TrimEnd('.') + '.' + $item.ToLowerInvariant()
-        }
-        else {
-            $Path
-        }
+        $outputPath = $report.GetOutputPath($Path, $Format, $item)
         if (-not $PSCmdlet.ShouldProcess($outputPath, 'Export assessment projection')) {
             continue
         }
+
         switch ($item) {
             'Json' {
                 $content = ConvertTo-Json -InputObject $safe -Depth 100
@@ -854,24 +1108,23 @@ function Export-ADAnalyzerAssessment {
                 $content = ConvertTo-ADAnalyzerAssessmentHtml $safe
             }
             'Csv' {
-                $rows = @(foreach ($finding in $findings) {
-                        [pscustomobject][ordered]@{
+                $rows = @(
+                    foreach ($finding in $findings) {
+                        $fields = @{
                             RuleId = Get-ADAnalyzerOperationValue $finding @('RuleId', 'Finding')
                             Target = Get-ADAnalyzerOperationValue $finding @('Target', 'DistinguishedName', 'SID')
                             Status = Get-ADAnalyzerOperationValue $finding @('Status')
                             Severity = Get-ADAnalyzerOperationValue $finding @('Severity')
-                            Evidence = ConvertTo-Json `
-                                -InputObject (Get-ADAnalyzerOperationValue $finding @('Evidence',
-                                    'Observed')) `
-                                -Depth 100 `
-                                -Compress
+                            Evidence = ConvertTo-Json -InputObject (Get-ADAnalyzerOperationValue $finding @('Evidence', 'Observed')) -Depth 100 -Compress
                         }
-                    })
+                        $report.BuildCsvRow($fields)
+                    }
+                )
                 $content = if ($rows.Count) {
                     ($rows | ConvertTo-Csv -NoTypeInformation) -join [Environment]::NewLine
                 }
                 else {
-                    '"RuleId","Target","Status","Severity","Evidence"'
+                    $report.EmptyCsv()
                 }
             }
         }
