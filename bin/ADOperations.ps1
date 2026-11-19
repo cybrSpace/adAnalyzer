@@ -1132,43 +1132,381 @@ function Export-ADAnalyzerAssessment {
     }
 }
 
+class ADAnalyzerAssessmentComparer {
+    ADAnalyzerAssessmentComparer() {
+    }
+
+    [object] Compare([object]$Reference, [object]$Difference) {
+        $ErrorActionPreference = 'Stop'
+        $reader = [ADAnalyzerOperationDocumentReader]::new()
+        $before = $reader.Read($Reference)
+        $after = $reader.Read($Difference)
+
+        $oldTarget = [string](Get-ADAnalyzerOperationValue $before @('Target'))
+        $newTarget = [string](Get-ADAnalyzerOperationValue $after @('Target'))
+        if (-not $this.TargetsMatch($oldTarget, $newTarget)) {
+            throw 'Cannot compare different directory targets as configuration drift'
+        }
+
+        $oldScope = [string](Get-ADAnalyzerOperationValue (Get-ADAnalyzerOperationValue $before @('Context')) @('SearchBase'))
+        $newScope = [string](Get-ADAnalyzerOperationValue (Get-ADAnalyzerOperationValue $after @('Context')) @('SearchBase'))
+        if (-not $this.SearchBasesMatch($oldScope, $newScope)) {
+            throw 'Cannot compare different search-base scopes as configuration drift'
+        }
+
+        $projector = [ADAnalyzerEvidenceProjector]::new()
+        $oldMap = $this.IndexSnapshot($before, $projector)
+        $newMap = $this.IndexSnapshot($after, $projector)
+        $changes = @(
+            foreach ($key in @(@($oldMap.Keys) + @($newMap.Keys) | Sort-Object -Unique)) {
+                $hasOld = $oldMap.ContainsKey($key)
+                $hasNew = $newMap.ContainsKey($key)
+                $old = @(
+                    if ($hasOld) {
+                        $oldMap[$key]
+                    }
+                )
+                $new = @(
+                    if ($hasNew) {
+                        $newMap[$key]
+                    }
+                )
+                $observation = $this.ClassifyPresence($hasOld, $hasNew)
+                if ($observation.CompareContents) {
+                    $oldJson = ConvertTo-Json -InputObject ($this.NormalizeValue($old, '')) -Depth 100 -Compress
+                    $newJson = ConvertTo-Json -InputObject ($this.NormalizeValue($new, '')) -Depth 100 -Compress
+                    $oldFail = @($old | Where-Object Status -in 'Fail', 'Invalid').Count -gt 0
+                    $newFail = @($new | Where-Object Status -in 'Fail', 'Invalid').Count -gt 0
+                    $oldGood = @($old | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
+                    $newGood = @($new | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
+                    $observation.Change = $this.ClassifyStatus(($oldJson -cne $newJson), $oldFail, $newFail, $oldGood, $newGood)
+                }
+
+                $sample = $this.SelectSample($old, $new)
+                $target = Get-ADAnalyzerOperationValue $sample ($this.TargetNames())
+                $this.BuildChange($key, $target, $old, $new, $observation)
+            }
+        )
+
+        $referenceRunId = Get-ADAnalyzerOperationValue $before @('RunId')
+        $differenceRunId = Get-ADAnalyzerOperationValue $after @('RunId')
+        $referenceRunId = $this.ProjectRunId($referenceRunId, $projector)
+        $differenceRunId = $this.ProjectRunId($differenceRunId, $projector)
+        $timestamp = $this.CreateTimestamp()
+        return $this.BuildResult($referenceRunId, $differenceRunId, $timestamp, $changes, $this.CountChanges($changes))
+    }
+
+    hidden [hashtable] IndexSnapshot([object]$Snapshot, [ADAnalyzerEvidenceProjector]$Projector) {
+        $map = @{}
+        $rows = @(Get-ADAnalyzerOperationValue $Snapshot ($this.CheckNames()) @())
+        foreach ($row in $rows) {
+            if ($null -eq $row) {
+                continue
+            }
+
+            $rule = [string](Get-ADAnalyzerOperationValue $row @('RuleId'))
+            if (-not $rule) {
+                $legacy = [string](Get-ADAnalyzerOperationValue $row @('Finding'))
+                $rule = $this.TranslateLegacyRule($legacy)
+                if (-not $rule) {
+                    throw 'A snapshot finding is missing RuleId'
+                }
+            }
+
+            $target = [string](Get-ADAnalyzerOperationValue $row ($this.TargetNames()))
+            if (-not $target) {
+                throw 'A snapshot finding is missing its stable target'
+            }
+            if ($this.UsesNamedHostIdentity($rule)) {
+                $evidence = Get-ADAnalyzerOperationValue $row @('Evidence')
+                $profileRuleId = Get-ADAnalyzerOperationValue $evidence @('ProfileRuleId')
+                if ($null -ne $profileRuleId) {
+                    $parts = @()
+                    if ($this.RequiresRegistryIdentity($rule)) {
+                        $path = Get-ADAnalyzerOperationValue $evidence @('RegistryPath')
+                        $valueName = Get-ADAnalyzerOperationValue $evidence @('ValueName')
+                        if (-not $this.HasLiteralRegistryIdentity($path, $valueName)) {
+                            throw 'A named host registry snapshot is missing its literal path/value identity'
+                        }
+                        $parts = @($path, $valueName)
+                    }
+                    $target = Get-ADAnalyzerHostRuleIdentity -Rule @{
+                        Id = $profileRuleId
+                    } -Target $target -Parts $parts
+                }
+            }
+
+            $bucket = $this.GetOrCreateBucket($map, $rule, $target)
+            $null = $bucket.Add($Projector.Project($row))
+        }
+        return $map
+    }
+
+    hidden [bool] TargetsMatch([string]$Before, [string]$After) {
+        return -not ($Before -and $After -and $Before -ine $After)
+    }
+
+    hidden [bool] SearchBasesMatch([string]$Before, [string]$After) {
+        return $Before -ieq $After
+    }
+
+    hidden [string[]] CheckNames() {
+        return @('Checks', 'Findings')
+    }
+
+    hidden [string[]] TargetNames() {
+        return @('Target', 'DistinguishedName', 'ObjectGuid', 'SID')
+    }
+
+    hidden [string] TranslateLegacyRule([string]$Legacy) {
+        switch ($Legacy) {
+            'Defect - User Inactivity' {
+                return 'ACCOUNT.INACTIVE'
+            }
+            'Defect - Computer Inactivity' {
+                return 'COMPUTER.INACTIVE'
+            }
+        }
+        if ($Legacy) {
+            return 'LEGACY.' + $Legacy
+        }
+        return ''
+    }
+
+    hidden [bool] UsesNamedHostIdentity([string]$Rule) {
+        return $Rule -in 'HOST.SERVICE', 'HOST.REGISTRY'
+    }
+
+    hidden [bool] RequiresRegistryIdentity([string]$Rule) {
+        return $Rule -eq 'HOST.REGISTRY'
+    }
+
+    hidden [bool] HasLiteralRegistryIdentity([object]$Path, [object]$ValueName) {
+        return $Path -is [string] -and $ValueName -is [string]
+    }
+
+    hidden [Collections.ArrayList] GetOrCreateBucket([hashtable]$Map, [string]$Rule, [string]$Target) {
+        $key = $Rule.ToUpperInvariant() + [char]0 + $Target.ToUpperInvariant()
+        if (-not $Map.ContainsKey($key)) {
+            $Map[$key] = [Collections.ArrayList]::new()
+        }
+        return $Map[$key]
+    }
+
+    hidden [hashtable] ClassifyPresence([bool]$HasBefore, [bool]$HasAfter) {
+        if (-not $HasBefore) {
+            return @{
+                CompareContents = $false
+                Change = 'New'
+                Reason = $null
+            }
+        }
+        if (-not $HasAfter) {
+            return @{
+                CompareContents = $false
+                Change = 'Changed'
+                Reason = 'NotObservedInDifference'
+            }
+        }
+        return @{
+            CompareContents = $true
+            Change = 'Unchanged'
+            Reason = $null
+        }
+    }
+
+    hidden [string] ClassifyStatus([bool]$Changed, [bool]$OldFail, [bool]$NewFail, [bool]$OldGood, [bool]$NewGood) {
+        if ($OldFail -and $NewGood) {
+            return 'Resolved'
+        }
+        if ($OldGood -and $NewFail) {
+            return 'New'
+        }
+        if ($Changed) {
+            return 'Changed'
+        }
+        return 'Unchanged'
+    }
+
+    hidden [object] SelectSample([object[]]$Before, [object[]]$After) {
+        if ($After.Count -and $null -ne $After[0]) {
+            return $After[0]
+        }
+        return $Before[0]
+    }
+
+    hidden [object] BuildChange([string]$Key, [object]$Target, [object[]]$Before, [object[]]$After, [hashtable]$Observation) {
+        return [pscustomobject]@{
+            RuleId = $Key.Split([char]0)[0]
+            Target = $Target
+            Change = $Observation.Change
+            Reason = $Observation.Reason
+            Reference = $Before
+            Difference = $After
+        }
+    }
+
+    hidden [string] CreateTimestamp() {
+        return [datetimeoffset]::UtcNow.ToString('o')
+    }
+
+    hidden [object] ProjectRunId([object]$RunId, [ADAnalyzerEvidenceProjector]$Projector) {
+        if ($RunId -is [guid] -or $RunId -is [datetime] -or $RunId -is [datetimeoffset]) {
+            return $RunId
+        }
+        return $Projector.Project($RunId)
+    }
+
+    hidden [hashtable] CountChanges([object[]]$Changes) {
+        return @{
+            New = @($Changes | Where-Object Change -eq 'New').Count
+            Resolved = @($Changes | Where-Object Change -eq 'Resolved').Count
+            Changed = @($Changes | Where-Object Change -eq 'Changed').Count
+            Unchanged = @($Changes | Where-Object Change -eq 'Unchanged').Count
+        }
+    }
+
+    hidden [object] BuildResult(
+        [object]$ReferenceRunId,
+        [object]$DifferenceRunId,
+        [string]$Timestamp,
+        [object[]]$Changes,
+        [hashtable]$Counts
+    ) {
+        return [pscustomobject][ordered]@{
+            SchemaVersion = 1
+            ComparisonType = 'ADAnalyzerAssessmentComparison'
+            ReferenceRunId = $ReferenceRunId
+            DifferenceRunId = $DifferenceRunId
+            Timestamp = $Timestamp
+            Changes = $Changes
+            Summary = [pscustomobject]@{
+                New = $Counts.New
+                Resolved = $Counts.Resolved
+                Changed = $Counts.Changed
+                Unchanged = $Counts.Unchanged
+            }
+        }
+    }
+
+    hidden [string] GetValueKind([object]$Value) {
+        if ($null -eq $Value -or $Value -is [string] -or $Value -is [ValueType]) {
+            return 'Scalar'
+        }
+        if ($Value -is [Collections.IEnumerable] -and $Value -isnot [Collections.IDictionary] -and $Value -isnot [pscustomobject]) {
+            return 'Collection'
+        }
+        return 'Record'
+    }
+
+    hidden [bool] IsMultiset([string]$Field) {
+        return ($Field -eq '' -or
+            $Field -in @(
+                'Members'
+                'MemberOf'
+                'TransitiveGroups'
+                'EffectiveSids'
+                'DirectSids'
+                'PrivilegedSids'
+                'Unresolved'
+                'Cycles'
+                'SIDHistory'
+                'ServicePrincipalNames'
+            ))
+    }
+
+    hidden [bool] IncludeField([object]$Name) {
+        return $Name -notin @(
+            'Timestamp'
+            'CollectedAt'
+            'ObservedAt'
+            'RunId'
+            'ScanId'
+            'StartedAt'
+            'CompletedAt'
+            'Duration'
+            'Elapsed'
+            'CheckId'
+        )
+    }
+
+    hidden [object] NormalizeValue([object]$Value, [string]$Field) {
+        $kind = $this.GetValueKind($Value)
+        if ($kind -eq 'Scalar') {
+            return $Value
+        }
+        if ($kind -eq 'Collection') {
+            $items = @(
+                foreach ($item in $Value) {
+                    , $this.NormalizeValue($item, $Field)
+                }
+            )
+            if ($this.IsMultiset($Field)) {
+                return @(
+                    $items | ForEach-Object {
+                        ConvertTo-Json -InputObject $_ -Depth 100 -Compress
+                    } | Sort-Object
+                )
+            }
+            return $items
+        }
+
+        $output = [ordered]@{}
+        $names = if ($Value -is [Collections.IDictionary]) {
+            @(([Collections.IDictionary].GetProperty('Keys')).GetValue($Value, $null))
+        }
+        else {
+            foreach ($property in $Value.PSObject.Properties) {
+                $property.Name
+            }
+        }
+        foreach ($name in @($names | Sort-Object)) {
+            if (-not $this.IncludeField($name)) {
+                continue
+            }
+            $child = if ($Value -is [Collections.IDictionary]) {
+                , $Value[$name]
+            }
+            else {
+                , $Value.PSObject.Properties[$name].Value
+            }
+            $output[[string]$name] = $this.NormalizeValue($child, [string]$name)
+        }
+        return [pscustomobject]$output
+    }
+}
+
 function ConvertTo-ADAnalyzerComparableValue {
     param(
         [AllowNull()]$Value,
         [string]$Field = ''
 
     )
-    if ($null -eq $Value) {
-        return $null
-    }
-    if ($Value -is [string] -or $Value -is [ValueType]) {
+
+    # Keep the recursive native observations and output cardinality in this command's scope.
+    $comparer = [ADAnalyzerAssessmentComparer]::new()
+    $kind = $comparer.GetValueKind($Value)
+    if ($kind -eq 'Scalar') {
         return $Value
     }
-    if ($Value -is [Collections.IEnumerable] -and $Value -isnot [Collections.IDictionary] -and $Value -isnot [pscustomobject]) {
-        $items = @(foreach ($item in $Value) {
+    if ($kind -eq 'Collection') {
+        $items = @(
+            foreach ($item in $Value) {
                 ConvertTo-ADAnalyzerComparableValue $item $Field
-            })
-        if ($Field -eq '' -or
-            $Field -in @('Members',
-                'MemberOf',
-                'TransitiveGroups',
-                'EffectiveSids',
-                'DirectSids',
-                'PrivilegedSids',
-                'Unresolved',
-                'Cycles',
-                'SIDHistory',
-                'ServicePrincipalNames')) {
-            return ,
-            @(foreach ($serialized in @($items | ForEach-Object { ConvertTo-Json `
-                                -InputObject $_ `
-                                -Depth 100 `
-                                -Compress } | Sort-Object)) {
+            }
+        )
+        if ($comparer.IsMultiset($Field)) {
+            return , @(
+                foreach ($serialized in @($items | ForEach-Object {
+                            ConvertTo-Json -InputObject $_ -Depth 100 -Compress
+                        } | Sort-Object)) {
                     $serialized
-                })
+                }
+            )
         }
         return , $items
     }
+
     $output = [ordered]@{}
     $names = if ($Value -is [Collections.IDictionary]) {
         @(([Collections.IDictionary].GetProperty('Keys')).GetValue($Value, $null))
@@ -1179,16 +1517,7 @@ function ConvertTo-ADAnalyzerComparableValue {
         }
     }
     foreach ($name in @($names | Sort-Object)) {
-        if ($name -in @('Timestamp',
-                'CollectedAt',
-                'ObservedAt',
-                'RunId',
-                'ScanId',
-                'StartedAt',
-                'CompletedAt',
-                'Duration',
-                'Elapsed',
-                'CheckId')) {
+        if (-not $comparer.IncludeField($name)) {
             continue
         }
         if ($Value -is [Collections.IDictionary]) {
@@ -1209,38 +1538,38 @@ function Compare-ADAnalyzerAssessment {
         [Parameter(Mandatory)]$Difference
 
     )
+
     $before = Read-ADAnalyzerOperationDocument $Reference
     $after = Read-ADAnalyzerOperationDocument $Difference
+    $comparer = [ADAnalyzerAssessmentComparer]::new()
     $oldTarget = [string](Get-ADAnalyzerOperationValue $before @('Target'))
     $newTarget = [string](Get-ADAnalyzerOperationValue $after @('Target'))
-    if ($oldTarget -and $newTarget -and $oldTarget -ine $newTarget) {
+    if (-not $comparer.TargetsMatch($oldTarget, $newTarget)) {
         throw 'Cannot compare different directory targets as configuration drift'
     }
+
     $oldScope = [string](Get-ADAnalyzerOperationValue (Get-ADAnalyzerOperationValue $before @('Context')) @('SearchBase'))
     $newScope = [string](Get-ADAnalyzerOperationValue (Get-ADAnalyzerOperationValue $after @('Context')) @('SearchBase'))
-    if ($oldScope -ine $newScope) {
+    if (-not $comparer.SearchBasesMatch($oldScope, $newScope)) {
         throw 'Cannot compare different search-base scopes as configuration drift'
     }
+
     $maps = @(@{}, @{})
     foreach ($pair in @(@($before, 0), @($after, 1))) {
-        $rows = @(Get-ADAnalyzerOperationValue $pair[0] @('Checks', 'Findings') @())
+        $rows = @(Get-ADAnalyzerOperationValue $pair[0] ($comparer.CheckNames()) @())
         foreach ($row in $rows) {
             if ($null -eq $row) {
                 continue
             }
+
             $rule = [string](Get-ADAnalyzerOperationValue $row @('RuleId'))
             if (-not $rule) {
                 $legacy = [string](Get-ADAnalyzerOperationValue $row @('Finding'))
                 $rule = switch ($legacy) {
-                    'Defect - User Inactivity' {
-                        'ACCOUNT.INACTIVE'
-                    }
-                    'Defect - Computer Inactivity' {
-                        'COMPUTER.INACTIVE'
-                    }
                     default {
-                        if ($legacy) {
-                            'LEGACY.' + $legacy
+                        $translated = $comparer.TranslateLegacyRule($legacy)
+                        if ($translated) {
+                            $translated
                         }
                         else {
                             throw 'A snapshot finding is missing RuleId'
@@ -1248,19 +1577,20 @@ function Compare-ADAnalyzerAssessment {
                     }
                 }
             }
-            $target = [string](Get-ADAnalyzerOperationValue $row @('Target', 'DistinguishedName', 'ObjectGuid', 'SID'))
+
+            $target = [string](Get-ADAnalyzerOperationValue $row ($comparer.TargetNames()))
             if (-not $target) {
                 throw 'A snapshot finding is missing its stable target'
             }
-            if ($rule -in 'HOST.SERVICE', 'HOST.REGISTRY') {
+            if ($comparer.UsesNamedHostIdentity($rule)) {
                 $evidence = Get-ADAnalyzerOperationValue $row @('Evidence')
                 $profileRuleId = Get-ADAnalyzerOperationValue $evidence @('ProfileRuleId')
                 if ($null -ne $profileRuleId) {
                     $parts = @()
-                    if ($rule -eq 'HOST.REGISTRY') {
+                    if ($comparer.RequiresRegistryIdentity($rule)) {
                         $path = Get-ADAnalyzerOperationValue $evidence @('RegistryPath')
                         $valueName = Get-ADAnalyzerOperationValue $evidence @('ValueName')
-                        if ($path -isnot [string] -or $valueName -isnot [string]) {
+                        if (-not $comparer.HasLiteralRegistryIdentity($path, $valueName)) {
                             throw 'A named host registry snapshot is missing its literal path/value identity'
                         }
                         $parts = @($path, $valueName)
@@ -1270,75 +1600,51 @@ function Compare-ADAnalyzerAssessment {
                     } -Target $target -Parts $parts
                 }
             }
-            $key = $rule.ToUpperInvariant() + [char]0 + $target.ToUpperInvariant()
-            if (-not $maps[$pair[1]].ContainsKey($key)) {
-                $maps[$pair[1]][$key] = [Collections.ArrayList]::new()
-            }
-            $null = $maps[$pair[1]][$key].Add((ConvertTo-ADAnalyzerSafeData -InputObject $row))
+
+            $bucket = $comparer.GetOrCreateBucket($maps[$pair[1]], $rule, $target)
+            $null = $bucket.Add((ConvertTo-ADAnalyzerSafeData -InputObject $row))
         }
     }
-    $changes = @(foreach ($key in @(@($maps[0].Keys) + @($maps[1].Keys) | Sort-Object -Unique)) {
-            $old = @(if ($maps[0].ContainsKey($key)) {
+
+    $changes = @(
+        foreach ($key in @(@($maps[0].Keys) + @($maps[1].Keys) | Sort-Object -Unique)) {
+            $old = @(
+                if ($maps[0].ContainsKey($key)) {
                     $maps[0][$key]
-                })
-            $new = @(if ($maps[1].ContainsKey($key)) {
+                }
+            )
+            $new = @(
+                if ($maps[1].ContainsKey($key)) {
                     $maps[1][$key]
-                })
-            $status = 'Unchanged'
-            $reason = $null
-            if (-not $maps[0].ContainsKey($key)) {
-                $status = 'New'
-            }
-            elseif (-not $maps[1].ContainsKey($key)) {
-                $status = 'Changed'
-                $reason = 'NotObservedInDifference'
-            }
-            else {
+                }
+            )
+            $observation = $comparer.ClassifyPresence($maps[0].ContainsKey($key), $maps[1].ContainsKey($key))
+            if ($observation.CompareContents) {
                 $oldJson = ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerComparableValue $old) -Depth 100 -Compress
                 $newJson = ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerComparableValue $new) -Depth 100 -Compress
-                if ($oldJson -cne $newJson) {
-                    $status = 'Changed'
-                }
                 $oldFail = @($old | Where-Object Status -in 'Fail', 'Invalid').Count -gt 0
                 $newFail = @($new | Where-Object Status -in 'Fail', 'Invalid').Count -gt 0
                 $oldGood = @($old | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                 $newGood = @($new | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
-                if ($oldFail -and $newGood) {
-                    $status = 'Resolved'
-                }
-                elseif ($oldGood -and $newFail) {
-                    $status = 'New'
-                }
+                $observation.Change = $comparer.ClassifyStatus(($oldJson -cne $newJson), $oldFail, $newFail, $oldGood, $newGood)
             }
-            $sample = if ($new.Count -and $null -ne $new[0]) {
-                $new[0]
-            }
-            else {
-                $old[0]
-            }
-            [pscustomobject]@{
-                RuleId = $key.Split([char]0)[0]
-                Target = Get-ADAnalyzerOperationValue $sample @('Target', 'DistinguishedName', 'ObjectGuid', 'SID')
-                Change = $status
-                Reason = $reason
-                Reference = $old
-                Difference = $new
-            }
-        })
-    [pscustomobject][ordered]@{
-        SchemaVersion = 1
-        ComparisonType = 'ADAnalyzerAssessmentComparison'
-        ReferenceRunId = Get-ADAnalyzerOperationValue $before @('RunId')
-        DifferenceRunId = Get-ADAnalyzerOperationValue $after @('RunId')
-        Timestamp = [datetimeoffset]::UtcNow.ToString('o')
-        Changes = $changes
-        Summary = [pscustomobject]@{
-            New = @($changes | Where-Object Change -eq 'New').Count
-            Resolved = @($changes | Where-Object Change -eq 'Resolved').Count
-            Changed = @($changes | Where-Object Change -eq 'Changed').Count
-            Unchanged = @($changes | Where-Object Change -eq 'Unchanged').Count
+
+            $sample = $comparer.SelectSample($old, $new)
+            $target = Get-ADAnalyzerOperationValue $sample ($comparer.TargetNames())
+            $comparer.BuildChange($key, $target, $old, $new, $observation)
         }
+    )
+
+    $referenceRunId = Get-ADAnalyzerOperationValue $before @('RunId')
+    $differenceRunId = Get-ADAnalyzerOperationValue $after @('RunId')
+    $timestamp = $comparer.CreateTimestamp()
+    $counts = @{
+        New = @($changes | Where-Object Change -eq 'New').Count
+        Resolved = @($changes | Where-Object Change -eq 'Resolved').Count
+        Changed = @($changes | Where-Object Change -eq 'Changed').Count
+        Unchanged = @($changes | Where-Object Change -eq 'Unchanged').Count
     }
+    return $comparer.BuildResult($referenceRunId, $differenceRunId, $timestamp, $changes, $counts)
 }
 
 function ConvertTo-ADAnalyzerOperationGuid {

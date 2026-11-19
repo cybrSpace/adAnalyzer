@@ -2408,6 +2408,47 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
     }
 
 
+    $assessmentComparerCases = [ordered]@{
+        Native = 22
+        Construction = 2
+        Standalone = 1
+        Direct = 7
+        Isolation = 2
+    }
+    foreach ($case in $assessmentComparerCases.Keys) {
+        Invoke-Test ('Assessment comparer API: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $arguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                (Join-Path $PSScriptRoot 'AssessmentComparerClassFixture.ps1')
+                '-Case'
+                $case
+                '-RepositoryRoot'
+                $RepositoryRoot
+            )
+            $previousPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $output = @(& $executable @arguments 2>&1)
+                $fixtureExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $previousPreference
+            }
+            if ($fixtureExitCode -ne 0) {
+                throw ("Assessment comparer fixture exited with code {0}.{1}{2}" -f
+                    $fixtureExitCode, [Environment]::NewLine, ($output -join [Environment]::NewLine))
+            }
+
+            $marker = 'PASS assessment comparer ' + $case + ' ' + $assessmentComparerCases[$case]
+            Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+        }
+    }
+
+
     $legacyValueCases = [ordered]@{
         Parity = 44
         Collision = 16
