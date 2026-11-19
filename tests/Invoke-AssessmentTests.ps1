@@ -2122,6 +2122,45 @@ foreach ($case in $assessmentCollectorCases.Keys) {
     }
 }
 
+$prerequisiteInspectorCases = [ordered]@{
+    Native = 10
+    Standalone = 2
+    Direct = 4
+    Isolation = 2
+    Online = 14
+}
+foreach ($case in $prerequisiteInspectorCases.Keys) {
+    Test-Assessment ('prerequisite inspector API: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $arguments = @(
+            '-NoLogo'
+            '-NoProfile'
+            '-NonInteractive'
+            '-File'
+            (Join-Path $PSScriptRoot 'PrerequisiteInspectorClassFixture.ps1')
+            '-Case'
+            $case
+            '-RepositoryRoot'
+            $RepositoryRoot
+        )
+        $fixtureErrorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $output = @(& $executable @arguments 2>&1)
+            $fixtureExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $fixtureErrorPreference
+        }
+        if ($fixtureExitCode -ne 0) {
+            throw ("Prerequisite inspector fixture exited with code {0}.{1}{2}" -f
+                $fixtureExitCode, [Environment]::NewLine, ($output -join [Environment]::NewLine))
+        }
+        $marker = 'PASS prerequisite inspector ' + $case + ' ' + $prerequisiteInspectorCases[$case]
+        Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+    }
+}
+
 Write-Host ("{0} assessment-integration tests passed; {1} failed" -f $script:Passed, $script:Failed)
 if ($script:Failed) {
     exit 1

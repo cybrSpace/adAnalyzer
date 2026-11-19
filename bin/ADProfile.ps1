@@ -804,6 +804,323 @@ function Set-ADAnalyzerCheckException {
     }
 }
 
+function Get-ADAnalyzerPrerequisiteObservation {
+    param([string]$Kind)
+
+    switch ($Kind) {
+        'Platform' {
+            return {
+                $windows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+            }
+        }
+        'Package' {
+            return {
+                $dll = Join-Path $RepositoryRoot 'lib/Microsoft.ActiveDirectory.Management.dll'
+                $packagePath = $null
+                $packageLiteralPath = $null
+                $version = $null
+                $sha = $null
+                $packageAvailable = Test-Path -LiteralPath $dll -PathType Leaf
+                if ($packageAvailable) {
+                    $packageProvider = $null
+                    $packageDrive = $null
+                    $packagePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
+                        $dll,
+                        [ref]$packageProvider,
+                        [ref]$packageDrive
+                    )
+                    if ($packageProvider.Name -ne 'FileSystem') {
+                        throw 'The package AD assembly must use the FileSystem provider'
+                    }
+
+                    $packageLiteralPath = 'FileSystem::' + $packagePath
+                    $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($packagePath).FileVersion
+                    $sha = (Get-FileHash -LiteralPath $packageLiteralPath -Algorithm SHA256 -ErrorAction Stop).Hash
+                }
+            }
+        }
+        'Tcp' {
+            return {
+                $client = [Net.Sockets.TcpClient]::new()
+                $probeFailure = $null
+                try {
+                    $pending = $client.BeginConnect($Server, $port, $null, $null)
+                    if (-not $pending.AsyncWaitHandle.WaitOne($timeoutMilliseconds)) {
+                        throw 'Connection timed out'
+                    }
+                    $client.EndConnect($pending)
+                }
+                catch {
+                    $probeFailure = $_
+                }
+                finally {
+                    $client.Dispose()
+                }
+            }
+        }
+        'Directory' {
+            return {
+                $binary = Import-Module -Name $packagePath -Scope Local -PassThru -ErrorAction Stop
+                $command = $binary.ExportedCmdlets['Get-ADRootDSE']
+                if ($null -eq $command) {
+                    throw 'Bundled AD assembly does not provide RootDSE queries'
+                }
+                $root = & $command @splat
+                $rootHostName = $root.DnsHostName
+            }
+        }
+    }
+}
+
+class ADAnalyzerPrerequisiteInspector {
+    ADAnalyzerPrerequisiteInspector() {
+    }
+
+    [object[]] Inspect() {
+        return $this.Inspect((Split-Path -Parent $PSScriptRoot), $null)
+    }
+
+    [object[]] Inspect([string]$RepositoryRoot, [hashtable]$Profile) {
+        return $this.InspectCore($RepositoryRoot, $null, [pscredential]::Empty, $Profile, $false)
+    }
+
+    [object[]] InspectOnline(
+        [string]$RepositoryRoot,
+        [string]$Server,
+        [pscredential]$Credential,
+        [hashtable]$Profile
+    ) {
+        return $this.InspectCore($RepositoryRoot, $Server, $Credential, $Profile, $true)
+    }
+
+    hidden [object[]] InspectCore(
+        [string]$RepositoryRoot,
+        [string]$Server,
+        [pscredential]$Credential,
+        [hashtable]$Profile,
+        [bool]$Online
+    ) {
+        $ErrorActionPreference = 'Stop'
+        $configuration = [ADAnalyzerProfile]::new($Profile).ToHashtable()
+        $factory = [ADAnalyzerCheckFactory]::new()
+        $checks = [Collections.Generic.List[object]]::new()
+
+        $windows = $false
+        $platformObservation = Get-ADAnalyzerPrerequisiteObservation -Kind Platform
+        . $platformObservation
+        $checks.Add($factory.Create($this.PlatformCheck($RepositoryRoot, $windows)))
+        $runtime = Get-Variable -Name PSVersionTable -ValueOnly -ErrorAction Stop
+        $checks.Add($factory.Create($this.PowerShellCheck($RepositoryRoot, $runtime.PSVersion)))
+
+        $dll = $null
+        $packagePath = $null
+        $packageLiteralPath = $null
+        $packageAvailable = $false
+        $version = $null
+        $sha = $null
+        $packageObservation = Get-ADAnalyzerPrerequisiteObservation -Kind Package
+        . $packageObservation
+        $checks.Add($factory.Create($this.PackageCheck($dll, $packageAvailable, $version, $sha)))
+        $expected = $null
+        if ($packageAvailable) {
+            $expected = $this.ExpectedPin($configuration)
+            $checks.Add($factory.Create($this.ChecksumCheck($dll, $sha, $expected)))
+        }
+        if (-not $Online) {
+            return $checks.ToArray()
+        }
+
+        if (-not $this.IsValidServer($Server)) {
+            throw 'Online checks require a valid Server host name'
+        }
+        $tcpPlan = $this.TcpPlan()
+        $timeoutMilliseconds = $tcpPlan.TimeoutMilliseconds
+        $probeFailure = $null
+        $tcpObservation = Get-ADAnalyzerPrerequisiteObservation -Kind Tcp
+        foreach ($port in $tcpPlan.Ports) {
+            . $tcpObservation
+            $checks.Add($factory.Create($this.TcpCheck($Server, $port, $probeFailure)))
+        }
+
+        $splat = $this.DirectoryArguments($Server, $Credential)
+        $rootHostName = $null
+        try {
+            if (-not $this.CanCheckDirectoryPackage($windows, $packageLiteralPath) -or
+                -not (Test-Path -LiteralPath $packageLiteralPath -PathType Leaf)) {
+                throw 'Online directory checks require the bundled Windows AD assembly'
+            }
+            if ($this.HasPinMismatch($expected, $sha)) {
+                throw 'Bundled AD assembly checksum does not match the configured pin'
+            }
+            $directoryObservation = Get-ADAnalyzerPrerequisiteObservation -Kind Directory
+            . $directoryObservation
+            $check = $this.DirectoryCheck($Server, $null)
+            $check.Observed = $rootHostName
+            $checks.Add($factory.Create($check))
+        }
+        catch {
+            $checks.Add($factory.Create($this.DirectoryCheck($Server, $_)))
+        }
+        return $checks.ToArray()
+    }
+
+    hidden [hashtable] PlatformCheck([string]$RepositoryRoot, [bool]$Windows) {
+        $status = 'NotApplicable'
+        if ($Windows) {
+            $status = 'Pass'
+        }
+        return @{
+            RuleId = 'PACKAGE.WINDOWS'
+            Status = $status
+            Category = 'Prerequisite'
+            Target = $RepositoryRoot
+            Observed = $Windows
+            Expected = $true
+            Message = 'Live AD/SMB collection uses Windows; offline policy analysis is portable'
+        }
+    }
+
+    hidden [hashtable] PowerShellCheck([string]$RepositoryRoot, [object]$Version) {
+        $status = 'Fail'
+        if ($Version -ge [version]'5.1') {
+            $status = 'Pass'
+        }
+        return @{
+            RuleId = 'PACKAGE.POWERSHELL'
+            Status = $status
+            Category = 'Prerequisite'
+            Target = $RepositoryRoot
+            Observed = $Version.ToString()
+            Expected = '>=5.1'
+        }
+    }
+
+    hidden [hashtable] PackageCheck([string]$Path, [bool]$Available, [object]$Version, [string]$Hash) {
+        if (-not $Available) {
+            return @{
+                RuleId = 'PACKAGE.BUNDLED_AD'
+                Status = 'Fail'
+                Severity = 'High'
+                Category = 'Prerequisite'
+                Target = $Path
+                Message = 'The package AD assembly is missing'
+            }
+        }
+        return @{
+            RuleId = 'PACKAGE.BUNDLED_AD'
+            Status = 'Pass'
+            Category = 'Prerequisite'
+            Target = $Path
+            Observed = @{
+                Version = $Version
+                Sha256 = $Hash
+            }
+            Expected = 'Bundled AD assembly; no installed RSAT required'
+        }
+    }
+
+    hidden [object] ExpectedPin([hashtable]$Configuration) {
+        if ($Configuration.DependencyHashes.ContainsKey('Microsoft.ActiveDirectory.Management.dll')) {
+            return $Configuration.DependencyHashes['Microsoft.ActiveDirectory.Management.dll']
+        }
+        return $null
+    }
+
+    hidden [bool] HasPinMismatch([object]$Expected, [string]$Hash) {
+        return ($Expected -and $Hash -ine $Expected)
+    }
+
+    hidden [hashtable] ChecksumCheck([string]$Path, [string]$Hash, [object]$Expected) {
+        $status = 'NotConfigured'
+        if ($this.HasPinMismatch($Expected, $Hash)) {
+            $status = 'Fail'
+        }
+        elseif ($Expected) {
+            $status = 'Pass'
+        }
+        return @{
+            RuleId = 'PACKAGE.CHECKSUM'
+            Status = $status
+            Severity = 'High'
+            Category = 'Prerequisite'
+            Target = $Path
+            Observed = $Hash
+            Expected = $Expected
+            Message = 'Pin a trusted SHA256 in DependencyHashes to verify the bundled assembly; availability alone is not signature verification'
+        }
+    }
+
+    hidden [bool] IsValidServer([string]$Server) {
+        return ($Server -match '^[A-Za-z0-9][A-Za-z0-9._-]*$')
+    }
+
+    hidden [hashtable] TcpPlan() {
+        return @{
+            Ports = [int[]]@(9389, 445)
+            TimeoutMilliseconds = 3000
+        }
+    }
+
+    hidden [hashtable] TcpCheck(
+        [string]$Server,
+        [int]$Port,
+        [Management.Automation.ErrorRecord]$Failure
+    ) {
+        $status = 'Pass'
+        $observed = ''
+        if ($null -ne $Failure) {
+            $status = 'Unreadable'
+            $observed = $Failure.Exception.Message
+        }
+        return @{
+            RuleId = 'CONNECTIVITY.TCP.' + $Port
+            Status = $status
+            Category = 'Prerequisite'
+            Target = $Server
+            Observed = $observed
+            Expected = 'Reachable'
+            Message = 'Port reachability does not verify authentication or directory/SYSVOL permissions'
+        }
+    }
+
+    hidden [bool] CanCheckDirectoryPackage([bool]$Windows, [string]$PackageLiteralPath) {
+        return ($Windows -and $PackageLiteralPath)
+    }
+
+    hidden [hashtable] DirectoryArguments([string]$Server, [pscredential]$Credential) {
+        $arguments = @{
+            Server = $Server
+            ErrorAction = 'Stop'
+        }
+        if ($Credential -and $Credential -ne [pscredential]::Empty) {
+            $arguments.Credential = $Credential
+        }
+        return $arguments
+    }
+
+    hidden [hashtable] DirectoryCheck(
+        [string]$Server,
+        [Management.Automation.ErrorRecord]$Failure
+    ) {
+        if ($null -ne $Failure) {
+            return @{
+                RuleId = 'CONNECTIVITY.DIRECTORY'
+                Status = 'Unreadable'
+                Category = 'Prerequisite'
+                Target = $Server
+                Message = $Failure.Exception.Message
+            }
+        }
+        return @{
+            RuleId = 'CONNECTIVITY.DIRECTORY'
+            Status = 'Pass'
+            Category = 'Prerequisite'
+            Target = $Server
+            Expected = 'Authenticated RootDSE query through the package assembly'
+        }
+    }
+}
+
 function Get-ADAnalyzerPrerequisite {
     [CmdletBinding()]
     param(
@@ -815,26 +1132,16 @@ function Get-ADAnalyzerPrerequisite {
 
     )
     $configuration = Import-ADAnalyzerProfile -Profile $Profile
-    $windows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
-    New-ADAnalyzerCheck `
-        -RuleId 'PACKAGE.WINDOWS' `
-        -Status $(if ($windows) {
-            'Pass'
-        }
-        else {
-            'NotApplicable'
-        }) `
-        -Category Prerequisite `
-        -Target $RepositoryRoot `
-        -Observed $windows `
-        -Expected $true `
-        -Message 'Live AD/SMB collection uses Windows; offline policy analysis is portable'
-    New-ADAnalyzerCheck -RuleId 'PACKAGE.POWERSHELL' -Status $(if ($PSVersionTable.PSVersion -ge [version]'5.1') {
-            'Pass'
-        }
-        else {
-            'Fail'
-        }) -Category Prerequisite -Target $RepositoryRoot -Observed $PSVersionTable.PSVersion.ToString() -Expected '>=5.1'
+    $inspector = [ADAnalyzerPrerequisiteInspector]::new()
+
+    $platformObservation = Get-ADAnalyzerPrerequisiteObservation -Kind Platform
+    . $platformObservation
+    $check = $inspector.PlatformCheck($RepositoryRoot, $windows)
+    New-ADAnalyzerCheck @check
+    $check = $inspector.PowerShellCheck($RepositoryRoot, $PSVersionTable.PSVersion)
+    New-ADAnalyzerCheck @check
+
+    # Keep native file failures and ErrorVariable capture in the command scope.
     $dll = Join-Path $RepositoryRoot 'lib/Microsoft.ActiveDirectory.Management.dll'
     $packagePath = $null
     $packageLiteralPath = $null
@@ -853,111 +1160,52 @@ function Get-ADAnalyzerPrerequisite {
         $packageLiteralPath = 'FileSystem::' + $packagePath
         $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($packagePath)
         $sha = (Get-FileHash -LiteralPath $packageLiteralPath -Algorithm SHA256 -ErrorAction Stop).Hash
-        New-ADAnalyzerCheck -RuleId 'PACKAGE.BUNDLED_AD' -Status Pass -Category Prerequisite -Target $dll -Observed @{
-            Version = $info.FileVersion
-            Sha256 = $sha
-        } -Expected 'Bundled AD assembly; no installed RSAT required'
-        $expected = if ($configuration.DependencyHashes.ContainsKey('Microsoft.ActiveDirectory.Management.dll')) {
-            $configuration.DependencyHashes['Microsoft.ActiveDirectory.Management.dll']
-        }
-        else {
-            $null
-        }
-        New-ADAnalyzerCheck `
-            -RuleId 'PACKAGE.CHECKSUM' `
-            -Status $(if (-not $expected) {
-                'NotConfigured'
-            }
-            elseif ($sha -ieq $expected) {
-                'Pass'
-            }
-            else {
-                'Fail'
-            }) `
-            -Severity High `
-            -Category Prerequisite `
-            -Target $dll `
-            -Observed $sha `
-            -Expected $expected `
-            -Message 'Pin a trusted SHA256 in DependencyHashes to verify the bundled assembly; availability alone is not signature verification'
+        $check = $inspector.PackageCheck($dll, $true, $info.FileVersion, $sha)
+        New-ADAnalyzerCheck @check
+        $expected = $inspector.ExpectedPin($configuration)
+        $check = $inspector.ChecksumCheck($dll, $sha, $expected)
+        New-ADAnalyzerCheck @check
     }
     else {
-        New-ADAnalyzerCheck `
-            -RuleId 'PACKAGE.BUNDLED_AD' `
-            -Status Fail `
-            -Severity High `
-            -Category Prerequisite `
-            -Target $dll `
-            -Message 'The package AD assembly is missing'
+        $check = $inspector.PackageCheck($dll, $false, $null, $null)
+        New-ADAnalyzerCheck @check
     }
     if ($Online) {
-        if ($Server -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+        if (-not $inspector.IsValidServer($Server)) {
             throw 'Online checks require a valid Server host name'
         }
-        foreach ($port in @(9389, 445)) {
-            $client = [Net.Sockets.TcpClient]::new()
-            $status = 'Unknown'
-            $message = ''
-            try {
-                $pending = $client.BeginConnect($Server, $port, $null, $null)
-                if (-not $pending.AsyncWaitHandle.WaitOne(3000)) {
-                    throw 'Connection timed out'
-                }
-                $client.EndConnect($pending)
-                $status = 'Pass'
-            }
-            catch {
-                $status = 'Unreadable'
-                $message = $_.Exception.Message
-            }
-            finally {
-                $client.Dispose()
-            }
-            New-ADAnalyzerCheck `
-                -RuleId ('CONNECTIVITY.TCP.' + $port) `
-                -Status $status `
-                -Category Prerequisite `
-                -Target $Server `
-                -Observed $message `
-                -Expected 'Reachable' `
-                -Message 'Port reachability does not verify authentication or directory/SYSVOL permissions'
+        $tcpPlan = $inspector.TcpPlan()
+        $timeoutMilliseconds = $tcpPlan.TimeoutMilliseconds
+        $tcpObservation = Get-ADAnalyzerPrerequisiteObservation -Kind Tcp
+        foreach ($port in $tcpPlan.Ports) {
+            . $tcpObservation
+            $check = $inspector.TcpCheck($Server, $port, $probeFailure)
+            New-ADAnalyzerCheck @check
         }
-        $splat = @{
-            Server = $Server
-            ErrorAction = 'Stop'
-        }
-        if ($Credential -and $Credential -ne [pscredential]::Empty) {
-            $splat.Credential = $Credential
-        }
+
+        $splat = $inspector.DirectoryArguments($Server, $Credential)
         try {
-            if (-not $windows -or -not $packageLiteralPath -or
+            if (-not $inspector.CanCheckDirectoryPackage($windows, $packageLiteralPath) -or
                 -not (Test-Path -LiteralPath $packageLiteralPath -PathType Leaf)) {
                 throw 'Online directory checks require the bundled Windows AD assembly'
             }
-            if ($expected -and $sha -ine $expected) {
+            if ($inspector.HasPinMismatch($expected, $sha)) {
                 throw 'Bundled AD assembly checksum does not match the configured pin'
             }
+
+            # The exact import, export, invocation and getter share the caller's error scope.
             $binary = Import-Module -Name $packagePath -Scope Local -PassThru -ErrorAction Stop
             $command = $binary.ExportedCmdlets['Get-ADRootDSE']
             if ($null -eq $command) {
                 throw 'Bundled AD assembly does not provide RootDSE queries'
             }
             $root = & $command @splat
-            New-ADAnalyzerCheck `
-                -RuleId 'CONNECTIVITY.DIRECTORY' `
-                -Status Pass `
-                -Category Prerequisite `
-                -Target $Server `
-                -Observed $root.DnsHostName `
-                -Expected 'Authenticated RootDSE query through the package assembly'
+            $check = $inspector.DirectoryCheck($Server, $null)
+            New-ADAnalyzerCheck @check -Observed $root.DnsHostName
         }
         catch {
-            New-ADAnalyzerCheck `
-                -RuleId 'CONNECTIVITY.DIRECTORY' `
-                -Status Unreadable `
-                -Category Prerequisite `
-                -Target $Server `
-                -Message $_.Exception.Message
+            $check = $inspector.DirectoryCheck($Server, $_)
+            New-ADAnalyzerCheck @check
         }
     }
 }
