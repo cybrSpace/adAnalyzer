@@ -1662,6 +1662,11 @@ foreach ($case in $assessmentCollectorCases.Keys) {
         }
         $marker = 'PASS assessment collector ' + $case + ' ' + $assessmentCollectorCases[$case]
         Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+        if ($case -eq 'Native') {
+            $ignoreParity = @($output | Where-Object { $_ -is [string] -and $_ -clike 'PASS assessment Ignore parity *' })
+            Assert-Equal 1 $ignoreParity.Count
+            Write-Host $ignoreParity[0]
+        }
     }
 }
 

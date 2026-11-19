@@ -153,6 +153,135 @@ function New-NativePolicyFixture {
 
 
 if ($Case -eq 'Native') {
+    # Exact command body from accepted 9ae81a8. Keep its name and scope for native parity.
+    # Body SHA-256: c39f6a8c4f6822e6da4c8c67e7395a00810b19accfd5d915fbb263dfe6f6c47e
+    $script:AcceptedNativeAssessment = @'
+    [CmdletBinding()]
+    param(
+        [string]$Domain,
+        [string]$Server,
+        [pscredential]$Credential = [pscredential]::Empty,
+        [string]$SearchBase,
+        [string]$ProfilePath,
+        $Profile,
+        [switch]$IncludeAcl,
+        [switch]$IncludeHostChecks,
+        [switch]$SkipGpo
+
+    )
+    if ($ProfilePath -and $null -ne $Profile) {
+        throw 'Specify ProfilePath or Profile, not both'
+    }
+    $configuration = if ($ProfilePath) {
+        Import-ADAnalyzerProfile -Path $ProfilePath
+    }
+    else {
+        Import-ADAnalyzerProfile -Profile $Profile
+    }
+    if (-not $Domain) {
+        $Domain = $configuration.Targets.Domain
+    }
+    if (-not $Server) {
+        $Server = $configuration.Targets.Server
+    }
+    if (-not $Domain) {
+        $Domain = $env:USERDNSDOMAIN
+    }
+    if (-not $Server) {
+        $Server = $Domain
+    }
+    if ($Server -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+        throw 'Specify Domain or Server (or configure Targets)'
+    }
+    $connection = @{
+        Server = $Server
+        ErrorAction = 'Stop'
+    }
+    if ($Credential -and $Credential -ne [pscredential]::Empty) {
+        $connection.Credential = $Credential
+    }
+    $root = Get-ADRootDSE @connection
+    if ($root.DnsHostName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+        throw 'Directory returned an invalid DC host name'
+    }
+    $connection.Server = [string]$root.DnsHostName
+    if (-not $Domain) {
+        $domainInfo = Get-ADDomain @connection
+        $Domain = [string]$domainInfo.DNSRoot
+    }
+    if ($Domain -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+        throw 'Invalid domain DNS name'
+    }
+    if (-not $SearchBase) {
+        $SearchBase = $configuration.Targets.SearchBase
+    }
+    $context = [pscustomobject]@{
+        Server = $connection.Server
+        Domain = $Domain
+        Credential = $Credential
+        SearchBase = $SearchBase
+        IncludeAcl = ($IncludeAcl -or $configuration.Analysis.IncludeAcl)
+        IncludeHostChecks = ($IncludeHostChecks -or $configuration.Analysis.IncludeHostChecks)
+    }
+    $directory = Get-ADAnalyzerDirectoryData -Context $context -Profile $configuration
+    $resolvedDomain = if ($directory.Domain.DNSRoot -match '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+        [string]$directory.Domain.DNSRoot
+    }
+    else {
+        $Domain
+    }
+    if ($context.IncludeHostChecks) {
+        $hostChecks = @(Test-ADAnalyzerHostPolicy -Hosts @($directory.Hosts) -Credential $Credential -Profile $configuration)
+        $directory | Add-Member -NotePropertyName HostChecks -NotePropertyValue $hostChecks -Force
+    }
+    $policies = [Collections.ArrayList]::new()
+    if (-not $SkipGpo -and $configuration.Analysis.IncludeGpo) {
+        try {
+            $gpos = @(Get-ADAnalyzerGpo -All -Domain $resolvedDomain -Server $context.Server -Credential $Credential)
+            foreach ($gpo in $gpos) {
+                try {
+                    $report = Get-ADAnalyzerGpoReport -Gpo $gpo -Credential $Credential -AsObject
+                    $null = $policies.Add([pscustomobject]@{
+                            Gpo = $gpo
+                            Policy = $report.Policy
+                            Error = $null
+                        })
+                }
+                catch {
+                    $null = $policies.Add([pscustomobject]@{
+                            Gpo = $gpo
+                            Policy = $null
+                            Error = $_.Exception.Message
+                        })
+                }
+            }
+        }
+        catch {
+            $null = $policies.Add([pscustomobject]@{
+                    Gpo = [pscustomobject]@{
+                        Id = $Domain
+                    }
+                    Policy = $null
+                    Error = $_.Exception.Message
+                })
+        }
+    }
+    $result = Invoke-ADAnalyzerAssessment `
+        -DirectoryData $directory `
+        -GpoData $policies.ToArray() `
+        -Profile $configuration `
+        -Target $resolvedDomain
+    $result | Add-Member -NotePropertyName Context -NotePropertyValue ([pscustomobject]@{
+            Domain = $resolvedDomain
+            RequestedDomain = $Domain
+            Server = $context.Server
+            SearchBase = $SearchBase
+            IncludeAcl = $context.IncludeAcl
+            IncludeHostChecks = $context.IncludeHostChecks
+        })
+    $result
+'@
+    $script:IgnoreDispositions = [Collections.Generic.List[string]]::new()
     $script:NativeAssessmentEngine = ${function:Invoke-ADAnalyzerAssessment}
     $script:PolicyIds = @(
         [guid]'11111111-1111-1111-1111-111111111111'
@@ -509,13 +638,107 @@ function Get-FixtureErrorIds([object]$Entry) {
     }
 }
 
+function ConvertTo-FixtureNativeDiagnostic([object]$Entry) {
+    if ($null -eq $Entry) {
+        return $null
+    }
+    if ($Entry -is [Collections.IList]) {
+        return [ordered]@{
+            Type = $Entry.GetType().FullName
+            Entries = @(
+                foreach ($item in $Entry) {
+                    ConvertTo-FixtureNativeDiagnostic $item
+                }
+            )
+        }
+    }
+    $record = $Entry
+    if ($Entry -isnot [Management.Automation.ErrorRecord] -and
+        $Entry -is [Management.Automation.IContainsErrorRecord]) {
+        $record = $Entry.ErrorRecord
+    }
+
+    $diagnostic = [ordered]@{
+        Type = $Entry.GetType().FullName
+        Id = $null
+        Category = $null
+        Command = $null
+        Cause = $null
+        Message = $null
+    }
+    if ($record -is [Management.Automation.ErrorRecord]) {
+        $diagnostic.Id = $record.FullyQualifiedErrorId
+        $diagnostic.Category = [string]$record.CategoryInfo.Category
+        if ($null -ne $record.InvocationInfo -and $null -ne $record.InvocationInfo.MyCommand) {
+            $diagnostic.Command = $record.InvocationInfo.MyCommand.Name
+        }
+        if ($null -ne $record.Exception) {
+            $cause = $record.Exception.GetBaseException()
+            $diagnostic.Cause = $cause.GetType().FullName
+            $diagnostic.Message = $cause.Message
+        }
+    }
+    elseif ($Entry -is [Exception]) {
+        $cause = $Entry.GetBaseException()
+        $diagnostic.Cause = $cause.GetType().FullName
+        $diagnostic.Message = $cause.Message
+    }
+    return $diagnostic
+}
+
+function ConvertTo-FixtureNativeOutcome($Rows, $Caught, $Captured, $History, $Trace, [bool]$Continued) {
+    $outcome = [ordered]@{
+        Stages = $Trace
+        Continued = $Continued
+        Caught = ConvertTo-FixtureNativeDiagnostic $Caught
+        ErrorVariable = ConvertTo-FixtureNativeDiagnostic $Captured
+        History = ConvertTo-FixtureNativeDiagnostic $History
+        Stream = @(
+            foreach ($item in $Rows) {
+                if ($null -eq $item) {
+                    [ordered]@{
+                        Type = 'Null'
+                        Value = $null
+                    }
+                }
+                elseif ($item -is [Management.Automation.ErrorRecord]) {
+                    [ordered]@{
+                        Type = 'Error'
+                        Value = ConvertTo-FixtureNativeDiagnostic $item
+                    }
+                }
+                elseif ($item -is [Management.Automation.InformationalRecord]) {
+                    [ordered]@{
+                        Type = $item.GetType().FullName
+                        Value = $item.Message
+                    }
+                }
+                elseif ($item -is [Management.Automation.InformationRecord]) {
+                    [ordered]@{
+                        Type = $item.GetType().FullName
+                        Value = $item.MessageData
+                    }
+                }
+                else {
+                    [ordered]@{
+                        Type = $item.GetType().FullName
+                        Value = $item
+                    }
+                }
+            }
+        )
+    }
+    return (ConvertTo-Json -InputObject $outcome -Depth 32 -Compress)
+}
+
 function Assert-NativeAssessment(
     [string]$Scenario,
     [string]$Action,
     [string]$ProfilePath,
     [string]$Stages,
     [string]$TerminalId,
-    [bool]$Strict = $false
+    [bool]$Strict = $false,
+    [switch]$Observe
 ) {
     $script:ScenarioName = $Scenario
     $script:Trace = [Collections.Generic.List[object]]::new()
@@ -531,17 +754,25 @@ function Assert-NativeAssessment(
     $seen = [Collections.ArrayList]::new()
     $output = @()
     $caught = $null
+    $continued = $false
     $Error.Clear()
     try {
         $output = @(Get-ADAnalyzerAssessment @arguments -ErrorVariable +seen *>&1)
+        $continued = $true
     }
     catch {
-        $caught = $_.FullyQualifiedErrorId
+        $caught = $_
     }
     finally {
         $env:USERDNSDOMAIN = $savedDomain
     }
     $trace = $script:Trace.ToArray()
+    if ($Observe) {
+        return (ConvertTo-FixtureNativeOutcome $output $caught $seen @($Error) $trace $continued)
+    }
+    if ($null -ne $caught) {
+        $caught = $caught.FullyQualifiedErrorId
+    }
     $capturedIds = @(Get-FixtureErrorIds -Entry $seen)
     $historyIds = @(Get-FixtureErrorIds -Entry $Error)
     Assert-Fixture (($trace.Stage -join ',') -ceq $Stages) ('Unexpected native stages: ' + ($trace.Stage -join ','))
@@ -683,6 +914,36 @@ function Assert-NativeAssessment(
     }
 }
 
+function Assert-FixtureNativeIgnore([string]$Scenario, [string]$ProfilePath) {
+    $functionPath = 'Function:script:Get-ADAnalyzerAssessment'
+    $current = (Get-Command Get-ADAnalyzerAssessment -CommandType Function).ScriptBlock
+    $accepted = [scriptblock]::Create($script:AcceptedNativeAssessment)
+    try {
+        Set-Item -LiteralPath $functionPath -Value $accepted
+        $installed = (Get-Command Get-ADAnalyzerAssessment -CommandType Function).ScriptBlock
+        Assert-Fixture ($installed.ToString() -ceq $accepted.ToString()) 'The accepted native command was not installed.'
+        $expected = Assert-NativeAssessment $Scenario 'Ignore' $ProfilePath '' '' -Observe
+    }
+    finally {
+        Set-Item -LiteralPath $functionPath -Value $current
+    }
+    $restored = (Get-Command Get-ADAnalyzerAssessment -CommandType Function).ScriptBlock
+    Assert-Fixture ($restored.ToString() -ceq $current.ToString()) 'The current native command was not restored.'
+    $actual = Assert-NativeAssessment $Scenario 'Ignore' $ProfilePath '' '' -Observe
+    Assert-Fixture ($actual -ceq $expected) (
+        'Native Ignore changed from the accepted command on this runtime.' +
+        [Environment]::NewLine + 'Accepted: ' + $expected +
+        [Environment]::NewLine + 'Current: ' + $actual
+    )
+    $observation = ConvertFrom-Json -InputObject $actual -ErrorAction Stop
+    if ($observation.Continued) {
+        $script:IgnoreDispositions.Add($Scenario + '=Continued')
+    }
+    else {
+        $script:IgnoreDispositions.Add($Scenario + '=Terminal/' + $observation.Caught.Id)
+    }
+}
+
 if ($Case -eq 'Native') {
     $nativeProfileDirectory = New-FixtureProfileDirectory
     try {
@@ -734,6 +995,10 @@ if ($Case -eq 'Native') {
         foreach ($scenario in @('DirectoryWriteError', 'HostWriteError', 'CatalogWriteError', 'ReportWriteError', 'EvaluatorWriteError')) {
             foreach ($action in @('Continue', 'Stop', 'SilentlyContinue', 'Ignore')) {
                 Test-Fixture ($scenario + ' ' + $action) {
+                    if ($action -eq 'Ignore') {
+                        Assert-FixtureNativeIgnore $scenario $nativeProfilePath
+                        return
+                    }
                     $stages = $baseStages
                     $terminal = ''
                     switch ($scenario) {
@@ -783,6 +1048,8 @@ if ($Case -eq 'Native') {
     finally {
         [IO.Directory]::Delete($nativeProfileDirectory, $true)
     }
+    Assert-Fixture ($script:IgnoreDispositions.Count -eq 5) 'Expected five same-engine Ignore comparisons.'
+    'PASS assessment Ignore parity ' + ($script:IgnoreDispositions -join ', ')
 }
 
 if ($Case -eq 'Construction') {
