@@ -2870,7 +2870,8 @@ function Get-ADAnalyzerOperationCurrentObject {
     param(
         [string]$ObjectGuid,
         [hashtable]$Connection,
-        $Plan
+        $Plan,
+        [Management.Automation.CommandInfo]$DirectoryCommand
 
     )
     $properties = @('objectGUID',
@@ -2899,6 +2900,9 @@ function Get-ADAnalyzerOperationCurrentObject {
             throw 'Classification attribute cannot be safely re-queried'
         }
         $properties += , $attribute
+    }
+    if ($null -ne $DirectoryCommand) {
+        return & $DirectoryCommand -Identity ([guid]$ObjectGuid) -Properties $properties @Connection
     }
     return Get-ADObject -Identity ([guid]$ObjectGuid) -Properties $properties @Connection
 }
@@ -3441,6 +3445,265 @@ function Assert-ADAnalyzerOperationPlan {
     }
 }
 
+class ADAnalyzerRemediationExecutor {
+    ADAnalyzerRemediationExecutor() {
+    }
+
+    [object[]] Preview([object]$Plan, [string]$Server, [string]$JournalPath) {
+        $ErrorActionPreference = 'Stop'
+        $target = $this.PrepareApply($Plan, $Server, $JournalPath, [pscredential]::Empty)
+        $rows = [Collections.Generic.List[object]]::new()
+        foreach ($action in @($target.Plan.Actions)) {
+            if ($null -ne $action) {
+                $rows.Add($this.SkippedAction($action.ActionId, $action.ObjectGuid))
+            }
+        }
+        return $rows.ToArray()
+    }
+
+    [object[]] Apply([object]$Plan, [string]$Server, [string]$JournalPath, [object[]]$ApprovedActionIds) {
+        return $this.Apply($Plan, $Server, $JournalPath, $ApprovedActionIds, [pscredential]::Empty)
+    }
+
+    [object[]] Apply(
+        [object]$Plan,
+        [string]$Server,
+        [string]$JournalPath,
+        [object[]]$ApprovedActionIds,
+        [pscredential]$Credential
+    ) {
+        $ErrorActionPreference = 'Stop'
+        $target = $this.PrepareApply($Plan, $Server, $JournalPath, $Credential)
+        $approvals = $this.ApprovedActionSet($target.Plan, $ApprovedActionIds)
+        $rows = [Collections.Generic.List[object]]::new()
+        $owner = [ADAnalyzerRemediationJournal]::new()
+        $journal = $null
+        $commands = $null
+        try {
+            foreach ($action in @($target.Plan.Actions)) {
+                if ($null -eq $action) {
+                    continue
+                }
+                $id = ConvertTo-ADAnalyzerOperationGuid $action.ActionId
+                if (-not $approvals.ContainsKey($id)) {
+                    $rows.Add($this.SkippedAction($action.ActionId, $action.ObjectGuid))
+                    continue
+                }
+
+                if ($null -eq $journal) {
+                    $owner.Open($target.Plan, $Server, $target.Path)
+                    $journal = $owner.Read()
+                }
+                if (@($journal.Entries | Where-Object {
+                            $_.ActionId -eq $action.ActionId -and $this.IsCompletedAction($_.Status)
+                        }).Count) {
+                    throw 'This plan action has already been applied; create a fresh assessment and plan'
+                }
+                if ($null -eq $commands) {
+                    $commands = $this.GetApplyDirectoryCommands()
+                }
+                $header = $this.NewEntryHeader()
+                $fields = @{
+                    ActionId = $action.ActionId
+                    ObjectGuid = $action.ObjectGuid
+                    SID = $action.SID
+                    DistinguishedName = $action.DistinguishedName
+                    ObjectClass = $action.ObjectClass
+                    AccountType = $action.AccountType
+                    InactivityDays = $action.InactivityDays
+                }
+                $entry = $this.BuildEntry($header, $fields)
+                $guard = [ADAnalyzerRemediationGuard]::new()
+                $connection = $target.Connection
+                $added = $false
+                try {
+                    $current = Get-ADAnalyzerOperationCurrentObject $action.ObjectGuid $connection $target.Plan $commands.Read
+                    $entry.Before = $guard.AssertPreconditions($action.Preconditions, $current, $true)
+                    $guard.AssertPrivilege($current, $action, $target.Plan, $target.Server, $target.Credential)
+                    $guard.AssertInactivity($current, $action)
+                    $this.PrepareEntry($journal, $entry)
+                    $added = $true
+                    $owner.Write($journal)
+
+                    $mutation = @{
+                        Identity = [guid]$action.ObjectGuid
+                        WhatIf = $false
+                        Confirm = $false
+                    }
+                    $disable = $commands.Disable
+                    $null = & $disable @mutation @connection
+                    $after = Get-ADAnalyzerOperationCurrentObject $action.ObjectGuid $connection $target.Plan $commands.Read
+                    $entry.After = $guard.ReadState($after)
+                    if (-not $this.IsVerifiedDisabled($entry.Before, $entry.After)) {
+                        throw 'Unable to verify the account disable result'
+                    }
+                    $this.CompleteEntry($entry)
+                    $owner.Write($journal)
+                }
+                catch {
+                    $failure = $_
+                    $this.RecordApplyFailure($journal, $entry, $failure.Exception.Message, $added)
+                    try {
+                        $owner.Write($journal)
+                    }
+                    catch {
+                        throw $this.ApplyPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                    }
+                    throw $failure
+                }
+                $rows.Add([ADAnalyzerEvidenceProjector]::new().Project($entry))
+            }
+        }
+        finally {
+            $owner.Dispose()
+        }
+        return $rows.ToArray()
+    }
+
+    hidden [hashtable] PrepareApply(
+        [object]$Plan,
+        [string]$Server,
+        [string]$JournalPath,
+        [pscredential]$Credential
+    ) {
+        $reader = [ADAnalyzerOperationDocumentReader]::new()
+        $projector = [ADAnalyzerEvidenceProjector]::new()
+        $planObject = $projector.Project($reader.Read($Plan, 'Plan'))
+        $guard = [ADAnalyzerRemediationGuard]::new()
+        $guard.AssertPlan($planObject)
+        $path = Resolve-ADAnalyzerOperationFilePath $JournalPath
+        $connection = Get-ADAnalyzerOperationConnection $Server $Credential
+        $context = Get-ADAnalyzerOperationValue $planObject @('Context')
+        $reviewedServer = [string](Get-ADAnalyzerOperationValue $context @('Server'))
+        if (-not $this.IsReviewedServer($reviewedServer, $Server)) {
+            throw 'Server differs from the DC recorded in the reviewed assessment'
+        }
+        return @{
+            Plan = $planObject
+            Path = $path
+            Connection = $connection
+            Server = $Server
+            Credential = $Credential
+        }
+    }
+
+    hidden [hashtable] ApprovedActionSet([object]$Plan, [object[]]$Requested) {
+        $reviewed = @{}
+        foreach ($action in @($Plan.Actions)) {
+            if ($null -ne $action) {
+                $id = ConvertTo-ADAnalyzerOperationGuid $action.ActionId
+                $reviewed[$id] = $true
+            }
+        }
+        $approved = @{}
+        foreach ($value in $Requested) {
+            if ($value -isnot [string] -and $value -isnot [guid]) {
+                throw 'Approved action ID does not belong to the reviewed plan'
+            }
+            $id = ConvertTo-ADAnalyzerOperationGuid $value
+            if (-not $id -or -not $reviewed.ContainsKey($id)) {
+                throw 'Approved action ID does not belong to the reviewed plan'
+            }
+            if ($approved.ContainsKey($id)) {
+                throw 'Approved action IDs must be unique'
+            }
+            $approved[$id] = $true
+        }
+        return $approved
+    }
+
+    hidden [hashtable] GetApplyDirectoryCommands() {
+        $providerPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'lib/Microsoft.ActiveDirectory.Management.dll'
+        $provider = Import-Module -Name $providerPath -Scope Local -PassThru -ErrorAction Stop
+        $exports = $provider.ExportedCmdlets
+        if ($null -eq $exports -or
+            $exports['Get-ADObject'] -isnot [Management.Automation.CommandInfo] -or
+            $exports['Disable-ADAccount'] -isnot [Management.Automation.CommandInfo]) {
+            throw 'Bundled AD assembly does not provide the required Apply commands'
+        }
+        return @{
+            Read = $exports['Get-ADObject']
+            Disable = $exports['Disable-ADAccount']
+        }
+    }
+
+    hidden [bool] IsReviewedServer([string]$ReviewedServer, [string]$Server) {
+        return -not ($ReviewedServer -and $ReviewedServer -ine $Server)
+    }
+
+    hidden [object] SkippedAction([object]$ActionId, [object]$ObjectGuid) {
+        return [pscustomobject]@{
+            ActionId = $ActionId
+            ObjectGuid = $ObjectGuid
+            Status = 'Skipped'
+            JournalPath = $null
+        }
+    }
+
+    hidden [bool] IsCompletedAction([object]$Status) {
+        return $Status -in 'Succeeded', 'Undone'
+    }
+
+    hidden [Collections.Specialized.OrderedDictionary] NewEntryHeader() {
+        return [ordered]@{
+            EntryId = [guid]::NewGuid().ToString('D')
+        }
+    }
+
+    hidden [object] BuildEntry([Collections.Specialized.OrderedDictionary]$Header, [hashtable]$Fields) {
+        $Header.ActionId = $Fields.ActionId
+        $Header.Action = 'DisableAccount'
+        $Header.ObjectGuid = $Fields.ObjectGuid
+        $Header.SID = $Fields.SID
+        $Header.DistinguishedName = $Fields.DistinguishedName
+        $Header.ObjectClass = $Fields.ObjectClass
+        $Header.AccountType = $Fields.AccountType
+        $Header.InactivityDays = $Fields.InactivityDays
+        $Header.Timestamp = [datetimeoffset]::UtcNow.ToString('o')
+        $Header.Status = 'Rejected'
+        $Header.Before = $null
+        $Header.After = $null
+        $Header.Message = $null
+        $Header.Undo = $null
+        return [pscustomobject]$Header
+    }
+
+    hidden [void] PrepareEntry([object]$Journal, [object]$Entry) {
+        $Entry.Status = 'Prepared'
+        $Journal.Entries = @($Journal.Entries) + @($Entry)
+    }
+
+    hidden [bool] IsVerifiedDisabled([object]$Before, [object]$After) {
+        return -not (
+            $After.ObjectGuid -ne $Before.ObjectGuid -or
+            $After.SID -ne $Before.SID -or
+            $After.DistinguishedName -ine $Before.DistinguishedName -or
+            $After.Enabled -isnot [bool] -or
+            $After.Enabled -or
+            -not $After.WhenChanged
+        )
+    }
+
+    hidden [void] CompleteEntry([object]$Entry) {
+        $Entry.Status = 'Succeeded'
+    }
+
+    hidden [void] RecordApplyFailure([object]$Journal, [object]$Entry, [string]$Message, [bool]$Added) {
+        if ($Entry.Status -ne 'Rejected') {
+            $Entry.Status = 'Failed'
+        }
+        $Entry.Message = $Message
+        if (-not $Added) {
+            $Journal.Entries = @($Journal.Entries) + @($Entry)
+        }
+    }
+
+    hidden [string] ApplyPersistenceFailure([string]$Original, [string]$Persistence) {
+        return 'Journal persistence failed; no further changes were attempted. ' +
+            'Inspect the durable journal before retrying. ' + $Original + '; ' + $Persistence
+    }
+}
+
 function Invoke-ADAnalyzerRemediationPlan {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
@@ -3454,8 +3717,9 @@ function Invoke-ADAnalyzerRemediationPlan {
     Assert-ADAnalyzerOperationPlan $planObject
     $JournalPath = Resolve-ADAnalyzerOperationFilePath $JournalPath
     $connection = Get-ADAnalyzerOperationConnection $Server $Credential
+    $executor = [ADAnalyzerRemediationExecutor]::new()
     $reviewedServer = [string](Get-ADAnalyzerOperationValue (Get-ADAnalyzerOperationValue $planObject @('Context')) @('Server'))
-    if ($reviewedServer -and $reviewedServer -ine $Server) {
+    if (-not $executor.IsReviewedServer($reviewedServer, $Server)) {
         throw 'Server differs from the DC recorded in the reviewed assessment'
     }
     $journal = $null
@@ -3466,80 +3730,60 @@ function Invoke-ADAnalyzerRemediationPlan {
                 continue
             }
             if (-not $PSCmdlet.ShouldProcess($action.DistinguishedName, 'Disable account from explicit reviewed plan')) {
-                [pscustomobject]@{
+                $skipped = @{
                     ActionId = $action.ActionId
                     ObjectGuid = $action.ObjectGuid
-                    Status = 'Skipped'
-                    JournalPath = $null
                 }
+                $executor.SkippedAction($skipped.ActionId, $skipped.ObjectGuid)
                 continue
             }
             if ($null -eq $journal) {
                 $lease = Enter-ADAnalyzerJournalLease $JournalPath
                 $journal = Get-ADAnalyzerOperationJournal $planObject $Server $JournalPath
             }
-            if (@($journal.Entries | Where-Object { $_.ActionId -eq $action.ActionId -and $_.Status -in @('Succeeded', 'Undone') }).Count) {
+            if (@($journal.Entries | Where-Object {
+                        $_.ActionId -eq $action.ActionId -and $executor.IsCompletedAction($_.Status)
+                    }).Count) {
                 throw 'This plan action has already been applied; create a fresh assessment and plan'
             }
-            $entry = [pscustomobject][ordered]@{
-                EntryId = [guid]::NewGuid().ToString('D')
+            $header = $executor.NewEntryHeader()
+            $fields = @{
                 ActionId = $action.ActionId
-                Action = 'DisableAccount'
                 ObjectGuid = $action.ObjectGuid
                 SID = $action.SID
                 DistinguishedName = $action.DistinguishedName
                 ObjectClass = $action.ObjectClass
                 AccountType = $action.AccountType
                 InactivityDays = $action.InactivityDays
-                Timestamp = [datetimeoffset]::UtcNow.ToString('o')
-                Status = 'Rejected'
-                Before = $null
-                After = $null
-                Message = $null
-                Undo = $null
             }
+            $entry = $executor.BuildEntry($header, $fields)
             $added = $false
             try {
                 $current = Get-ADAnalyzerOperationCurrentObject $action.ObjectGuid $connection $planObject
                 $entry.Before = Assert-ADAnalyzerOperationPreconditions $action.Preconditions $current $true
                 Assert-ADAnalyzerOperationPrivilege $current $action $planObject $connection
                 Assert-ADAnalyzerOperationInactivity $current $action
-                $entry.Status = 'Prepared'
-                $journal.Entries = @($journal.Entries) + @($entry)
+                $executor.PrepareEntry($journal, $entry)
                 $added = $true
                 # Durable intent precedes the mutation. A failed journal write aborts.
                 Save-ADAnalyzerOperationJournal $journal $JournalPath
                 Disable-ADAccount -Identity ([guid]$action.ObjectGuid) @connection -WhatIf:$false -Confirm:$false
                 $after = Get-ADAnalyzerOperationCurrentObject $action.ObjectGuid $connection $planObject
                 $entry.After = Get-ADAnalyzerOperationState $after
-                if ($entry.After.ObjectGuid -ne $entry.Before.ObjectGuid -or
-                    $entry.After.SID -ne $entry.Before.SID -or
-                    $entry.After.DistinguishedName -ine $entry.Before.DistinguishedName -or
-                    $entry.After.Enabled -isnot [bool] -or
-                    $entry.After.Enabled -or
-                    -not $entry.After.WhenChanged) {
+                if (-not $executor.IsVerifiedDisabled($entry.Before, $entry.After)) {
                     throw 'Unable to verify the account disable result'
                 }
-                $entry.Status = 'Succeeded'
+                $executor.CompleteEntry($entry)
                 Save-ADAnalyzerOperationJournal $journal $JournalPath
             }
             catch {
                 $failure = $_
-                $entry.Status = if ($entry.Status -eq 'Rejected') {
-                    'Rejected'
-                }
-                else {
-                    'Failed'
-                }
-                $entry.Message = $failure.Exception.Message
-                if (-not $added) {
-                    $journal.Entries = @($journal.Entries) + @($entry)
-                }
+                $executor.RecordApplyFailure($journal, $entry, $failure.Exception.Message, $added)
                 try {
                     Save-ADAnalyzerOperationJournal $journal $JournalPath
                 }
                 catch {
-                    throw ('Journal persistence failed; no further changes were attempted. Inspect the durable journal before retrying. ' + $failure.Exception.Message + '; ' + $_.Exception.Message)
+                    throw $executor.ApplyPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
                 }
                 throw $failure
             }
