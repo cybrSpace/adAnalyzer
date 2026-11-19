@@ -9,12 +9,284 @@ function Assert-LocalAdmin($Value, [string]$Message) {
         throw $Message
     }
 }
+
+function Assert-LocalAdminInertSource($Ast) {
+    foreach ($statement in $Ast.EndBlock.Statements) {
+        $safe = $statement -is [Management.Automation.Language.FunctionDefinitionAst] -or
+            ($statement -is [Management.Automation.Language.TypeDefinitionAst] -and $statement.IsClass) -or
+            ($statement -is [Management.Automation.Language.IfStatementAst] -and
+                $statement.Extent.Text -match '^if\s*\(\s*\$MyInvocation\.InvocationName\s+-ne\s+''\.''')
+        Assert-LocalAdmin $safe 'Unexpected executable startup in the standalone inventory source'
+    }
+}
+
+function Get-LocalAdminFixtureFingerprint([object[]]$Rows) {
+    $values = @(foreach ($row in $Rows) {
+            $collectedAt = [datetime]::MinValue
+            Assert-LocalAdmin ($row -is [pscustomobject] -and $row.whenCollected -is [string] -and
+                [datetime]::TryParseExact(
+                    $row.whenCollected, 'yyyy/MM/dd HH:mm:ss', [Globalization.CultureInfo]::CurrentCulture,
+                    [Globalization.DateTimeStyles]::None, [ref]$collectedAt
+                )) 'Native collection timestamp or row type changed'
+            $value = [ordered]@{}
+            foreach ($property in $row.PSObject.Properties) {
+                if ($property.Name -ceq 'whenCollected') {
+                    $value[$property.Name] = 'validated timestamp'
+                }
+                else {
+                    $value[$property.Name] = $property.Value
+                }
+            }
+            [pscustomobject]$value
+        })
+    ConvertTo-Json -InputObject $values -Depth 12 -Compress
+}
+
+function Get-LocalAdminFixtureFailure([scriptblock]$Operation) {
+    $rows = [Collections.Generic.List[object]]::new()
+    $failure = $null
+    try {
+        & $Operation | ForEach-Object { $rows.Add($_) }
+    }
+    catch {
+        $failure = $_
+    }
+    Assert-LocalAdmin ($null -ne $failure -and $rows.Count -eq 0) 'A terminal operation did not fail without rows'
+    return $failure
+}
+
+function Invoke-LocalAdminProjectCases([string]$Path) {
+    $owner = [ADAnalyzerLocalAdministratorInventory]::new()
+    $machine = 'fixture-host'
+    $fields = 'hostname,memberNetBIOS,memberName,memberClass,memberLocal,memberLocalEnabled,memberInvalid,whenCollected,memberSID,memberResolutionKind,memberMessage'
+    $local = [ordered]@{
+        Domain = 'FIXTURE-HOST'
+        Name = 'fixture-local'
+        Class = 'User'
+        SID = 'S-1-5-21-1-2-3-1001'
+        SidValid = $true
+        EnabledEvidence = $false
+        Message = 'fixture local observation'
+    }
+    $original = ConvertTo-Json -InputObject $local -Compress
+    $row = $owner.Project($local, $machine)
+    Assert-LocalAdmin (($row.PSObject.Properties.Name -join ',') -ceq $fields -and
+        $row.hostname -ceq $machine -and $row.memberNetBIOS -ceq 'FIXTURE-HOST' -and
+        $row.memberLocal -eq $true -and $row.memberInvalid -eq $false -and
+        $row.memberLocalEnabled -is [bool] -and -not $row.memberLocalEnabled -and
+        $row.memberMessage -ceq $local.Message -and $row.memberSID -ceq $local.SID -and
+        $row.memberResolutionKind -ceq 'MachineLocal') 'Pure class did not preserve the canonical row and explicit false evidence'
+    $arguments = @{
+        Domain = $local.Domain
+        Name = $local.Name
+        Class = $local.Class
+        MachineName = $machine
+        SID = $local.SID
+        SidValid = $local.SidValid
+        EnabledEvidence = $local.EnabledEvidence
+        Message = $local.Message
+    }
+    $expected = Get-LocalAdminFixtureFingerprint @($row)
+    Assert-LocalAdmin ((Get-LocalAdminFixtureFingerprint @(New-LocalAdminObject @arguments)) -ceq $expected) 'Pure projector and native classifier differ'
+
+    function New-LocalAdminObject { throw 'Unexpected legacy projector' }
+    function Resolve-LocalAdministratorsName { throw 'Unexpected account translation during projection' }
+    function New-LocalAdminDirectoryEntry { throw 'Unexpected account binding during projection' }
+    foreach ($test in @(
+            { $owner.Project($null, $machine) }
+            { $owner.Project($local, ' ') }
+            {
+                $invalid['SidValid'] = 'true'
+                $owner.Project($invalid, $machine)
+            }
+            {
+                $invalid['EnabledEvidence'] = 'false'
+                $owner.Project($invalid, $machine)
+            }
+            {
+                $invalid['Domain'] = @{ Password = 'fixture-only' }
+                $owner.Project($invalid, $machine)
+            }
+        )) {
+        $invalid = [ordered]@{}
+        foreach ($key in $local.Keys) {
+            $invalid[$key] = $local[$key]
+        }
+        $failure = Get-LocalAdminFixtureFailure $test
+        Assert-LocalAdmin ($failure.Exception.GetBaseException() -is [ArgumentException]) 'Malformed supplied evidence did not receive the class argument error'
+    }
+    $other = [ADAnalyzerLocalAdministratorInventory]::new()
+    $cases = @(
+        @('AzureAD', 'S-1-12-1-1-2-3-4', $true, 'EntraSID'),
+        @('BUILTIN', 'S-1-5-32-545', $true, 'BuiltinSID'),
+        @('NT AUTHORITY', 'S-1-5-18', $true, 'WellKnownSID'),
+        @('fixture-host-extra', 'S-1-5-21-4-5-6-1002', $true, 'OtherAuthority'),
+        @('', 'S-1-5-21-1-2-3-1001', $true, 'UnresolvedSID'),
+        @('OTHER', 'S-1-5-80-1', $true, 'OtherSID'),
+        @($machine, 'malformed', $false, 'InvalidSID'),
+        @($machine, $null, $null, 'UnknownSID')
+    )
+    foreach ($case in $cases) {
+        $member = [ordered]@{
+            Domain = $case[0]
+            Name = 'fixture'
+            Class = 'User'
+            SID = $case[1]
+            SidValid = $case[2]
+        }
+        $observation = $other.Project($member, $machine)
+        Assert-LocalAdmin ($observation.memberResolutionKind -ceq $case[3] -and
+            -not $observation.memberLocal -and $null -eq $observation.memberLocalEnabled -and
+            $null -eq $observation.memberMessage) ('Supplied category lost its evidence: ' + $case[3])
+        if ($null -eq $case[2]) {
+            Assert-LocalAdmin ($null -eq $observation.memberInvalid -and $null -eq $observation.memberSID) 'Unknown evidence became definite'
+        }
+        elseif (-not $case[2]) {
+            Assert-LocalAdmin ($observation.memberInvalid -eq $true -and $null -eq $observation.memberSID) 'Malformed supplied SID escaped as a valid value'
+        }
+        else {
+            Assert-LocalAdmin ($observation.memberInvalid -eq $false -and $observation.memberSID -ceq $case[1]) 'Recognized supplied SID was lost'
+        }
+    }
+
+    $runner = [powershell]::Create()
+    try {
+        $body = @'
+param($Entry, $Member, $Machine)
+$ErrorActionPreference = 'Stop'
+if ('ADAnalyzerLocalAdministratorInventory' -as [type]) {
+    throw 'Independent runspace inherited a preloaded type'
+}
+
+function Get-LocalUser { throw 'Unexpected account lookup during projection' }
+$startup = @(. $Entry)
+if ($startup.Count) {
+    throw 'Independent load emitted rows'
+}
+$owner = [ADAnalyzerLocalAdministratorInventory]::new()
+$owner.Project($Member, $Machine)
+'@
+        $null = $runner.AddScript($body).AddArgument($Path).AddArgument($local).AddArgument($machine)
+        $results = @($runner.Invoke())
+        Assert-LocalAdmin (-not $runner.HadErrors -and $results.Count -eq 1 -and
+            (Get-LocalAdminFixtureFingerprint $results) -ceq $expected) ('Projection failed in the independent runspace: ' + ($runner.Streams.Error -join ' | '))
+    }
+    finally {
+        $runner.Dispose()
+    }
+    $row.memberName = 'changed result only'
+    Assert-LocalAdmin ((Get-LocalAdminFixtureFingerprint @($owner.Project($local, $machine))) -ceq $expected -and
+        (ConvertTo-Json -InputObject $local -Compress) -ceq $original) 'Projection retained mutated state, input or runspace dependencies'
+}
+
+function Reset-LocalAdminFixtureProbe([string]$Fault = '', [string]$LookupFault = '') {
+    [ADAnalyzer.LocalAdminFixture.Probe]::Reset($Fault)
+    $global:LocalAdminFault = $LookupFault
+    $global:LocalAdminLookups.Clear()
+}
+
+function Assert-LocalAdminFixtureRead([object[]]$Rows) {
+    Assert-LocalAdmin ($Rows.Count -eq 12 -and
+        [ADAnalyzer.LocalAdminFixture.Probe]::Entries -eq 1 -and
+        [ADAnalyzer.LocalAdminFixture.Probe]::Disposals -eq 1 -and
+        [ADAnalyzer.LocalAdminFixture.Probe]::Invocations -eq 1 -and
+        [ADAnalyzer.LocalAdminFixture.Probe]::Translations -eq 1 -and
+        [ADAnalyzer.LocalAdminFixture.Probe]::Path -ceq 'WinNT://./Localized Admins,group') 'Read changed local binding, direct Members enumeration or disposal'
+    $lookupSids = $global:LocalAdminLookups.SID -join ','
+    Assert-LocalAdmin ($lookupSids -ceq 'S-1-5-21-1-2-3-1001,S-1-5-21-1-2-3-1002,S-1-5-21-1-2-3-1010') (
+        'Read expanded the exact enabled lookup scope'
+    )
+}
+
+function Invoke-LocalAdminDirectCases {
+    $owner = [ADAnalyzerLocalAdministratorInventory]::new()
+    Assert-LocalAdmin ([ADAnalyzer.LocalAdminFixture.Probe]::Entries -eq 0 -and
+        [ADAnalyzer.LocalAdminFixture.Probe]::Translations -eq 0 -and
+        $global:LocalAdminLookups.Count -eq 0) 'Construction collected local account information'
+    Reset-LocalAdminFixtureProbe
+    $native = @(Get-LocalAdministrators)
+    Assert-LocalAdminFixtureRead $native
+    $fingerprint = Get-LocalAdminFixtureFingerprint $native
+
+    function Get-LocalAdministrators { throw 'Unexpected legacy inventory engine' }
+    function Get-LocalAdministratorGroup { throw 'Unexpected legacy ADSI enumeration engine' }
+    function New-LocalAdminObject { throw 'Unexpected legacy projector' }
+    function ConvertTo-LocalAdminSidEvidence { throw 'Unexpected legacy SID normalizer' }
+    Reset-LocalAdminFixtureProbe
+    $direct = $owner.Read()
+    Assert-LocalAdmin ($direct -is [object[]] -and (Get-LocalAdminFixtureFingerprint $direct) -ceq $fingerprint) (
+        'Direct inventory did not reproduce the complete native row schema, values and order'
+    )
+    Assert-LocalAdminFixtureRead $direct
+
+    foreach ($fault in 'Member', 'SidRead') {
+        Reset-LocalAdminFixtureProbe $fault
+        $rows = $owner.Read()
+        Assert-LocalAdmin ($rows.Count -eq 12 -and
+            @($rows | Where-Object { $_.memberMessage -match 'fixture' }).Count -ge 1 -and
+            [ADAnalyzer.LocalAdminFixture.Probe]::Disposals -eq 1) ('Direct member failure lost a row or diagnostic: ' + $fault)
+        if ($fault -eq 'SidRead') {
+            Assert-LocalAdmin ($null -eq $rows[0].memberInvalid -and $null -eq $rows[0].memberLocalEnabled) 'Unreadable SID became a definite direct verdict'
+        }
+    }
+    foreach ($fault in 'Lookup', 'Mismatch', 'Missing', 'Multiple', 'NonBoolean') {
+        Reset-LocalAdminFixtureProbe -LookupFault $fault
+        $rows = $owner.Read()
+        Assert-LocalAdminFixtureRead $rows
+        $unknown = @($rows | Where-Object { $_.memberClass -eq 'User' -and $_.memberLocal -and
+                $null -eq $_.memberLocalEnabled -and $_.memberMessage -match 'Enabled:' })
+        Assert-LocalAdmin ($unknown.Count -eq 3) ('Direct enabled lookup inferred unverified evidence: ' + $fault)
+    }
+    foreach ($fault in 'Translate', 'Factory', 'Enumeration', 'Dispose', 'EnumerationDispose') {
+        Reset-LocalAdminFixtureProbe $fault
+        $failure = Get-LocalAdminFixtureFailure { $owner.Read() }
+        $disposed = 1
+        if ($fault -in 'Translate', 'Factory') {
+            $disposed = 0
+        }
+        Assert-LocalAdmin ([ADAnalyzer.LocalAdminFixture.Probe]::Disposals -eq $disposed -and
+            $global:LocalAdminLookups.Count -eq 0) ('Direct failure did not stop after owned-entry disposal: ' + $fault)
+        if ($fault -eq 'EnumerationDispose') {
+            $messages = @()
+            $exception = $failure.Exception
+            while ($null -ne $exception) {
+                if ($exception.Data.Contains('ADAnalyzerCleanupErrors')) {
+                    $messages = @($exception.Data['ADAnalyzerCleanupErrors'])
+                    break
+                }
+                $exception = $exception.InnerException
+            }
+            Assert-LocalAdmin ($failure.Exception.ToString() -match 'fixture enumeration failure' -and
+                $messages.Count -eq 1 -and $messages[0] -ceq 'fixture disposal failure') 'Direct compound failure lost its primary or secondary cause'
+        }
+    }
+
+    Reset-LocalAdminFixtureProbe 'Empty'
+    $empty = $owner.Read()
+    Assert-LocalAdmin ($empty -is [object[]] -and $empty.Count -eq 0 -and
+        [ADAnalyzer.LocalAdminFixture.Probe]::Disposals -eq 1 -and
+        $global:LocalAdminLookups.Count -eq 0) 'Empty direct collection produced output or retained a resource'
+    Reset-LocalAdminFixtureProbe
+    $first = @($owner.Read() | ForEach-Object {
+            Assert-LocalAdmin ([ADAnalyzer.LocalAdminFixture.Probe]::Disposals -eq 1 -and
+                $global:LocalAdminLookups.Count -eq 3) 'Direct first item arrived before cleanup and last lookup'
+            $_
+        } | Select-Object -First 1)
+    Assert-LocalAdmin ($first.Count -eq 1 -and -not $first[0].memberInvalid) 'Early caller cutoff did not receive the first safe row'
+    $direct[0].memberName = 'mutated result'
+    Reset-LocalAdminFixtureProbe
+    Assert-LocalAdmin ((Get-LocalAdminFixtureFingerprint ($owner.Read())) -ceq $fingerprint -and
+        [Management.Automation.PSSerializer]::Serialize($owner) -cnotmatch 'mutated result|WinNT:|S-1-5-21') 'Direct reader retained previous data, failure state or altered rows'
+}
+
 $path = Join-Path $RepositoryRoot 'etc/Get-LocalAdministrators.ps1'
 $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
 Assert-LocalAdmin ($errors.Count -eq 0) 'Local-admin source did not parse'
+Assert-LocalAdminInertSource $ast
 $global:LocalAdminLookups = [Collections.Generic.List[object]]::new()
+$global:LocalAdminUnsafeLookups = 0
 
 function Get-LocalUser {
     [CmdletBinding()]param(
@@ -24,12 +296,18 @@ function Get-LocalUser {
     ) $global:LocalAdminLookups.Add($PSBoundParameters)
     throw 'Pure classifier attempted local account I/O'
 }
-if ($Mode -like 'Classifier*') {
-    $function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq 'New-LocalAdminObject' },
-        $true)
-    . ([scriptblock]::Create($function.Extent.Text))
-    if ($Mode -eq 'ClassifierGroup') {
+if ($Mode -like 'Classifier*' -or $Mode -eq 'Project') {
+    $Invoke = 'caller-invoke'
+    $startup = @(. $path)
+    Assert-LocalAdmin ($startup.Count -eq 0 -and $Invoke -ceq 'caller-invoke' -and
+        $global:LocalAdminLookups.Count -eq 0) 'Pure loader performed work or changed caller state'
+    if ($Mode -eq 'Project') {
+        $explicitLoad = @(. $path -Invoke)
+        Assert-LocalAdmin ($explicitLoad.Count -eq 0 -and $Invoke -ceq 'caller-invoke' -and
+            $global:LocalAdminLookups.Count -eq 0) 'Dot loading with Invoke was not inert'
+        Invoke-LocalAdminProjectCases $path
+    }
+    elseif ($Mode -eq 'ClassifierGroup') {
         foreach ($authority in @('DOMAIN', 'NT AUTHORITY', 'fixture-host-extra', 'fixture.host')) {
             $row = New-LocalAdminObject `
                 -Domain $authority `
@@ -94,9 +372,9 @@ using System.Collections.Generic;
 namespace ADAnalyzer.LocalAdminFixture {
  public static class Probe {
   public static string Fault="",Path="";
-  public static int Entries,Disposals,Translations;
+  public static int Entries,Disposals,Translations,Invocations;
   public static bool Disposed;
-  public static void Reset(string fault){Fault=fault;Path="";Entries=Disposals=Translations=0;Disposed=false;}
+  public static void Reset(string fault){Fault=fault;Path="";Entries=Disposals=Translations=Invocations=0;Disposed=false;}
  }
  public class Account {public string Value {get{return "BUILTIN\\Localized Admins";}}}
  public class Sid {
@@ -142,12 +420,13 @@ namespace ADAnalyzer.LocalAdminFixture {
    yield return new Member("missing","WinNT://"+machine+"/missing","User",0);
    yield return new Member("nested-local","WinNT://DOMAIN/"+machine+"/nested-local","User",10);
   }
-  public object Invoke(string name,params object[] arguments){if(name!="Members" || arguments.Length!=0)throw new Exception("Unexpected ADSI invocation");return Read();}
+  public object Invoke(string name,params object[] arguments){if(name!="Members" || arguments.Length!=0)throw new Exception("Unexpected ADSI invocation");Probe.Invocations++;return Read();}
   public void Dispose(){Probe.Disposals++;Probe.Disposed=true;if(Probe.Fault=="Dispose" || Probe.Fault=="EnumerationDispose")throw new Exception("fixture disposal failure");}
  }
 }
 '@
     $source = $ast.Extent.Text
+    $offset = $ast.Extent.StartOffset
     foreach ($node in @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.TypeExpressionAst] },
                 $true) | Sort-Object { $_.Extent.StartOffset } `
                 -Descending)) {
@@ -172,13 +451,17 @@ namespace ADAnalyzer.LocalAdminFixture {
             }
         }
         if ($replacement) {
-            $source = $source.Remove($node.Extent.StartOffset,
-                $node.Extent.EndOffset - $node.Extent.StartOffset).Insert($node.Extent.StartOffset,
-                $replacement)
+            $start = $node.Extent.StartOffset - $offset
+            $length = $node.Extent.EndOffset - $node.Extent.StartOffset
+            $source = $source.Remove($start, $length).Insert($start, $replacement)
         }
     }
     Assert-LocalAdmin ($source -match 'ADAnalyzer.LocalAdminFixture.Entry' -and
-        $source -match 'ADAnalyzer.LocalAdminFixture.Sid') 'External framework adapter did not bind both contracts'
+        $source -match 'ADAnalyzer.LocalAdminFixture.Sid' -and
+        $source -notmatch '(?i)\[(?:[\w.]+\.)?(?:SecurityIdentifier|DirectoryEntry)\]' -and
+        $source -notmatch '(?i)\b(?:System\.Security\.Principal\.SecurityIdentifier|System\.DirectoryServices\.DirectoryEntry)\b') (
+        'External framework adapter did not safely replace both known raw CLR contracts'
+    )
     $block = [scriptblock]::Create($source)
     $Invoke = 'caller-invoke'
     $startup = @(. $block)
@@ -198,8 +481,10 @@ namespace ADAnalyzer.LocalAdminFixture {
                 SID = [string]$SID
                 Name = $Name
             })
-        if ($Name) {
-            throw 'Name lookup is forbidden'
+        if ($PSBoundParameters.ContainsKey('Name') -or $PSBoundParameters['ErrorAction'] -ne 'Stop' -or
+            [string]$SID -notmatch '^S-1-5-21-' -or -not [ADAnalyzer.LocalAdminFixture.Probe]::Disposed) {
+            $global:LocalAdminUnsafeLookups++
+            throw 'Account lookup escaped the exact scope or occurred before entry cleanup'
         }
         if ($global:LocalAdminFault -eq 'Lookup') {
             throw 'fixture local-user lookup'
@@ -232,7 +517,11 @@ namespace ADAnalyzer.LocalAdminFixture {
         }
     }
     if ($Mode -eq 'Inert') {
-        Assert-LocalAdmin ($global:LocalAdminLookups.Count -eq 0) 'Dot source queried enabled state'
+        $owner = [ADAnalyzerLocalAdministratorInventory]::new()
+        Assert-LocalAdmin ($owner.GetType().Name -ceq 'ADAnalyzerLocalAdministratorInventory' -and
+            [ADAnalyzer.LocalAdminFixture.Probe]::Entries -eq 0 -and
+            [ADAnalyzer.LocalAdminFixture.Probe]::Translations -eq 0 -and
+            $global:LocalAdminLookups.Count -eq 0) 'Dot source or construction queried local accounts'
     }
     elseif ($Mode -eq 'Inventory') {
         [ADAnalyzer.LocalAdminFixture.Probe]::Reset('')
@@ -333,8 +622,12 @@ namespace ADAnalyzer.LocalAdminFixture {
         $rows = @(& $block -Invoke)
         Assert-LocalAdmin ($rows.Count -eq 12 -and [ADAnalyzer.LocalAdminFixture.Probe]::Disposals -eq 1) 'Explicit CLI failed'
     }
+    elseif ($Mode -eq 'Direct') {
+        Invoke-LocalAdminDirectCases
+    }
     else {
         throw 'Unknown fixture mode'
     }
 }
+Assert-LocalAdmin ($global:LocalAdminUnsafeLookups -eq 0) 'A caught diagnostic concealed an out-of-scope lookup'
 'PASS local-admin inventory ' + $Mode

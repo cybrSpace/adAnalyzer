@@ -86,6 +86,23 @@ $formatter.Format('Access is denied.', $rules, 3, $attempts)
 
 `etc/Get-LocalAdministrators.ps1` exposes local-only `Get-LocalAdministrators` (CLI: `-Invoke`). It resolves Administrators by its well-known SID and reads the local WinNT group, retaining the original eight fields plus canonical `memberSID`, `memberResolutionKind`, and `memberMessage`. `memberLocal` requires a valid account SID and an exact match to the actual machine's SAM authority; builtin, well-known, Entra, and other authorities have separate categories. Valid unresolved Entra SIDs are not invalid. `memberInvalid` is null when SID evidence is missing, and true only for a malformed SID. `memberLocalEnabled` is nullable: it is copied only for a local user whose exact SID is confirmed by local-account lookup. Individual metadata errors stay with their rows; enumeration and owned-entry cleanup failures terminate without partial results. Dot sourcing performs no collection. Live collection requires Windows; an unavailable local-account lookup leaves enabled state unknown.
 
+```powershell
+. .\etc\Get-LocalAdministrators.ps1
+$inventory = [ADAnalyzerLocalAdministratorInventory]::new()
+$members = $inventory.Read()
+
+$evidence = @{
+    Domain = 'server1'
+    Name = 'LocalUser'
+    Class = 'User'
+    SID = 'S-1-5-21-111-222-333-1001'
+    SidValid = $true
+}
+$row = $inventory.Project($evidence, 'server1')
+```
+
+The constructor is inert. `Read()` uses the current Windows identity, closes the local group entry before checking account state, and returns the complete detached inventory. `Project(evidence, machineName)` uses supplied normalized evidence and the local clock. It accepts string fields `Domain`, `Name`, `Class`, `SID`, and `Message`, and Boolean fields `SidValid` and `EnabledEvidence`. Omitted evidence remains unknown where applicable.
+
 `etc/Get-MSSQLServers.ps1` exposes `Get-ADMSSQLServers` with optional `SearchBase`, `Server`, `Credential`, `OutputPath`, and `OperationTimeoutSeconds` (1–300, default 30 per CIM operation, not a global deadline). Its OS regex defaults to `Windows Server`. Discovery uses the bundled AD PSDrive by default (`DirectoryConnection=Direct` opts out), pins the resolved DC, and finishes drive cleanup before host probes. Each host owns a CIM session. The returned `Collection` retains `Export(path)` and the six existing columns: `computer.Status` means the service query succeeded; `service.Status` contains literal states such as `Running` or `Stopped`. A successful query with no SQL-named services has a blank-service row. Host failures and cleanup errors remain in `computer.Message`; cleanup-only failure preserves observed states. Discovery failures terminate, export uses atomic replacement, and `WhatIf` suppresses writes. Live AD/CIM needs Windows and reachable services. Dot sourcing is inert; CLI discovery requires explicit `SearchBase` or `Server`.
 
 `etc/Get-GroupCNMember.ps1` exposes `Get-GroupCN -Array @('GroupA','GroupB')` with optional `Server`, `Credential`, and `OutputPath`. It uses the bundled library, escapes exact CN/SAM selectors, follows member DNs with a visited set per matched root, and caches repeated member reads within the call. Direct group/cycle edges and empty-group marker rows remain visible. CSV columns stay `group.DN,group.CN,member.SamAccountName,member.objectClass`: the first is the containing group's DN and the second the requested root label. Multiple matching roots are retained. Lookup/no-match/conversion/write failures prevent partial output/export; `WhatIf` suppresses writes. Dot sourcing is inert and CLI selectors are explicit.

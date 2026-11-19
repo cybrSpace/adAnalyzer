@@ -330,7 +330,9 @@ try {
             'Partial',
             'Failures',
             'Empty',
-            'Cli')) {
+            'Cli',
+            'Project',
+            'Direct')) {
         Invoke-AuxiliaryTest ('local-admin inventory contract: ' + $mode) {
             $output = @(& (Get-Process `
                         -Id $PID).Path `
