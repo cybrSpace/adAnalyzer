@@ -2463,189 +2463,202 @@ function Test-ADAnalyzerOperatingSystemProfile {
         [datetimeoffset]$ReferenceTime = [datetimeoffset]::UtcNow
 
     )
-    $name = [string](Get-ADAnalyzerDirectoryField $Object 'OperatingSystem')
-    $version = [string](Get-ADAnalyzerDirectoryField $Object 'OperatingSystemVersion')
-    $build = Get-ADAnalyzerDirectoryField $Object 'BuildNumber'
-    if ($null -eq $build -and $version -match '\((\d+)\)') {
-        $parsedBuild = $null
-        if ([Management.Automation.LanguagePrimitives]::TryConvertTo($Matches[1], [long], [ref]$parsedBuild)) {
-            $build = $parsedBuild
-        }
-    }
-    if ($null -eq $build) {
-        $parsed = $null
-        if ([version]::TryParse($version, [ref]$parsed) -and $parsed.Build -ge 0) {
-            $build = $parsed.Build
-        }
-    }
-    $esu = Get-ADAnalyzerDirectoryField $Object 'EsuStatus'
-    $esuUntil = Get-ADAnalyzerDirectoryField $Object 'EsuValidUntil'
-    $results = [System.Collections.Generic.List[object]]::new()
-    foreach ($entry in $Entries) {
-        $nameOnly = $entry -is [string]
-        $pattern = if ($nameOnly) {
-            $entry
-        }
-        else {
-            [string](Get-ADAnalyzerDirectoryField $entry 'Name')
-        }
-        if (-not $nameOnly -and -not $pattern) {
-            $results.Add([pscustomobject]@{
-                    Status = 'Invalid'
-                    Reason = 'OS profile entry requires Name'
-                    Entry = $entry
-                })
-            continue
-        }
-        try {
-            if ($name -notlike $pattern) {
-                continue
-            }
-        }
-        catch {
-            $results.Add([pscustomobject]@{
-                    Status = 'Invalid'
-                    Reason = 'Invalid OS Name wildcard'
-                    Entry = $entry
-                })
-            continue
-        }
-        if ($nameOnly) {
-            $results.Add([pscustomobject]@{
-                    Status = 'Unknown'
-                    Reason = 'A name-only allowlist is not lifecycle/build support evidence'
-                    Entry = $entry
-                })
-            continue
-        }
-        $versionPattern = Get-ADAnalyzerDirectoryField $entry 'VersionPattern'
-        $minimum = Get-ADAnalyzerDirectoryField $entry 'MinimumBuild'
-        $maximum = Get-ADAnalyzerDirectoryField $entry 'MaximumBuild'
-        $until = Get-ADAnalyzerDirectoryField $entry 'SupportedUntil'
-        $requireEsu = Get-ADAnalyzerDirectoryField $entry 'RequireEsu'
-        $status = 'Pass'
-        $reason = 'Explicit profile version/build/lifecycle metadata matches'
-        $deadline = [datetimeoffset]::MinValue
-        $deadlineValid = $null -ne $until -and [datetimeoffset]::TryParse([string]$until, [ref]$deadline)
-        if ($null -ne $until -and -not $deadlineValid) {
-            $status = 'Invalid'
-            $reason = 'Invalid SupportedUntil timestamp'
-        }
-        elseif ($versionPattern -and $version -and $null -ne $build) {
-            try {
-                if ($version -notmatch [string]$versionPattern) {
-                    $status = 'Fail'
-                    $reason = 'Operating-system version differs from the explicit profile'
-                }
-            }
-            catch {
-                $status = 'Invalid'
-                $reason = 'Invalid OS VersionPattern'
-            }
-        }
-        $buildAvailable = $null -ne $build
-        $invalidObservedBuild = $false
-        if ($status -eq 'Pass' -and $buildAvailable -and ($null -ne $minimum -or $null -ne $maximum)) {
-            $number = $null
-            $minimumBuild = $null
-            $maximumBuild = $null
-            if (-not [Management.Automation.LanguagePrimitives]::TryConvertTo($build, [long], [ref]$number)) {
-                $buildAvailable = $false
-                $invalidObservedBuild = $true
-            }
-            elseif ($null -ne $minimum -and
-                -not [Management.Automation.LanguagePrimitives]::TryConvertTo($minimum, [long], [ref]$minimumBuild)) {
-                $status = 'Invalid'
-                $reason = 'Invalid OS MinimumBuild'
-            }
-            elseif ($null -ne $minimum -and $number -lt $minimumBuild) {
-                $status = 'Fail'
-                $reason = 'Build lies outside the configured range'
-            }
-            elseif ($null -ne $maximum -and
-                -not [Management.Automation.LanguagePrimitives]::TryConvertTo($maximum, [long], [ref]$maximumBuild)) {
-                $status = 'Invalid'
-                $reason = 'Invalid OS MaximumBuild'
-            }
-            elseif ($null -ne $maximum -and $number -gt $maximumBuild) {
-                $status = 'Fail'
-                $reason = 'Build lies outside the configured range'
-            }
-        }
-        if ($status -eq 'Pass' -and $deadlineValid -and $deadline -lt $ReferenceTime -and $requireEsu -eq $false) {
-            $status = 'Fail'
-            $reason = 'Configured support lifecycle has expired'
-        }
-        if ($status -eq 'Pass' -and
-            (-not $buildAvailable -or
-            $null -eq $minimum -or
-            -not $versionPattern -or
-            -not $version -or
-            -not $deadlineValid -or
-            $null -eq $requireEsu)) {
-            $status = 'Unknown'
-            $reason = if ($invalidObservedBuild) {
-                'Observed OS build number is invalid'
-            }
-            else {
-                'Build, version, lifecycle or ESU applicability metadata is missing'
-            }
-        }
-        if ($status -eq 'Pass' -and $requireEsu) {
-            $expiry = [datetimeoffset]::MinValue
-            if ($null -eq $esu -or $null -eq $esuUntil -or -not [datetimeoffset]::TryParse([string]$esuUntil, [ref]$expiry)) {
-                $status = 'Unknown'
-                $reason = 'Required ESU enrollment/expiry evidence is missing'
-            }
-            elseif ($esu -ne 'Active' -or $expiry -lt $ReferenceTime) {
-                $status = 'Fail'
-                $reason = 'Required ESU evidence is inactive or expired'
-            }
-        }
-        $results.Add([pscustomobject]@{
-                Status = $status
-                Reason = $reason
-                Entry = $entry
-            })
-    }
-    $status = if (-not $Entries.Count) {
-        'NotConfigured'
-    }
-    elseif (-not $name) {
-        'Unknown'
-    }
-    elseif (@($results | Where-Object Status -eq 'Invalid').Count) {
-        'Invalid'
-    }
-    elseif (@($results | Where-Object Status -eq 'Pass').Count) {
-        'Pass'
-    }
-    elseif (@($results | Where-Object Status -eq 'Unknown').Count) {
-        'Unknown'
-    }
-    else {
-        'Fail'
-    }
-    [pscustomobject]@{
-        Status = $status
-        Observed = [pscustomobject]@{
-            Name = $name
-            Version = $version
-            Build = $build
-            EsuStatus = $esu
-            EsuValidUntil = $esuUntil
-        }
-        Expected = $Entries
-        Evidence = @{
-            Matches = $results.ToArray()
-            ReferenceTime = $ReferenceTime.ToString('o')
-            LifecycleInferred = $false
-        }
-    }
+    $evaluator = [ADAnalyzerDirectoryPolicyEvaluator]::new()
+    return $evaluator.EvaluateOperatingSystem($Object, $Entries, $ReferenceTime)
 }
 
 class ADAnalyzerDirectoryPolicyEvaluator {
     ADAnalyzerDirectoryPolicyEvaluator() {
+    }
+
+    [pscustomobject] EvaluateOperatingSystem([object]$Object, [object[]]$Entries) {
+        return $this.EvaluateOperatingSystem($Object, $Entries, [datetimeoffset]::UtcNow)
+    }
+
+    [pscustomobject] EvaluateOperatingSystem(
+        [object]$Object,
+        [object[]]$Entries,
+        [datetimeoffset]$ReferenceTime
+    ) {
+        $name = [string](Get-ADAnalyzerDirectoryField $Object 'OperatingSystem')
+        $version = [string](Get-ADAnalyzerDirectoryField $Object 'OperatingSystemVersion')
+        $build = Get-ADAnalyzerDirectoryField $Object 'BuildNumber'
+        if ($null -eq $build -and $version -match '\((\d+)\)') {
+            $parsedBuild = $null
+            if ([Management.Automation.LanguagePrimitives]::TryConvertTo($Matches[1], [long], [ref]$parsedBuild)) {
+                $build = $parsedBuild
+            }
+        }
+        if ($null -eq $build) {
+            $parsed = $null
+            if ([version]::TryParse($version, [ref]$parsed) -and $parsed.Build -ge 0) {
+                $build = $parsed.Build
+            }
+        }
+        $esu = Get-ADAnalyzerDirectoryField $Object 'EsuStatus'
+        $esuUntil = Get-ADAnalyzerDirectoryField $Object 'EsuValidUntil'
+        $results = [System.Collections.Generic.List[object]]::new()
+        foreach ($entry in $Entries) {
+            $nameOnly = $entry -is [string]
+            $pattern = if ($nameOnly) {
+                $entry
+            }
+            else {
+                [string](Get-ADAnalyzerDirectoryField $entry 'Name')
+            }
+            if (-not $nameOnly -and -not $pattern) {
+                $results.Add([pscustomobject]@{
+                        Status = 'Invalid'
+                        Reason = 'OS profile entry requires Name'
+                        Entry = $entry
+                    })
+                continue
+            }
+            try {
+                if ($name -notlike $pattern) {
+                    continue
+                }
+            }
+            catch {
+                $results.Add([pscustomobject]@{
+                        Status = 'Invalid'
+                        Reason = 'Invalid OS Name wildcard'
+                        Entry = $entry
+                    })
+                continue
+            }
+            if ($nameOnly) {
+                $results.Add([pscustomobject]@{
+                        Status = 'Unknown'
+                        Reason = 'A name-only allowlist is not lifecycle/build support evidence'
+                        Entry = $entry
+                    })
+                continue
+            }
+            $versionPattern = Get-ADAnalyzerDirectoryField $entry 'VersionPattern'
+            $minimum = Get-ADAnalyzerDirectoryField $entry 'MinimumBuild'
+            $maximum = Get-ADAnalyzerDirectoryField $entry 'MaximumBuild'
+            $until = Get-ADAnalyzerDirectoryField $entry 'SupportedUntil'
+            $requireEsu = Get-ADAnalyzerDirectoryField $entry 'RequireEsu'
+            $status = 'Pass'
+            $reason = 'Explicit profile version/build/lifecycle metadata matches'
+            $deadline = [datetimeoffset]::MinValue
+            $deadlineValid = $null -ne $until -and [datetimeoffset]::TryParse([string]$until, [ref]$deadline)
+            if ($null -ne $until -and -not $deadlineValid) {
+                $status = 'Invalid'
+                $reason = 'Invalid SupportedUntil timestamp'
+            }
+            elseif ($versionPattern -and $version -and $null -ne $build) {
+                try {
+                    if ($version -notmatch [string]$versionPattern) {
+                        $status = 'Fail'
+                        $reason = 'Operating-system version differs from the explicit profile'
+                    }
+                }
+                catch {
+                    $status = 'Invalid'
+                    $reason = 'Invalid OS VersionPattern'
+                }
+            }
+            $buildAvailable = $null -ne $build
+            $invalidObservedBuild = $false
+            if ($status -eq 'Pass' -and $buildAvailable -and ($null -ne $minimum -or $null -ne $maximum)) {
+                $number = $null
+                $minimumBuild = $null
+                $maximumBuild = $null
+                if (-not [Management.Automation.LanguagePrimitives]::TryConvertTo($build, [long], [ref]$number)) {
+                    $buildAvailable = $false
+                    $invalidObservedBuild = $true
+                }
+                elseif ($null -ne $minimum -and
+                    -not [Management.Automation.LanguagePrimitives]::TryConvertTo($minimum, [long], [ref]$minimumBuild)) {
+                    $status = 'Invalid'
+                    $reason = 'Invalid OS MinimumBuild'
+                }
+                elseif ($null -ne $minimum -and $number -lt $minimumBuild) {
+                    $status = 'Fail'
+                    $reason = 'Build lies outside the configured range'
+                }
+                elseif ($null -ne $maximum -and
+                    -not [Management.Automation.LanguagePrimitives]::TryConvertTo($maximum, [long], [ref]$maximumBuild)) {
+                    $status = 'Invalid'
+                    $reason = 'Invalid OS MaximumBuild'
+                }
+                elseif ($null -ne $maximum -and $number -gt $maximumBuild) {
+                    $status = 'Fail'
+                    $reason = 'Build lies outside the configured range'
+                }
+            }
+            if ($status -eq 'Pass' -and $deadlineValid -and $deadline -lt $ReferenceTime -and $requireEsu -eq $false) {
+                $status = 'Fail'
+                $reason = 'Configured support lifecycle has expired'
+            }
+            if ($status -eq 'Pass' -and
+                (-not $buildAvailable -or
+                $null -eq $minimum -or
+                -not $versionPattern -or
+                -not $version -or
+                -not $deadlineValid -or
+                $null -eq $requireEsu)) {
+                $status = 'Unknown'
+                $reason = if ($invalidObservedBuild) {
+                    'Observed OS build number is invalid'
+                }
+                else {
+                    'Build, version, lifecycle or ESU applicability metadata is missing'
+                }
+            }
+            if ($status -eq 'Pass' -and $requireEsu) {
+                $expiry = [datetimeoffset]::MinValue
+                if ($null -eq $esu -or $null -eq $esuUntil -or -not [datetimeoffset]::TryParse([string]$esuUntil, [ref]$expiry)) {
+                    $status = 'Unknown'
+                    $reason = 'Required ESU enrollment/expiry evidence is missing'
+                }
+                elseif ($esu -ne 'Active' -or $expiry -lt $ReferenceTime) {
+                    $status = 'Fail'
+                    $reason = 'Required ESU evidence is inactive or expired'
+                }
+            }
+            $results.Add([pscustomobject]@{
+                    Status = $status
+                    Reason = $reason
+                    Entry = $entry
+                })
+        }
+        $status = if (-not $Entries.Count) {
+            'NotConfigured'
+        }
+        elseif (-not $name) {
+            'Unknown'
+        }
+        elseif (@($results | Where-Object Status -eq 'Invalid').Count) {
+            'Invalid'
+        }
+        elseif (@($results | Where-Object Status -eq 'Pass').Count) {
+            'Pass'
+        }
+        elseif (@($results | Where-Object Status -eq 'Unknown').Count) {
+            'Unknown'
+        }
+        else {
+            'Fail'
+        }
+        return [pscustomobject]@{
+            Status = $status
+            Observed = [pscustomobject]@{
+                Name = $name
+                Version = $version
+                Build = $build
+                EsuStatus = $esu
+                EsuValidUntil = $esuUntil
+            }
+            Expected = $Entries
+            Evidence = @{
+                Matches = $results.ToArray()
+                ReferenceTime = $ReferenceTime.ToString('o')
+                LifecycleInferred = $false
+            }
+        }
     }
 
     [object[]] Evaluate([object]$Data, [hashtable]$Profile) {
@@ -3227,9 +3240,10 @@ class ADAnalyzerDirectoryPolicyEvaluator {
                     Object = $object
                     Applicability = 'Configured'
                 })
-                $osResult = Test-ADAnalyzerOperatingSystemProfile `
-                    -Object $object `
-                    -Entries @(Get-ADAnalyzerDirectoryField $policy 'SupportedOperatingSystems' @())
+                $osResult = $this.EvaluateOperatingSystem(
+                    $object,
+                    @(Get-ADAnalyzerDirectoryField $policy 'SupportedOperatingSystems' @())
+                )
                 $this.Emit($Evaluation, @{
                     RuleId = 'COMPUTER.OS_POLICY'
                     Status = $osResult.Status

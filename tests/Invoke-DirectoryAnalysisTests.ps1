@@ -852,16 +852,6 @@ function New-ResultantPolicyFixture {
 Invoke-DirectoryTest 'positive computed PSO metadata reuses a complete shared policy instead of per-user queries' {
     $saved = $script:User
     $script:IncludePsoSchema = $true
-    $script:ParityOperatingSystemPolicy = (Get-Command Test-ADAnalyzerOperatingSystemProfile).ScriptBlock
-
-    function script:Test-ADAnalyzerOperatingSystemProfile {
-        param(
-            $Object,
-            $Entries,
-            $ReferenceTime
-
-        ) & $script:ParityOperatingSystemPolicy -Object $Object -Entries $Entries -ReferenceTime ([datetimeoffset]'2026-11-13T00:00:00Z')
-    }
     . (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')
     try {
         $policy = New-ResultantPolicyFixture
@@ -901,13 +891,35 @@ Invoke-DirectoryTest 'positive computed PSO metadata reuses a complete shared po
             $baseline = Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile $profile
             $baselineCalls = @($script:Queries | Where-Object Command -eq Get-ADUserResultantPasswordPolicy).Count
             Assert-DirectoryEqual 100 $baselineCalls
+            $comparisonStarted = [datetimeoffset]::UtcNow
             $a = @(Test-ADAnalyzerDirectoryPolicy -Data $cached -Profile $profile | Sort-Object CheckId)
             $b = @(Test-ADAnalyzerDirectoryPolicy -Data $baseline -Profile $profile | Sort-Object CheckId)
+            $comparisonFinished = [datetimeoffset]::UtcNow
             Assert-DirectoryEqual $a.Count $b.Count
+            Assert-DirectoryEqual 1 @($a | Where-Object RuleId -CEQ 'COMPUTER.OS_POLICY').Count
             for ($index = 0; $index -lt $a.Count; $index++) {
                 Assert-DirectoryEqual $a[$index].CheckId $b[$index].CheckId
-                $left = ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerComparableValue $a[$index]) -Depth 50 -Compress
-                $right = ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerComparableValue $b[$index]) -Depth 50 -Compress
+                $leftCopy = ConvertTo-ADAnalyzerComparableValue $a[$index]
+                $rightCopy = ConvertTo-ADAnalyzerComparableValue $b[$index]
+                if ($a[$index].RuleId -ceq 'COMPUTER.OS_POLICY') {
+                    foreach ($comparisonCopy in @($leftCopy, $rightCopy)) {
+                        $reference = $comparisonCopy.Evidence.ReferenceTime
+                        $parsed = [datetimeoffset]::MinValue
+                        Assert-DirectoryTrue (
+                            $reference -is [string] -and [datetimeoffset]::TryParseExact(
+                                $reference,
+                                'o',
+                                [Globalization.CultureInfo]::InvariantCulture,
+                                [Globalization.DateTimeStyles]::None,
+                                [ref]$parsed
+                            ) -and $parsed.Offset -eq [timespan]::Zero -and
+                            $parsed -ge $comparisonStarted -and $parsed -le $comparisonFinished
+                        ) 'OS reference time must be a UTC round-trip timestamp from this evaluation.'
+                        $comparisonCopy.Evidence.ReferenceTime = '<evaluation time>'
+                    }
+                }
+                $left = ConvertTo-Json -InputObject $leftCopy -Depth 50 -Compress
+                $right = ConvertTo-Json -InputObject $rightCopy -Depth 50 -Compress
                 Assert-DirectoryTrue ($left -ceq $right) ('Cache changed check ' + $a[$index].RuleId + ' for ' + $a[$index].Target)
             }
             foreach ($row in $script:User) {
@@ -919,7 +931,6 @@ Invoke-DirectoryTest 'positive computed PSO metadata reuses a complete shared po
         }
     }
     finally {
-        Set-Item Function:script:Test-ADAnalyzerOperatingSystemProfile $script:ParityOperatingSystemPolicy
         $script:User = $saved
         $script:IncludePsoSchema = $false
         $script:FineGrainedFixture = @()
@@ -2705,7 +2716,8 @@ foreach ($case in @(
         'Secrets',
         'Errors',
         'Streaming',
-        'Order'
+        'Order',
+        'OperatingSystem'
     )) {
     Invoke-DirectoryTest ('constructor directory policy: ' + $case) {
         $executable = (Get-Process -Id $PID).Path
@@ -2718,7 +2730,8 @@ foreach ($case in @(
             }
             throw ($output -join [Environment]::NewLine)
         }
-        Assert-DirectoryTrue (($output -join ' ') -like ('*PASS directory policy class ' + $case + '*')) 'Fresh process did not execute the selected case.'
+        $marker = 'PASS directory policy class ' + $case
+        Assert-DirectoryEqual 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
     }
 }
 

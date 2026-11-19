@@ -1,24 +1,12 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('RecordBaseline', 'Construction', 'Parity', 'PartialProfile', 'Types', 'Isolation', 'Secrets', 'Errors', 'Streaming', 'Order')]
+    [ValidateSet('RecordBaseline', 'Construction', 'Parity', 'PartialProfile', 'Types', 'Isolation', 'Secrets', 'Errors', 'Streaming', 'Order', 'OperatingSystem')]
     [string]$Case = 'Construction'
 )
 
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $repositoryRoot 'bin/ADAnalyzer.ps1')
-
-# Run the real OS evaluator with a controlled clock in both implementations.
-$script:OperatingSystemImplementation = (Get-Command Test-ADAnalyzerOperatingSystemProfile).ScriptBlock
-function Test-ADAnalyzerOperatingSystemProfile {
-    param(
-        $Object,
-        [object[]]$Entries = @(),
-        [datetimeoffset]$ReferenceTime = [datetimeoffset]'2026-01-01T00:00:00Z'
-    )
-
-    & $script:OperatingSystemImplementation -Object $Object -Entries $Entries -ReferenceTime $ReferenceTime
-}
 
 function Assert-Policy($Condition, [string]$Message) {
     if (-not $Condition) {
@@ -59,6 +47,34 @@ function ConvertTo-Canonical($Value) {
 
 function Get-CanonicalJson($Value) {
     ConvertTo-Json -InputObject (ConvertTo-Canonical $Value) -Depth 100 -Compress
+}
+
+function Get-PolicyUtcReferenceTime($Value) {
+    $referenceTime = [datetimeoffset]::MinValue
+    Assert-Policy (
+        $Value -is [string] -and
+        [datetimeoffset]::TryParseExact(
+            $Value,
+            'o',
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::None,
+            [ref]$referenceTime
+        ) -and
+        $referenceTime.Offset -eq [timespan]::Zero -and
+        $Value -ceq $referenceTime.ToString('o')
+    ) 'Operating-system reference time is not canonical round-trip UTC.'
+    return $referenceTime
+}
+
+function Get-GoldenPolicyJson([object[]]$Checks) {
+    $comparison = ConvertTo-Canonical $Checks
+    foreach ($check in $comparison) {
+        if ($check.RuleId -eq 'COMPUTER.OS_POLICY') {
+            $null = Get-PolicyUtcReferenceTime $check.Evidence.ReferenceTime
+            $check.Evidence.ReferenceTime = '2026-01-01T00:00:00.0000000+00:00'
+        }
+    }
+    return (ConvertTo-Json -InputObject $comparison -Depth 100 -Compress)
 }
 
 function Assert-CanonicalEqual([string]$Expected, [string]$Actual, [string]$Message) {
@@ -307,7 +323,7 @@ if ($Case -eq 'RecordBaseline') {
     }
     foreach ($kind in @('Empty', 'Mixed')) {
         $context = New-PolicyContext -Mixed:($kind -eq 'Mixed')
-        $baseline[$kind] = Get-CanonicalJson @(Test-ADAnalyzerDirectoryPolicy -Data $context.Data -Profile $context.Profile)
+        $baseline[$kind] = Get-GoldenPolicyJson @(Test-ADAnalyzerDirectoryPolicy -Data $context.Data -Profile $context.Profile)
     }
     foreach ($kind in @('Numeric', 'Factory')) {
         foreach ($preference in @('Continue', 'Stop')) {
@@ -379,8 +395,8 @@ switch ($Case) {
             $evaluator = [ADAnalyzerDirectoryPolicyEvaluator]::new()
             $direct = $evaluator.Evaluate($context.Data, $context.Profile)
             $command = @(Test-ADAnalyzerDirectoryPolicy -Data $context.Data -Profile $context.Profile)
-            Assert-CanonicalEqual $baseline.$kind (Get-CanonicalJson $direct) ($kind + ' direct results differ from the original baseline.')
-            Assert-CanonicalEqual $baseline.$kind (Get-CanonicalJson $command) ($kind + ' command results differ from the original baseline.')
+            Assert-CanonicalEqual $baseline.$kind (Get-GoldenPolicyJson $direct) ($kind + ' direct results differ from the original baseline.')
+            Assert-CanonicalEqual $baseline.$kind (Get-GoldenPolicyJson $command) ($kind + ' command results differ from the original baseline.')
             Assert-Policy ((Get-CanonicalJson $context) -ceq $before) 'Evaluation mutated input data or profile.'
         }
     }
@@ -437,7 +453,7 @@ switch ($Case) {
         $first[0].Status = 'Invalid'
         for ($i = 0; $i -lt 3; $i++) {
             $again = $evaluator.Evaluate($context.Data, $context.Profile)
-            Assert-CanonicalEqual $baseline.Mixed (Get-CanonicalJson $again) 'Repeated evaluation retained result mutation or duplicate checks.'
+            Assert-CanonicalEqual $baseline.Mixed (Get-GoldenPolicyJson $again) 'Repeated evaluation retained result mutation or duplicate checks.'
         }
         $other = [ADAnalyzerDirectoryPolicyEvaluator]::new()
         $empty = New-PolicyContext
@@ -518,6 +534,103 @@ switch ($Case) {
         Assert-Policy ($spn -gt 0 -and $trust -gt $spn -and $acl -gt $trust) 'Account/SPN/trust/ACL order changed.'
         Assert-Policy ($password -gt $acl -and $hostEvidence -gt $password) 'Password/host evidence order changed.'
         Assert-Policy ($rules[0] -eq 'DOMAIN.MACHINE_ACCOUNT_QUOTA' -and $rules[-1] -eq 'HOST.OBSERVATIONS') 'First or last policy phase changed.'
+    }
+
+    'OperatingSystem' {
+        $evaluator = [ADAnalyzerDirectoryPolicyEvaluator]::new()
+        $clock = [datetimeoffset]'2041-08-11T05:00:00+02:00'
+        $computer = [pscustomobject]@{
+            OperatingSystem = 'Fixture OS'
+            OperatingSystemVersion = '10.0 (20348)'
+            BuildNumber = $null
+            EsuStatus = 'Active'
+            EsuValidUntil = $clock.UtcDateTime.ToString('o')
+        }
+        $rule = @{
+            Name = 'Fixture OS'
+            VersionPattern = '^10\.0'
+            MinimumBuild = 20348
+            MaximumBuild = 20348
+            SupportedUntil = $clock.UtcDateTime.ToString('o')
+            RequireEsu = $false
+        }
+        $entries = [object[]]@('Unmatched*', $rule)
+        $beforeComputer = Get-CanonicalJson $computer
+
+        foreach ($requireEsu in @($false, $true)) {
+            $rule.RequireEsu = $requireEsu
+            if ($requireEsu) {
+                $rule.SupportedUntil = $clock.UtcDateTime.AddDays(-1).ToString('o')
+                $expiredReason = 'Required ESU evidence is inactive or expired'
+            }
+            else {
+                $expiredReason = 'Configured support lifecycle has expired'
+            }
+            $beforeEntries = Get-CanonicalJson $entries
+            $atDeadline = $evaluator.EvaluateOperatingSystem($computer, $entries, $clock)
+            Assert-Policy (
+                $atDeadline.Status -ceq 'Pass' -and
+                $atDeadline.Observed.Build -is [long] -and $atDeadline.Observed.Build -eq 20348L -and
+                $atDeadline.Evidence.ReferenceTime -ceq $clock.ToString('o') -and
+                $atDeadline.Evidence.LifecycleInferred -is [bool] -and -not $atDeadline.Evidence.LifecycleInferred
+            ) 'Explicit OS clock, build provenance, or deadline equality changed.'
+            Assert-Policy (
+                [object]::ReferenceEquals($entries, $atDeadline.Expected) -and
+                $atDeadline.Evidence.Matches -is [object[]] -and $atDeadline.Evidence.Matches.Count -eq 1 -and
+                [object]::ReferenceEquals($rule, $atDeadline.Evidence.Matches[0].Entry)
+            ) 'OS lifecycle evaluation changed the identity or cardinality of configured observations.'
+
+            $afterDeadline = $evaluator.EvaluateOperatingSystem($computer, $entries, $clock.AddTicks(1))
+            Assert-Policy (
+                $afterDeadline.Status -ceq 'Fail' -and $afterDeadline.Evidence.Matches[0].Reason -ceq $expiredReason
+            ) 'Elapsed lifecycle or ESU expiry did not fail immediately after the deadline.'
+
+            $command = @(Test-ADAnalyzerOperatingSystemProfile -Object $computer -Entries $entries -ReferenceTime $clock)
+            Assert-Policy ($command.Count -eq 1) 'OS compatibility adapter emitted an unexpected number of results.'
+            Assert-CanonicalEqual (Get-CanonicalJson $atDeadline) (Get-CanonicalJson $command[0]) 'Explicit OS compatibility result changed.'
+            Assert-Policy ((Get-CanonicalJson $entries) -ceq $beforeEntries) 'OS evaluation mutated its input entries.'
+        }
+        Assert-Policy ((Get-CanonicalJson $computer) -ceq $beforeComputer) 'OS evaluation mutated its input computer.'
+
+        $beforeDefault = [datetimeoffset]::UtcNow
+        $defaultDirect = $evaluator.EvaluateOperatingSystem($computer, [object[]]@())
+        $defaultAdapter = Test-ADAnalyzerOperatingSystemProfile -Object $computer
+        $afterDefault = [datetimeoffset]::UtcNow
+        foreach ($result in @($defaultDirect, $defaultAdapter)) {
+            $referenceTime = Get-PolicyUtcReferenceTime $result.Evidence.ReferenceTime
+            Assert-Policy (
+                $referenceTime -ge $beforeDefault -and $referenceTime -le $afterDefault -and
+                $result.Status -ceq 'NotConfigured' -and $result.Expected -is [object[]] -and
+                $result.Expected.Count -eq 0 -and $result.Evidence.Matches.Count -eq 0
+            ) 'Default OS clock or omitted entries changed.'
+        }
+
+        function Test-ADAnalyzerOperatingSystemProfile {
+            throw 'Composed directory policy called the legacy OS helper.'
+        }
+
+        $context = New-PolicyContext -Mixed
+        $context.Data.Objects[1] | Add-Member -NotePropertyMembers @{
+            OperatingSystem = $computer.OperatingSystem
+            OperatingSystemVersion = $computer.OperatingSystemVersion
+        }
+        $rule.RequireEsu = $false
+        $rule.SupportedUntil = [datetimeoffset]::UtcNow.AddYears(1).ToString('o')
+        $context.Profile.Policy.SupportedOperatingSystems = $entries
+        $beforeEvaluation = Get-CanonicalJson $context
+        $directChecks = $evaluator.Evaluate($context.Data, $context.Profile)
+        $commandChecks = @(Test-ADAnalyzerDirectoryPolicy -Data $context.Data -Profile $context.Profile)
+        foreach ($checks in @($directChecks, $commandChecks)) {
+            $index = [array]::IndexOf([string[]]$checks.RuleId, 'COMPUTER.OS_POLICY')
+            Assert-Policy ($index -gt 0 -and $checks[$index - 1].RuleId -ceq 'LAPS.ROTATION_METADATA') 'Composed OS check order changed.'
+            $osCheck = $checks[$index]
+            Assert-Policy (
+                $osCheck.Status -ceq 'Pass' -and $osCheck.Target -ceq 'CN=Computer' -and
+                $osCheck.Observed.Build -is [long] -and $osCheck.Observed.Build -eq 20348L
+            ) 'Composed OS check no longer contains the expected lifecycle result.'
+        }
+        Assert-CanonicalEqual (Get-GoldenPolicyJson $directChecks) (Get-GoldenPolicyJson $commandChecks) 'Composed OS policy command and direct result differ.'
+        Assert-Policy ((Get-CanonicalJson $context) -ceq $beforeEvaluation) 'Composed OS evaluation mutated input data or policy.'
     }
 }
 
