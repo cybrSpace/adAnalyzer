@@ -321,7 +321,9 @@ class ADAnalyzerEvidenceProjector {
                                 @(([Collections.IDictionary].GetProperty('Keys')).GetValue($InputObject, $null))
                             }
                             else {
-                                @($InputObject.PSObject.Properties.Name)
+                                foreach ($property in $InputObject.PSObject.Properties) {
+                                    $property.Name
+                                }
                             }
                             foreach ($name in $properties) {
                                 $null = $State.Properties.Add(@{
@@ -758,15 +760,16 @@ function ConvertTo-ADAnalyzerAssessmentHtml {
     $data = Get-ADAnalyzerOperationValue $Assessment @('Data')
     $directory = Get-ADAnalyzerOperationValue $data @('Directory')
     $coverage = Get-ADAnalyzerOperationValue $directory @('Coverage') (Get-ADAnalyzerOperationValue $Assessment @('Coverage'))
-    $names = if ($coverage -is [Collections.IDictionary]) {
-        @(([Collections.IDictionary].GetProperty('Keys')).GetValue($coverage, $null))
-    }
-    elseif ($coverage) {
-        @($coverage.PSObject.Properties.Name)
-    }
-    else {
-        @()
-    }
+    $names = @(
+        if ($coverage -is [Collections.IDictionary]) {
+            ([Collections.IDictionary].GetProperty('Keys')).GetValue($coverage, $null)
+        }
+        elseif ($coverage) {
+            foreach ($property in $coverage.PSObject.Properties) {
+                $property.Name
+            }
+        }
+    )
     foreach ($name in @($names | Sort-Object)) {
         $null = $html.Append('<tr><td>' + [Net.WebUtility]::HtmlEncode([string]$name) + '</td><td>' + (ConvertTo-ADAnalyzerOperationHtmlValue (Get-ADAnalyzerOperationValue $coverage @([string]$name))) + '</td></tr>')
     }

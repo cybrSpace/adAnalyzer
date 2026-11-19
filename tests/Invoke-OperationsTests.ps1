@@ -108,6 +108,69 @@ function Invoke-Test([string]$Name, [scriptblock]$Body) {
         Write-Host "FAIL $Name : $_"
     }
 }
+
+function Assert-AssessmentCoverageExport {
+    param(
+        [string]$Name,
+        [object]$Assessment,
+        [string[]]$ExpectedRows = @()
+    )
+
+    $expectedCoverage = if ($ExpectedRows.Count -eq 0) {
+        '<tr><td colspan="2" class="muted">Coverage was not recorded.</td></tr>'
+    }
+    else {
+        $ExpectedRows -join ''
+    }
+    $reference = @{}
+    Set-StrictMode -Off
+    foreach ($mode in 'Off', '1.0', '2.0', 'Latest') {
+        if ($mode -ne 'Off') {
+            Set-StrictMode -Version $mode
+        }
+
+        $caseDescription = "$Name with StrictMode $mode"
+        $directory = Join-Path $script:Temporary ($Name + '-' + $mode)
+        $prefix = Join-Path $directory 'assessment'
+        $standalone = Join-Path $directory 'standalone.html'
+        $exportParameters = @{
+            Assessment = $Assessment
+            Confirm = $false
+            ErrorAction = 'Stop'
+        }
+
+        $paths = @(Export-ADAnalyzerAssessment @exportParameters -Path $prefix -Format All)
+        $extensions = @('.json', '.html', '.csv')
+        Assert-Equal $extensions.Count $paths.Count
+        for ($index = 0; $index -lt $extensions.Count; $index++) {
+            $extension = $extensions[$index]
+            $path = $prefix + $extension
+            Assert-True ($paths[$index] -ceq $path) "$caseDescription emitted an unexpected path or order"
+            Assert-True ([IO.File]::Exists($path)) "$caseDescription did not write $extension"
+            $bytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($path))
+            if ($mode -eq 'Off') {
+                $reference[$extension] = $bytes
+            }
+            else {
+                Assert-True ($bytes -ceq $reference[$extension]) "$caseDescription changed $extension bytes"
+            }
+        }
+
+        $paths = @(Export-ADAnalyzerAssessment @exportParameters -Path $standalone -Format Html)
+        Assert-Equal 1 $paths.Count
+        Assert-True ($paths[0] -ceq $standalone) "$caseDescription emitted an unexpected standalone HTML path"
+        Assert-True ([IO.File]::Exists($standalone)) "$caseDescription did not write standalone HTML"
+        $bytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($standalone))
+        Assert-True ($bytes -ceq $reference['.html']) "$caseDescription changed standalone HTML bytes"
+
+        $html = [IO.File]::ReadAllText($standalone)
+        $coverage = [regex]::Match($html, '(?s)<h2>Collection coverage</h2>.*?<tbody>(.*?)</tbody>')
+        Assert-True $coverage.Success "$caseDescription is missing the coverage table"
+        Assert-True ($coverage.Groups[1].Value -ceq $expectedCoverage) "$caseDescription rendered unexpected coverage rows"
+        Assert-Equal 4 ([IO.Directory]::GetFiles($directory)).Count
+    }
+}
+
 Invoke-Test 'composite structs and typed pairs project nested secrets through every export' {
     Add-Type -TypeDefinition 'namespace ADAnalyzer.SafeStructFixture { public struct Evidence { public object Payload; } }'
     $marker = 'STRUCT_FIXTURE_SECRET'
@@ -436,6 +499,102 @@ try {
             $html -match '<th>Observed</th>' -and
             $html -match 'Collection coverage' -and
             $html -match 'View evidence') 'Readable report structure is missing'
+    }
+    Invoke-Test 'strict HTML export renders absent null and empty coverage' {
+        $fixtures = [ordered]@{
+            'coverage-absent' = @{
+                SchemaVersion = 1
+            }
+            'coverage-null' = @{
+                SchemaVersion = 1
+                Coverage = $null
+            }
+            'coverage-empty-dictionary' = @{
+                SchemaVersion = 1
+                Coverage = @{}
+            }
+            'coverage-empty-record' = @{
+                SchemaVersion = 1
+                Coverage = [pscustomobject]@{}
+            }
+        }
+        foreach ($name in $fixtures.Keys) {
+            Assert-AssessmentCoverageExport -Name $name -Assessment $fixtures[$name]
+        }
+    }
+    Invoke-Test 'strict HTML export preserves singleton coverage labels and nested precedence' {
+        $escaped = @{
+            SchemaVersion = 1
+            Coverage = @{
+                'Policy <A> & logs' = 'Read & verified'
+            }
+        }
+        Assert-AssessmentCoverageExport -Name 'coverage-escaped' -Assessment $escaped -ExpectedRows @(
+            '<tr><td>Policy &lt;A&gt; &amp; logs</td><td>Read &amp; verified</td></tr>'
+        )
+
+        $literalCount = @{
+            SchemaVersion = 1
+            Coverage = [pscustomobject]@{
+                Count = 0
+            }
+        }
+        Assert-AssessmentCoverageExport -Name 'coverage-count' -Assessment $literalCount -ExpectedRows @(
+            '<tr><td>Count</td><td>0</td></tr>'
+        )
+
+        $nested = @{
+            SchemaVersion = 1
+            Coverage = @{
+                Top = 'outer'
+                Other = 'outer'
+            }
+            Data = @{
+                Directory = @{
+                    Coverage = @{
+                        Nested = 'inner'
+                    }
+                }
+            }
+        }
+        Assert-AssessmentCoverageExport -Name 'coverage-nested' -Assessment $nested -ExpectedRows @(
+            '<tr><td>Nested</td><td>inner</td></tr>'
+        )
+    }
+    Invoke-Test 'strict HTML export retains sorted rows with multiple coverage labels' {
+        $assessment = @{
+            SchemaVersion = 1
+            Coverage = [ordered]@{
+                Zoo = 'Collected'
+                Keys = 'Verified'
+                Count = 0
+            }
+        }
+        Assert-AssessmentCoverageExport -Name 'coverage-multiple' -Assessment $assessment -ExpectedRows @(
+            '<tr><td>Count</td><td>0</td></tr>'
+            '<tr><td>Keys</td><td>Verified</td></tr>'
+            '<tr><td>Zoo</td><td>Collected</td></tr>'
+        )
+    }
+    Invoke-Test 'evidence projector preserves empty adapted records from strict callers' {
+        $projector = [ADAnalyzerEvidenceProjector]::new()
+        $empty = [pscustomobject]@{}
+        $source = [pscustomobject][ordered]@{
+            Empty = $empty
+            Visible = 'fixture'
+        }
+        foreach ($mode in '2.0', 'Latest') {
+            Set-StrictMode -Version $mode
+            $errorCount = $Error.Count
+            $flat = $projector.Project($empty)
+            $nested = $projector.Project($source)
+
+            Assert-True ($flat -is [pscustomobject]) "StrictMode $mode did not preserve the top-level record"
+            Assert-True ($nested.Empty -is [pscustomobject]) "StrictMode $mode did not preserve the nested record"
+            Assert-Equal '{}' (ConvertTo-Json -InputObject $flat -Compress)
+            Assert-Equal '{"Empty":{},"Visible":"fixture"}' (ConvertTo-Json -InputObject $nested -Compress)
+            Assert-Equal $errorCount $Error.Count
+        }
     }
     Invoke-Test 'tagged secret evidence becomes a boolean without hiding policy values' {
         $value = @{
