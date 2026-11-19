@@ -69,6 +69,21 @@ This is a file-based policy reader, not a GPMC HTML report generator or an ADMX 
 
 The prototype's `Format-WindowsServerException` uses local classification state and synchronizes both authentication-error categories against the shared attempt counter. The configured threshold is checked atomically with each increment; unknown diagnostics retain their input evidence.
 
+```powershell
+. .\bin\ADHostScanState.ps1
+$formatter = [ADAnalyzerHostScanState]::new()
+$attempts = [hashtable]::Synchronized(@{ attempt = 0 })
+$rules = [ordered]@{
+    denied = @{
+        msg = 'access denied'
+        value = @('Access is denied.')
+    }
+}
+$formatter.Format('Access is denied.', $rules, 3, $attempts)
+```
+
+`ADAnalyzerHostScanState` borrows the caller's rules and synchronized attempt table for one call. It checks each matching authentication category under the table's existing lock and throws when the limit is reached. The formatter retains no state and performs no host access. The native command loads this class inside its original worker scope.
+
 `etc/Get-LocalAdministrators.ps1` exposes local-only `Get-LocalAdministrators` (CLI: `-Invoke`). It resolves Administrators by its well-known SID and reads the local WinNT group, retaining the original eight fields plus canonical `memberSID`, `memberResolutionKind`, and `memberMessage`. `memberLocal` requires a valid account SID and an exact match to the actual machine's SAM authority; builtin, well-known, Entra, and other authorities have separate categories. Valid unresolved Entra SIDs are not invalid. `memberInvalid` is null when SID evidence is missing, and true only for a malformed SID. `memberLocalEnabled` is nullable: it is copied only for a local user whose exact SID is confirmed by local-account lookup. Individual metadata errors stay with their rows; enumeration and owned-entry cleanup failures terminate without partial results. Dot sourcing performs no collection. Live collection requires Windows; an unavailable local-account lookup leaves enabled state unknown.
 
 `etc/Get-MSSQLServers.ps1` exposes `Get-ADMSSQLServers` with optional `SearchBase`, `Server`, `Credential`, `OutputPath`, and `OperationTimeoutSeconds` (1–300, default 30 per CIM operation, not a global deadline). Its OS regex defaults to `Windows Server`. Discovery uses the bundled AD PSDrive by default (`DirectoryConnection=Direct` opts out), pins the resolved DC, and finishes drive cleanup before host probes. Each host owns a CIM session. The returned `Collection` retains `Export(path)` and the six existing columns: `computer.Status` means the service query succeeded; `service.Status` contains literal states such as `Running` or `Stopped`. A successful query with no SQL-named services has a blank-service row. Host failures and cleanup errors remain in `computer.Message`; cleanup-only failure preserves observed states. Discovery failures terminate, export uses atomic replacement, and `WhatIf` suppresses writes. Live AD/CIM needs Windows and reachable services. Dot sourcing is inert; CLI discovery requires explicit `SearchBase` or `Server`.

@@ -263,7 +263,7 @@ try {
             Assert-True (($output -join ' ') -match ('PASS user import ' + $mode)) 'User import child did not finish'
         }
     }
-    foreach ($mode in @('Known', 'Unknown', 'Limits', 'Concurrent', 'ConcurrentLimit')) {
+    foreach ($mode in @('Known', 'Unknown', 'Limits', 'Concurrent', 'ConcurrentLimit', 'Direct', 'ActualPool')) {
         Invoke-AuxiliaryTest ('formatter contract: ' + $mode) {
             $output = @(& (Get-Process `
                         -Id $PID).Path `

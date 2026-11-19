@@ -9,6 +9,7 @@ $constant = @{
 
     'module' = 'WindowsServerHPA'
     'HostGroupHelperPath' = (Join-Path $PSScriptRoot 'Get-ServerHPA.ps1')
+    'HostExceptionFormatterPath' = (Join-Path (Split-Path -Parent $PSScriptRoot) 'bin/ADHostScanState.ps1')
 
     'property' = @{
         'skip' = 3
@@ -89,76 +90,25 @@ function Format-WindowsServerException () {
         [Parameter(Mandatory = $true)]
         $value
     )
+    $formatterPath = [string]$constant['HostExceptionFormatterPath']
+    if ([string]::IsNullOrWhiteSpace($formatterPath) -or -not [IO.File]::Exists($formatterPath)) {
+        throw 'Host exception formatter dependency is unavailable.'
+    }
+    . $formatterPath
+    $formatter = [ADAnalyzerHostScanState]::new()
     $message = $null
     switch ($constant['error'].Keys) {
-
-        'bad.user' {
-
-            if ($value -match ('({0})' -f ($constant['error'][$_]['value'] -join '|'))) {
-
-                $syncRoot = $var.SyncRoot
-                [Threading.Monitor]::Enter($syncRoot)
-                try {
-                    $var['attempt']++
-                    $exceeded = $var['attempt'] -ge $constant['property']['limit']
-                }
-                finally {
-                    [Threading.Monitor]::Exit($syncRoot)
-                }
-
-                if ($exceeded) {
-
-                    throw 'exceeded invalid attempt limit'
-
-                    break
-                }
-                else {
-
-                    $message = $constant['error'][$_]['msg']
-                }
-            }
-        }
-        'locked' {
-
-            if ($value -match ('({0})' -f ($constant['error'][$_]['value'] -join '|'))) {
-
-                $syncRoot = $var.SyncRoot
-                [Threading.Monitor]::Enter($syncRoot)
-                try {
-                    $var['attempt']++
-                    $exceeded = $var['attempt'] -ge $constant['property']['limit']
-                }
-                finally {
-                    [Threading.Monitor]::Exit($syncRoot)
-                }
-
-                if ($exceeded) {
-
-                    throw 'exceeded invalid attempt limit'
-
-                    break
-                }
-                else {
-
-                    $message = $constant['error'][$_]['msg']
-                }
-            }
-        }
+        # Retain the native block around a terminal error for ErrorVariable capture.
         default {
-
-            if ($value -match ('({0})' -f ($constant['error'][$_]['value'] -join '|'))) {
-
+            if ($formatter.Matches($value, $constant['error'][$_]['value'])) {
+                if ($formatter.IsAttemptCategory($_) -and $formatter.RecordAttempt($var, $constant['property'])) {
+                    throw 'exceeded invalid attempt limit'
+                }
                 $message = $constant['error'][$_]['msg']
             }
         }
     }
-
-    if ([String]::IsNullOrEmpty($message)) {
-
-        $message = '{0} ({1})' -f 'unknown exception', $value
-    }
-
-    return '{0}({1})' -f 'server_exception', $message
+    return $formatter.Render($value, $message)
 }
 
 function Invoke-Cmdlet {
