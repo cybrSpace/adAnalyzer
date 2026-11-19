@@ -502,7 +502,7 @@ if((`$rows -join ',') -ne 'Display One,Display Two'){throw 'Explicit name CLI fa
         Assert-True (($output -join ' ') -match 'PASS computer administrator name wrapper') 'Name wrapper child did not finish'
     }
     foreach ($scriptName in @('Get-LocalGroup.ps1', 'Get-LocalGroup copy.ps1')) {
-        foreach ($mode in @('Inert', 'Success', 'Name', 'Pipeline', 'Failures', 'Validation', 'Cli')) {
+        foreach ($mode in @('Inert', 'Success', 'Name', 'Pipeline', 'Failures', 'Validation', 'Cli', 'Direct', 'Runspace')) {
             Invoke-AuxiliaryTest ('local group ownership contract: ' + $scriptName + ' ' + $mode) {
                 $output = @(& (Get-Process `
                             -Id $PID).Path `

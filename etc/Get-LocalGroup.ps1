@@ -5,6 +5,8 @@ param(
     [Alias('Credential')][pscredential]$CliCredential = [pscredential]::Empty
 )
 
+. (Join-Path -Path $PSScriptRoot -ChildPath '../bin/ADLocalGroupReader.ps1')
+
 function Get-LocalGroupMember {
     <# .SYNOPSIS Returns detached direct local Administrators membership. #>
     [CmdletBinding()]
@@ -16,6 +18,7 @@ function Get-LocalGroupMember {
 
     )
     begin {
+        $reader = [ADAnalyzerLocalGroupReader]::new()
         $frameworkLoaded = $false
         $getEnumerator = [Collections.IEnumerable].GetMethod('GetEnumerator')
         $moveNext = [Collections.IEnumerator].GetMethod('MoveNext')
@@ -27,7 +30,7 @@ function Get-LocalGroupMember {
             throw 'Specify at least one computer.'
         }
         foreach ($computer in $ComputerName) {
-            if ([string]::IsNullOrWhiteSpace($computer)) {
+            if ($reader.IsBlankComputer($computer)) {
                 throw 'Computer names must be nonempty strings.'
             }
         }
@@ -44,7 +47,7 @@ function Get-LocalGroupMember {
             $rows = [Collections.Generic.List[object]]::new()
             $cleanupErrors = [Collections.Generic.List[object]]::new()
             try {
-                if ($null -ne $Credential -and $Credential -ne [pscredential]::Empty) {
+                if ($reader.UsesCredential($Credential)) {
                     $context = [System.DirectoryServices.AccountManagement.PrincipalContext]::new([System.DirectoryServices.AccountManagement.ContextType]::Machine,
                         $computer,
                         $Credential.UserName,
@@ -91,18 +94,14 @@ function Get-LocalGroupMember {
                             $domain = $nameProperty.GetValue($memberContext, $null)
                         }
                         $sam = $samProperty.GetValue($member, $null)
-                        $row = [ordered]@{
-                            Computer = $computer
-                            Domain = $domain
-                            samaccountname = $sam
-                        }
+                        $row = $reader.NewRow($computer, $domain, $sam)
                         if ($IncludeName) {
                             $memberNameProperty = $memberType.GetProperty('Name')
                             if ($null -eq $memberNameProperty) {
                                 throw 'The member name getter is unavailable.'
                             }
                             $memberName = $memberNameProperty.GetValue($member, $null)
-                            if ([string]::IsNullOrEmpty([string]$memberName)) {
+                            if ($reader.IsMissingMemberName($memberName)) {
                                 throw 'The member name is unavailable.'
                             }
                             $row.Name = $memberName

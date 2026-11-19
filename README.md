@@ -103,6 +103,15 @@ $members = $inventory.Export(@('GroupA', 'GroupB'), '.\reports\membership.csv')
 
 The two `etc/Get-LocalGroup*.ps1` helpers expose pipeline-capable `Get-LocalGroupMember -ComputerName <hosts>` with optional `Credential`. They use the Windows framework and the well-known Administrators SID, preserving direct nested-group rows. Returned `Computer`, `Domain`, and `samaccountname` fields are detached; `Domain` is the associated principal context's name, not a verified account-domain classification. Each retrieved member, enumerator, result, group, and owned context is cleaned up before that host's rows are emitted. Borrowed member contexts are not disposed. Earlier completed hosts may already have emitted rows when a later host fails. Dot sourcing is inert, and CLI execution requires explicit computers.
 
+```powershell
+. .\etc\Get-LocalGroup.ps1
+$reader = [ADAnalyzerLocalGroupReader]::new()
+$members = $reader.Read(@('server1', 'server2'))
+$namedMembers = $reader.Read(@('server1'), [pscredential]::Empty, $true)
+```
+
+Either helper loads `ADAnalyzerLocalGroupReader` from the checkout. The constructor is inert. Pass an explicit computer list to `Read`. It uses the current Windows identity by default, accepts a trailing `PSCredential` for explicit authentication, and adds `Name` when the third argument is `$true`. The method returns detached rows in computer and enumeration order after all requested hosts complete and their resources close. A failure terminates the call before it returns any rows. Live reads use the built-in Windows principal framework without RSAT and require access to the selected hosts.
+
 The two `etc/Get-ServerHPA*.ps1` helpers expose `Get-ServerHPA -Computer <host> -Target <SAM-group-name>` with optional `Credential`. They use the Windows principal framework without RSAT, return detached `Computer`, `Name`, `SamAccountName`, `SID`, and `Description` fields, and dispose their group/context before returning. Principal methods and member enumeration are not part of the returned snapshot. Credential prompts and hardcoded startup targets are removed; dot sourcing is inert. Lookup/projection/cleanup failures remain terminating, with secondary cleanup evidence attached to the primary error.
 
 ```powershell
