@@ -98,7 +98,7 @@ $rows = $scan.Report()
 
 The new scan overload copies selectors, retains no credentials, and closes owned event records after projection. Query, projection, and cleanup failures terminate before a partial report returns. Optional CSV export happens only for an explicit path after collection; `WhatIf` collects without writes, and export failure emits no report rows. The legacy `Target.Scan(ArrayList, Hashtable, string)` overload retains its explicit credential prompt. Its arbitrary named EventData filters require PowerShell 6 or later and are rejected before prompting on 5.1; use the DateTime/PSCredential overload there. This follows the documented [named-data filter support](https://learn.microsoft.com/en-us/powershell/scripting/samples/creating-get-winevent-queries-with-filterhashtable). Live event collection requires Windows, event-log permissions, and reachable selected hosts; tests use synthetic events.
 
-The standalone `etc/Get-GPOXML.ps1` and `etc/Get-LocalAdminGPO.ps1` scripts also use the package reader. They require explicit targets and selection, return XML or canonical check objects, and write only when `OutputPath` is supplied. Dot sourcing defines their functions without connecting, importing native modules, prompting, or opening files:
+The standalone `etc/Get-GPOXML.ps1` and `etc/Get-LocalAdminGPO.ps1` scripts also use the package reader. They require explicit targets and selection, return XML or canonical check objects, and write only when `OutputPath` is supplied. Dot sourcing loads their interfaces without connecting, importing native modules, prompting, or opening files:
 
 ```powershell
 . .\etc\Get-GPOXML.ps1
@@ -109,6 +109,17 @@ $groups = Get-ADAnalyzerLocalAdminGpo -Domain example.com -All -Credential $cred
 $groups = Get-ADAnalyzerLocalAdminGpo -InputObject $policy
 $xml = Get-ADAnalyzerGpoXml -InputObject $policy
 ```
+
+`ADAnalyzerLocalAdminPolicyInventory` is available after dot sourcing `etc/Get-LocalAdminGPO.ps1`. Construction has no file or network effects. `AnalyzeProvided(reports)` accepts package reports or their JSON round-trip and returns detached ordered checks. A trailing profile path selects an explicit profile. `Collect(selection)` uses a hashtable with `Domain`, optional `Server`, and one of `Name`, `Guid`, or `All = $true`. It uses the bundled catalog and policy reader on the selected controller. Supply an optional credential and profile path as trailing arguments.
+
+```powershell
+. .\etc\Get-LocalAdminGPO.ps1
+$inventory = [ADAnalyzerLocalAdminPolicyInventory]::new()
+$checks = $inventory.AnalyzeProvided(@($policy))
+$paths = $inventory.Export($checks, 'provided GPO reports', '.\reports\local-groups.csv', 'Csv')
+```
+
+`Export(rows, target, path, format)` returns the paths it writes. Pass a trailing `$true` to validate the export without writing. A dry run returns an empty path list. An unreadable policy prevents exporting the inventory. The compatibility command retains native binding, diagnostic streams, and `WhatIf`.
 
 Offline `InputObject` uses the `{Gpo, Policy}` shape returned by `Get-ADAnalyzerGpoReport -AsObject`, with package record objects or their JSON round-trip; dictionary-backed setting rows are rejected. Supply its actual GPO ID and enabled-side Flags rather than inventing metadata for a raw folder. Raw folder parsing remains available through `Read-ADAnalyzerGpo`. The local-group inventory preserves all selected statuses, members/actions, targeting, disabled items, source locations, and boolean credential exposure; it describes stored policy rather than effective machine membership. An unreadable selected policy produces an explicit check and prevents automatic export of the incomplete inventory. Empty inventories export CSV headers. `WhatIf` allows read-only collection and suppresses writes. File replacement stages and closes UTF-8 content beside each destination before promotion; separate output formats are separate file writes. Legacy class CSV and the NTLM/SAML CSV utilities use the same writer after successful conversion. Query, conversion, and write failures propagate and preserve existing reports; no alternate filename is silently selected. A successful empty legacy class export creates an empty CSV, while empty NTLM/SAML exports contain their known headers and no records. Legacy per-class CSV exports retain the union of safely projected columns across heterogeneous finding rows, including unreadable GPOs alongside configured settings; missing fields are empty and null records are skipped. Legacy aggregate JSON keeps flat policy integers as numbers within signed/unsigned 64-bit range and exact decimal strings beyond that range, consistently across supported engines.
 

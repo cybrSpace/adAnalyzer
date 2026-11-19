@@ -1724,6 +1724,38 @@ Write-Output ('PASS legacy '+$Script+' '+$Mode)
         }
     }
 
+    $inventoryCases = [ordered]@{
+        Construction = 3
+        Analysis = 7
+        Export = 5
+        Isolation = 3
+        Collection = 6
+    }
+    foreach ($case in $inventoryCases.Keys) {
+        Invoke-AuxiliaryTest ('local-admin GPO inventory class: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $fixture = Join-Path $PSScriptRoot 'LocalAdminGpoInventoryClassFixture.ps1'
+            $savedErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -RepositoryRoot $RepositoryRoot -Mode $case 2>&1
+                $childExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $savedErrorActionPreference
+            }
+            if ($childExitCode -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw ($output -join [Environment]::NewLine)
+            }
+            $expected = 'PASS local-admin GPO inventory class {0} {1}' -f $case, $inventoryCases[$case]
+            $sentinels = @($output | Where-Object { [string]$_ -clike 'PASS local-admin GPO inventory class *' })
+            Assert-True ($sentinels.Count -eq 1 -and [string]$sentinels[0] -ceq $expected) 'Fresh process did not execute every selected inventory control.'
+        }
+    }
+
     Assert-Equal 0 $script:ExternalCalls
 }
 finally {
