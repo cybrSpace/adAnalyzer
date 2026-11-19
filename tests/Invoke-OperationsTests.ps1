@@ -1610,6 +1610,243 @@ try {
             Assert-AccountMetadataPlanStayedOffline
         }
     }
+    & {
+        # Load the real membership resolver without replacing the execution fixture's mocks.
+        . (Join-Path $RepositoryRoot 'bin/ADDirectoryAnalysis.ps1')
+        foreach ($name in @(
+                'Get-ADObject', 'Get-ADGroup', 'Get-ADRootDSE', 'Import-Module', 'New-PSDrive', 'Invoke-Command',
+                'Disable-ADAccount', 'Enable-ADAccount', 'Enter-ADAnalyzerJournalLease', 'Write-ADAnalyzerOperationFile'
+            )) {
+            Set-Item -LiteralPath ('Function:local:' + $name) -Value {
+                throw 'Offline privilege policy testing encountered an external effect.'
+            }
+        }
+
+        function New-PrivilegePolicyDomainFixture {
+            @{
+                SID = 'S-1-5-21-10-20-30'
+                RootDomainSID = 'S-1-5-21-40-50-60'
+            }
+        }
+        function Set-PrivilegePolicyDomainFixture([hashtable]$Domain) {
+            $data = @{
+                Directory = @{
+                    Domain = $Domain
+                }
+            }
+            $script:Assessment | Add-Member -NotePropertyName Data -NotePropertyValue $data -Force
+        }
+        function Assert-PrivilegePlanStrings($Plan, [string[]]$Expected) {
+            Assert-Equal 1 $Plan.Actions.Count
+            Assert-Equal 0 $Plan.Excluded.Count
+            Assert-True ($Plan.PrivilegedSids -is [array]) 'The offline privilege policy lost its list shape.'
+            Assert-Equal $Expected.Count $Plan.PrivilegedSids.Count
+            for ($index = 0; $index -lt $Expected.Count; $index++) {
+                Assert-True (
+                    $Plan.PrivilegedSids[$index] -is [string] -and
+                    $Plan.PrivilegedSids[$index] -ceq $Expected[$index]
+                ) 'The privilege policy changed SID spelling, type, duplicate handling or order.'
+            }
+        }
+        function Assert-PrivilegePolicyRejection($Assessment, [string]$Marker) {
+            $output = [Collections.Generic.List[object]]::new()
+            $captured = [Collections.ArrayList]::new()
+            $caught = $null
+            $parameters = @{
+                Assessment = $Assessment
+                Profile = $script:Profile
+                ErrorAction = 'Stop'
+                ErrorVariable = '+captured'
+            }
+            try {
+                New-ADAnalyzerRemediationPlan @parameters | ForEach-Object {
+                    $output.Add($_)
+                }
+            }
+            catch {
+                $caught = $_
+            }
+            Assert-True ($null -ne $caught) 'Malformed privilege policy did not fail.'
+            Assert-Equal 'Assessment privilege policy contains an unsupported SID value type' $caught.Exception.Message
+            Assert-Equal 0 $output.Count
+            Assert-True (
+                $captured.Count -gt 0 -and
+                -not ($captured | Out-String).Contains($Marker) -and
+                -not $caught.Exception.ToString().Contains($Marker)
+            ) 'The captured privilege policy error was missing or disclosed fixture data.'
+        }
+
+        Invoke-Test 'offline privilege policy preserves string shapes templates and detached values' {
+            $script:Profile.Policy.PrivilegedSids = @()
+            Assert-PrivilegePlanStrings (New-FixturePlan) @()
+            $domain = New-PrivilegePolicyDomainFixture
+            Set-PrivilegePolicyDomainFixture $domain
+            Assert-PrivilegePlanStrings (New-FixturePlan) @()
+            $domain.PrivilegedSids = $null
+            Assert-PrivilegePlanStrings (New-FixturePlan) @()
+            $domain.PrivilegedSids = @()
+            Assert-PrivilegePlanStrings (New-FixturePlan) @()
+            $domain.PrivilegedSids = 's-1-5-21-10-20-30-3169'
+            Assert-PrivilegePlanStrings (New-FixturePlan) @('s-1-5-21-10-20-30-3169')
+
+            $templates = @('{DomainSid}-3167', '{RootDomainSid}-3168', 's-1-5-21-10-20-30-3169')
+            $script:Profile.Policy.PrivilegedSids = $templates
+            $collector = [ADAnalyzerDirectoryCollector]::new()
+            $observed = $collector.ClassifyAccounts(
+                @(), @(), @(), @(), $domain.SID, $domain.RootDomainSID, $script:Profile, [ordered]@{}, $false
+            )
+            $snapshot = $collector.CreateSnapshot(@{
+                    Server = 'selected.fixture.invalid'
+                    DomainSid = $domain.SID
+                    RootDomainSid = $domain.RootDomainSID
+                    PrivilegedSids = $observed.PrivilegedSids
+                    Resultant = [Collections.Generic.List[object]]::new()
+                    Errors = [Collections.Generic.List[object]]::new()
+                    ConnectionMode = 'Direct'
+                })
+            $script:Assessment.Data.Directory = $snapshot
+            $expectedTemplateItems = @(
+                '{DomainSid}-3167'
+                '{RootDomainSid}-3168'
+                's-1-5-21-10-20-30-3169'
+                'S-1-5-21-10-20-30-3167'
+                'S-1-5-21-40-50-60-3168'
+            )
+            $withTemplates = New-FixturePlan
+            Assert-True (
+                (@($withTemplates.PrivilegedSids | Where-Object { $_ -like '*316[789]' }) -join ',') -ceq
+                ($expectedTemplateItems -join ',') -and $withTemplates.Actions.Count -eq 1
+            ) 'The offline planner changed observed template identities.'
+            $script:Profile.Policy.PrivilegedSids = @()
+            $observedOnly = New-FixturePlan
+            Assert-PrivilegePlanStrings $observedOnly $withTemplates.PrivilegedSids
+
+            $script:Profile.Policy.PrivilegedSids = @('{RootDomainSid}-3168')
+            Set-PrivilegePolicyDomainFixture @{ SID = $domain.SID }
+            $needsContext = New-FixturePlan
+            Assert-Equal 0 $needsContext.Actions.Count
+            Assert-Equal 'PrivilegedPolicyContextMissing' $needsContext.Excluded[0].Reason
+
+            $script:Profile.Policy.PrivilegedSids = @()
+            $note = @{
+                InputObject = 's-1-5-21-10-20-30-3171'
+                NotePropertyName = 'cpassword'
+                NotePropertyValue = 'fixture-only'
+                PassThru = $true
+            }
+            $wrapped = Add-Member @note
+            $domain.PrivilegedSids = @($null, $wrapped, 'S-1-5-21-10-20-30-3172', 's-1-5-21-10-20-30-3171', $null)
+            Set-PrivilegePolicyDomainFixture $domain
+            $plan = New-FixturePlan
+            Assert-PrivilegePlanStrings $plan @('s-1-5-21-10-20-30-3171', 'S-1-5-21-10-20-30-3172')
+            Assert-True (
+                $null -eq $plan.PrivilegedSids[0].PSObject.Properties['cpassword']
+            ) 'The ordinary SID retained its synthetic source note.'
+            Assert-Equal 'fixture-only' $wrapped.cpassword
+            Assert-True ([object]::ReferenceEquals($domain.PrivilegedSids[1], $wrapped)) 'The planner replaced the source SID.'
+        }
+        Invoke-Test 'offline privilege policy rejects structured in-memory SID entries without output' {
+            $script:Profile.Policy.PrivilegedSids = @()
+            $domain = New-PrivilegePolicyDomainFixture
+            Set-PrivilegePolicyDomainFixture $domain
+            $marker = 'unsupported-privilege-sid-fixture'
+            $list = [Collections.Generic.List[object]]::new()
+            $list.Add($marker)
+            $invalidValues = [ordered]@{
+                Dictionary = @{
+                    Value = 'S-1-5-21-10-20-30-3171'
+                    Password = $marker
+                }
+                Record = [pscustomobject]@{
+                    Value = 'S-1-5-21-10-20-30-3171'
+                    Password = $marker
+                }
+                List = $list
+                Credential = [pscredential]::new($marker, [Security.SecureString]::new())
+            }
+            foreach ($entry in $invalidValues.GetEnumerator()) {
+                $items = [object[]]::new(2)
+                $items[0] = 'S-1-5-21-10-20-30-3172'
+                $items[1] = $entry.Value
+                $domain.PrivilegedSids = $items
+                Assert-PrivilegePolicyRejection $script:Assessment $marker
+                Assert-True (
+                    [object]::ReferenceEquals($domain.PrivilegedSids, $items) -and
+                    [object]::ReferenceEquals($domain.PrivilegedSids[1], $entry.Value)
+                ) 'A rejected privilege policy modified the source list or entry.'
+            }
+        }
+        Invoke-Test 'offline privilege policy rejects malformed bracket-literal assessment JSON' {
+            $script:Profile.Policy.PrivilegedSids = @()
+            $domain = New-PrivilegePolicyDomainFixture
+            $marker = 'saved-unsupported-privilege-sid-fixture'
+            $domain.PrivilegedSids = @([ordered]@{
+                    Value = 'S-1-5-21-10-20-30-3171'
+                    Password = $marker
+                })
+            Set-PrivilegePolicyDomainFixture $domain
+            $path = Join-Path $script:Temporary 'assessment [privilege-sids].json'
+            $encoding = [Text.UTF8Encoding]::new($false)
+            $source = ConvertTo-Json -InputObject $script:Assessment -Depth 20 -Compress
+            [IO.File]::WriteAllText($path, $source, $encoding)
+            Assert-PrivilegePolicyRejection $path $marker
+            Assert-True ([IO.File]::ReadAllText($path, $encoding) -ceq $source) 'The planner rewrote the saved assessment.'
+        }
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            Invoke-Test 'offline privilege policy normalizes native Windows SID values with identical membership' {
+                $script:Profile.Policy.PrivilegedSids = @()
+                $domain = New-PrivilegePolicyDomainFixture
+                Set-PrivilegePolicyDomainFixture $domain
+                $canonical = $domain.SID + '-3171'
+                $neighborBefore = $domain.SID + '-3170'
+                $neighborAfter = $domain.SID + '-3172'
+                $native = [Security.Principal.SecurityIdentifier]::new($canonical)
+                $wrapped = Add-Member -InputObject $native -NotePropertyName cpassword -NotePropertyValue 'fixture-only' -PassThru
+                Assert-True (
+                    $wrapped.PSBase.Value -ceq $canonical -and $wrapped -is [Security.Principal.SecurityIdentifier]
+                ) 'The native test did not construct the expected CLR SID.'
+
+                $domain.PrivilegedSids = @($neighborBefore, $wrapped, $canonical, $neighborAfter)
+                $typed = New-FixturePlan
+                $domain.PrivilegedSids = @($neighborBefore, $canonical, $neighborAfter)
+                $expected = $domain.PrivilegedSids
+                $ordinary = New-FixturePlan
+                Assert-PrivilegePlanStrings $typed $expected
+                Assert-PrivilegePlanStrings $ordinary $expected
+                Assert-True (
+                    $null -eq $typed.PrivilegedSids[1].PSObject.Properties['cpassword']
+                ) 'The native SID retained a synthetic source note.'
+                Assert-Equal 'fixture-only' $wrapped.cpassword
+
+                $group = [pscustomobject]@{
+                    SID = $canonical
+                    DistinguishedName = 'CN=Fixture Privileged Group,DC=example,DC=invalid'
+                    MemberOf = @()
+                }
+                $member = [pscustomobject]@{
+                    SID = $domain.SID + '-1201'
+                    MemberOf = @($group.DistinguishedName)
+                }
+                $arguments = @{
+                    Object = $member
+                    Groups = @($group)
+                    DomainSid = $domain.SID
+                }
+                $graph = [ADAnalyzerMembershipGraph]::new(@($group))
+                foreach ($membership in @(
+                        Resolve-ADAnalyzerMembership @arguments -PrivilegedSids @($wrapped)
+                        Resolve-ADAnalyzerMembership @arguments -PrivilegedSids $ordinary.PrivilegedSids
+                        Resolve-ADAnalyzerMembership @arguments -PrivilegedSids $typed.PrivilegedSids
+                        $graph.Resolve($member, $domain.SID, $typed.PrivilegedSids)
+                    )) {
+                    Assert-Equal 'Complete' $membership.ResolutionStatus
+                    Assert-True ($membership.IsPrivileged -is [bool] -and $membership.IsPrivileged) 'The normalized SID changed the membership decision.'
+                    Assert-Equal 1 $membership.PrivilegedSids.Count
+                    Assert-True ($membership.PrivilegedSids[0] -ceq $canonical) 'The normalized SID changed the matched membership identity.'
+                }
+            }
+        }
+    }
     Invoke-Test 'only explicitly approved Fail inactivity findings become DisableAccount actions' {
         $plan = New-FixturePlan
         Assert-Equal 1 @($plan.Actions).Count

@@ -2478,6 +2478,18 @@ function New-ADAnalyzerRemediationPlan {
     $rootDomainSid = [string](Get-ADAnalyzerOperationValue $domain @('RootDomainSID'))
     $privilegeContextMissing = $false
     $privileged = @(Get-ADAnalyzerOperationValue $domain @('PrivilegedSids') @() | Where-Object { $null -ne $_ })
+    for ($index = 0; $index -lt $privileged.Count; $index++) {
+        $entry = $privileged[$index]
+        if ($entry -is [string]) {
+            $privileged[$index] = [string]$entry
+        }
+        elseif ($entry -is [System.Security.Principal.SecurityIdentifier]) {
+            $privileged[$index] = [string]$entry.PSBase.Value
+        }
+        else {
+            throw 'Assessment privilege policy contains an unsupported SID value type'
+        }
+    }
     foreach ($sid in @($configuration.Policy.PrivilegedSids)) {
         if (([string]$sid).Contains('{DomainSid}') -and -not $domainSid) {
             $privilegeContextMissing = $true
