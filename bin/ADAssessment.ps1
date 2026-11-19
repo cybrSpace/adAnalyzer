@@ -270,6 +270,222 @@ function Invoke-ADAnalyzerAssessment {
     return $engine.EvaluateForCommand($DirectoryData, $GpoData, $Target, $PSCmdlet, $preference)
 }
 
+class ADAnalyzerAssessmentCollector {
+    ADAnalyzerAssessmentCollector() {
+    }
+
+    [object] Collect([hashtable]$Options) {
+        return $this.Collect($Options, [pscredential]::Empty)
+    }
+
+    [object] Collect([hashtable]$Options, [pscredential]$Credential) {
+        $ErrorActionPreference = 'Stop'
+        if ($null -eq $Options) {
+            $Options = @{}
+        }
+        foreach ($key in $Options.PSBase.Keys) {
+            if ($key -notin @('Domain', 'Server', 'SearchBase', 'ProfilePath', 'Profile', 'IncludeAcl', 'IncludeHostChecks', 'SkipGpo')) {
+                throw [ArgumentException]::new("Unsupported assessment option: $key", 'Options')
+            }
+        }
+
+        $configuration = $this.ReadConfiguration([string]$Options['ProfilePath'], $Options['Profile'])
+        $domain = [string]$Options['Domain']
+        $server = [string]$Options['Server']
+        $searchBase = [string]$Options['SearchBase']
+        if (-not $domain) {
+            $domain = [string]$configuration.Targets.Domain
+        }
+        if (-not $server) {
+            $server = [string]$configuration.Targets.Server
+        }
+        $target = $this.ResolveEnvironmentTarget($domain, $server)
+        $domain = $target.Domain
+        $server = $target.Server
+        if (-not $this.IsDirectoryHostName($server)) {
+            throw 'Specify Domain or Server (or configure Targets)'
+        }
+
+        # Offline consumers load this file without the live collection components.
+        $directoryCollectorType = 'ADAnalyzerDirectoryCollector' -as [type]
+        $hostEvaluatorType = 'ADAnalyzerHostPolicyEvaluator' -as [type]
+        if ($null -eq $directoryCollectorType -or $null -eq $hostEvaluatorType) {
+            throw 'Dot source bin/ADAnalyzer.ps1 to use the assessment collector.'
+        }
+
+        $connection = $this.NewBootstrapArguments($server, $Credential)
+        $providerPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'lib/Microsoft.ActiveDirectory.Management.dll'
+        $provider = Import-Module -Name $providerPath -Scope Local -PassThru -ErrorAction Stop
+        $rootCommand = $this.GetBootstrapCommand($provider, 'Get-ADRootDSE')
+        $root = & $rootCommand @connection
+        if (-not $this.IsDirectoryHostName($root.DnsHostName)) {
+            throw 'Directory returned an invalid DC host name'
+        }
+        $connection.Server = [string]$root.DnsHostName
+        if (-not $domain) {
+            $domainCommand = $this.GetBootstrapCommand($provider, 'Get-ADDomain')
+            $domainInfo = & $domainCommand @connection
+            $domain = [string]$domainInfo.DNSRoot
+        }
+        if (-not $this.IsDirectoryHostName($domain)) {
+            throw 'Invalid domain DNS name'
+        }
+        if (-not $searchBase) {
+            $searchBase = [string]$configuration.Targets.SearchBase
+        }
+        $context = $this.NewDirectoryContext(
+            $connection.Server,
+            $domain,
+            $Credential,
+            $searchBase,
+            [bool]$Options['IncludeAcl'],
+            [bool]$Options['IncludeHostChecks'],
+            $configuration
+        )
+        $directoryCollector = $directoryCollectorType::new()
+        $directory = $directoryCollector.Collect($context, $configuration)
+        $resolvedDomain = $domain
+        if ($directory.Domain.DNSRoot -match '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+            $resolvedDomain = [string]$directory.Domain.DNSRoot
+        }
+        if ($context.IncludeHostChecks) {
+            $hostEvaluator = $hostEvaluatorType::new()
+            $hostChecks = $hostEvaluator.Evaluate(@($directory.Hosts), $Credential, $configuration)
+            $directory | Add-Member -NotePropertyName HostChecks -NotePropertyValue $hostChecks -Force
+        }
+
+        $policies = [Collections.ArrayList]::new()
+        if ($this.ShouldCollectGpo([bool]$Options['SkipGpo'], $configuration)) {
+            $catalog = [ADAnalyzerGpoCatalog]::new()
+            $reportService = [ADAnalyzerGpoReportService]::new()
+            try {
+                $gpos = $catalog.GetAll($resolvedDomain, $context.Server, $Credential)
+                foreach ($gpo in $gpos) {
+                    try {
+                        $report = $reportService.Read($gpo, $Credential)
+                        $null = $policies.Add($this.NewPolicyOutcome($gpo, $report.Policy, $null))
+                    }
+                    catch {
+                        $null = $policies.Add($this.NewPolicyOutcome($gpo, $null, $_.Exception.Message))
+                    }
+                }
+            }
+            catch {
+                $null = $policies.Add($this.NewCatalogFailure($domain, $_.Exception.Message))
+            }
+        }
+
+        $engine = [ADAnalyzerAssessmentEngine]::new($configuration)
+        $result = $engine.Evaluate($directory, $policies.ToArray(), $resolvedDomain)
+        $resultContext = $this.NewResultContext($resolvedDomain, $domain, $searchBase, $context)
+        $result | Add-Member -NotePropertyName Context -NotePropertyValue $resultContext
+        return $result
+    }
+
+    hidden [hashtable] ReadConfiguration([string]$ProfilePath, [object]$Profile) {
+        if ($ProfilePath -and $null -ne $Profile) {
+            throw 'Specify ProfilePath or Profile, not both'
+        }
+        if ($ProfilePath) {
+            $definition = [ADAnalyzerProfileDefinition]::new()
+            $Profile = $definition.ReadOverrides($ProfilePath)
+        }
+        return [ADAnalyzerProfile]::new($Profile).ToHashtable()
+    }
+
+    hidden [hashtable] ResolveEnvironmentTarget([string]$Domain, [string]$Server) {
+        if (-not $Domain) {
+            $Domain = $env:USERDNSDOMAIN
+        }
+        if (-not $Server) {
+            $Server = $Domain
+        }
+        return @{
+            Domain = $Domain
+            Server = $Server
+        }
+    }
+
+    hidden [bool] IsDirectoryHostName([object]$Value) {
+        return -not ($Value -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$')
+    }
+
+    hidden [hashtable] NewBootstrapArguments([string]$Server, [pscredential]$Credential) {
+        $arguments = @{
+            Server = $Server
+            ErrorAction = 'Stop'
+        }
+        if ($Credential -and $Credential -ne [pscredential]::Empty) {
+            $arguments.Credential = $Credential
+        }
+        return $arguments
+    }
+
+    hidden [Management.Automation.CommandInfo] GetBootstrapCommand([object]$Provider, [string]$Name) {
+        if ($null -ne $Provider -and $Provider.ExportedCmdlets) {
+            $command = $Provider.ExportedCmdlets[$Name]
+            if ($command -is [Management.Automation.CommandInfo]) {
+                return $command
+            }
+        }
+        throw "The bundled Active Directory provider did not export $Name"
+    }
+
+    hidden [pscustomobject] NewDirectoryContext(
+        [string]$Server,
+        [string]$Domain,
+        [pscredential]$Credential,
+        [string]$SearchBase,
+        [bool]$IncludeAcl,
+        [bool]$IncludeHostChecks,
+        [hashtable]$Configuration
+    ) {
+        return [pscustomobject]@{
+            Server = $Server
+            Domain = $Domain
+            Credential = $Credential
+            SearchBase = $SearchBase
+            IncludeAcl = ($IncludeAcl -or $Configuration.Analysis.IncludeAcl)
+            IncludeHostChecks = ($IncludeHostChecks -or $Configuration.Analysis.IncludeHostChecks)
+        }
+    }
+
+    hidden [bool] ShouldCollectGpo([bool]$SkipGpo, [hashtable]$Configuration) {
+        return (-not $SkipGpo -and $Configuration.Analysis.IncludeGpo)
+    }
+
+    hidden [pscustomobject] NewPolicyOutcome([object]$Gpo, [object]$Policy, [object]$ErrorMessage) {
+        return [pscustomobject]@{
+            Gpo = $Gpo
+            Policy = $Policy
+            Error = $ErrorMessage
+        }
+    }
+
+    hidden [pscustomobject] NewCatalogFailure([string]$RequestedDomain, [string]$ErrorMessage) {
+        $marker = [pscustomobject]@{
+            Id = $RequestedDomain
+        }
+        return $this.NewPolicyOutcome($marker, $null, $ErrorMessage)
+    }
+
+    hidden [pscustomobject] NewResultContext(
+        [string]$ResolvedDomain,
+        [string]$RequestedDomain,
+        [string]$SearchBase,
+        [object]$Context
+    ) {
+        return [pscustomobject]@{
+            Domain = $ResolvedDomain
+            RequestedDomain = $RequestedDomain
+            Server = $Context.Server
+            SearchBase = $SearchBase
+            IncludeAcl = $Context.IncludeAcl
+            IncludeHostChecks = $Context.IncludeHostChecks
+        }
+    }
+}
+
 function Get-ADAnalyzerAssessment {
     [CmdletBinding()]
     param(
@@ -282,7 +498,6 @@ function Get-ADAnalyzerAssessment {
         [switch]$IncludeAcl,
         [switch]$IncludeHostChecks,
         [switch]$SkipGpo
-
     )
     if ($ProfilePath -and $null -ne $Profile) {
         throw 'Specify ProfilePath or Profile, not both'
@@ -293,28 +508,22 @@ function Get-ADAnalyzerAssessment {
     else {
         Import-ADAnalyzerProfile -Profile $Profile
     }
+    $collector = [ADAnalyzerAssessmentCollector]::new()
     if (-not $Domain) {
         $Domain = $configuration.Targets.Domain
     }
     if (-not $Server) {
         $Server = $configuration.Targets.Server
     }
-    if (-not $Domain) {
-        $Domain = $env:USERDNSDOMAIN
-    }
-    if (-not $Server) {
-        $Server = $Domain
-    }
-    if ($Server -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+    $target = $collector.ResolveEnvironmentTarget($Domain, $Server)
+    $Domain = $target.Domain
+    $Server = $target.Server
+    if (-not $collector.IsDirectoryHostName($Server)) {
         throw 'Specify Domain or Server (or configure Targets)'
     }
-    $connection = @{
-        Server = $Server
-        ErrorAction = 'Stop'
-    }
-    if ($Credential -and $Credential -ne [pscredential]::Empty) {
-        $connection.Credential = $Credential
-    }
+    $connection = $collector.NewBootstrapArguments($Server, $Credential)
+
+    # Keep native provider reads, property casts, and terminal errors in command scope.
     $root = Get-ADRootDSE @connection
     if ($root.DnsHostName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
         throw 'Directory returned an invalid DC host name'
@@ -324,20 +533,21 @@ function Get-ADAnalyzerAssessment {
         $domainInfo = Get-ADDomain @connection
         $Domain = [string]$domainInfo.DNSRoot
     }
-    if ($Domain -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+    if (-not $collector.IsDirectoryHostName($Domain)) {
         throw 'Invalid domain DNS name'
     }
     if (-not $SearchBase) {
         $SearchBase = $configuration.Targets.SearchBase
     }
-    $context = [pscustomobject]@{
-        Server = $connection.Server
-        Domain = $Domain
-        Credential = $Credential
-        SearchBase = $SearchBase
-        IncludeAcl = ($IncludeAcl -or $configuration.Analysis.IncludeAcl)
-        IncludeHostChecks = ($IncludeHostChecks -or $configuration.Analysis.IncludeHostChecks)
-    }
+    $context = $collector.NewDirectoryContext(
+        $connection.Server,
+        $Domain,
+        $Credential,
+        $SearchBase,
+        [bool]$IncludeAcl,
+        [bool]$IncludeHostChecks,
+        $configuration
+    )
     $directory = Get-ADAnalyzerDirectoryData -Context $context -Profile $configuration
     $resolvedDomain = if ($directory.Domain.DNSRoot -match '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
         [string]$directory.Domain.DNSRoot
@@ -350,35 +560,22 @@ function Get-ADAnalyzerAssessment {
         $directory | Add-Member -NotePropertyName HostChecks -NotePropertyValue $hostChecks -Force
     }
     $policies = [Collections.ArrayList]::new()
-    if (-not $SkipGpo -and $configuration.Analysis.IncludeGpo) {
+    if ($collector.ShouldCollectGpo([bool]$SkipGpo, $configuration)) {
         try {
             $gpos = @(Get-ADAnalyzerGpo -All -Domain $resolvedDomain -Server $context.Server -Credential $Credential)
             foreach ($gpo in $gpos) {
                 try {
                     $report = Get-ADAnalyzerGpoReport -Gpo $gpo -Credential $Credential -AsObject
-                    $null = $policies.Add([pscustomobject]@{
-                            Gpo = $gpo
-                            Policy = $report.Policy
-                            Error = $null
-                        })
+                    $policy = $report.Policy
+                    $null = $policies.Add($collector.NewPolicyOutcome($gpo, $policy, $null))
                 }
                 catch {
-                    $null = $policies.Add([pscustomobject]@{
-                            Gpo = $gpo
-                            Policy = $null
-                            Error = $_.Exception.Message
-                        })
+                    $null = $policies.Add($collector.NewPolicyOutcome($gpo, $null, $_.Exception.Message))
                 }
             }
         }
         catch {
-            $null = $policies.Add([pscustomobject]@{
-                    Gpo = [pscustomobject]@{
-                        Id = $Domain
-                    }
-                    Policy = $null
-                    Error = $_.Exception.Message
-                })
+            $null = $policies.Add($collector.NewCatalogFailure($Domain, $_.Exception.Message))
         }
     }
     $result = Invoke-ADAnalyzerAssessment `
@@ -386,14 +583,8 @@ function Get-ADAnalyzerAssessment {
         -GpoData $policies.ToArray() `
         -Profile $configuration `
         -Target $resolvedDomain
-    $result | Add-Member -NotePropertyName Context -NotePropertyValue ([pscustomobject]@{
-            Domain = $resolvedDomain
-            RequestedDomain = $Domain
-            Server = $context.Server
-            SearchBase = $SearchBase
-            IncludeAcl = $context.IncludeAcl
-            IncludeHostChecks = $context.IncludeHostChecks
-        })
+    $resultContext = $collector.NewResultContext($resolvedDomain, $Domain, $SearchBase, $context)
+    $result | Add-Member -NotePropertyName Context -NotePropertyValue $resultContext
     $result
 }
 

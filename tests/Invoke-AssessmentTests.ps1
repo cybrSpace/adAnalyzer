@@ -1625,6 +1625,46 @@ foreach ($case in $baselineImporterCases.Keys) {
             $baselineImporterCases[$case], $case)
     }
 }
+$assessmentCollectorCases = [ordered]@{
+    Native = 52
+    Construction = 2
+    Direct = 10
+    Isolation = 2
+    Composition = 3
+}
+foreach ($case in $assessmentCollectorCases.Keys) {
+    Test-Assessment ('assessment collector API: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $arguments = @(
+            '-NoLogo'
+            '-NoProfile'
+            '-NonInteractive'
+            '-File'
+            (Join-Path $PSScriptRoot 'AssessmentCollectorClassFixture.ps1')
+            '-Case'
+            $case
+            '-RepositoryRoot'
+            $RepositoryRoot
+        )
+        $fixtureErrorPreference = $ErrorActionPreference
+        try {
+            # Capture native stderr before checking the child exit code on 5.1.
+            $ErrorActionPreference = 'Continue'
+            $output = @(& $executable @arguments 2>&1)
+            $fixtureExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $fixtureErrorPreference
+        }
+        if ($fixtureExitCode -ne 0) {
+            throw ("Assessment collector fixture exited with code {0}.{1}{2}" -f
+                $fixtureExitCode, [Environment]::NewLine, ($output -join [Environment]::NewLine))
+        }
+        $marker = 'PASS assessment collector ' + $case + ' ' + $assessmentCollectorCases[$case]
+        Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+    }
+}
+
 Write-Host ("{0} assessment-integration tests passed; {1} failed" -f $script:Passed, $script:Failed)
 if ($script:Failed) {
     exit 1

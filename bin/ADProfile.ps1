@@ -159,6 +159,26 @@ class ADAnalyzerProfileDefinition {
             }
         }
     }
+
+    [object] ReadOverrides([string]$Path) {
+        $loaded = $null
+        switch ([IO.Path]::GetExtension($Path).ToLowerInvariant()) {
+            '.psd1' {
+                $loaded = Import-PowerShellDataFile -LiteralPath $Path -ErrorAction Stop
+            }
+            '.json' {
+                $readParameters = Get-ADAnalyzerJsonReadParameters $Path
+                $PSDefaultParameterValues = Get-ADAnalyzerJsonReadDefaults
+                $loaded = Get-Content @readParameters |
+                    ConvertTo-ADAnalyzerJsonText |
+                    ConvertFrom-Json -ErrorAction Stop
+            }
+            default {
+                throw 'Profiles must be .json or restricted .psd1 data files'
+            }
+        }
+        return $loaded
+    }
 }
 
 class ADAnalyzerProfile {
@@ -211,23 +231,8 @@ class ADAnalyzerProfile {
     }
 
     static [ADAnalyzerProfile] Load([string]$Path) {
-        $loaded = $null
-        switch ([IO.Path]::GetExtension($Path).ToLowerInvariant()) {
-            '.psd1' {
-                $loaded = Import-PowerShellDataFile -LiteralPath $Path -ErrorAction Stop
-            }
-            '.json' {
-                $readParameters = Get-ADAnalyzerJsonReadParameters $Path
-                $PSDefaultParameterValues = Get-ADAnalyzerJsonReadDefaults
-                $loaded = Get-Content @readParameters |
-                    ConvertTo-ADAnalyzerJsonText |
-                    ConvertFrom-Json -ErrorAction Stop
-            }
-            default {
-                throw 'Profiles must be .json or restricted .psd1 data files'
-            }
-        }
-        return [ADAnalyzerProfile]::new($loaded)
+        $definition = [ADAnalyzerProfileDefinition]::new()
+        return [ADAnalyzerProfile]::new($definition.ReadOverrides($Path))
     }
 
     hidden [void] ValidateCommon([hashtable]$result) {

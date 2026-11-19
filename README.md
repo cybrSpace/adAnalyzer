@@ -164,6 +164,13 @@ $hostInventory = $hostCollector.Collect($computerNames)
 $hostInventory = $hostCollector.Collect($computerNames, $credential, 30, $profile)
 $hostEvaluator = [ADAnalyzerHostPolicyEvaluator]::new()
 $hostChecks = $hostEvaluator.Evaluate($hostInventory.Hosts, $credential, $profile)
+$collector = [ADAnalyzerAssessmentCollector]::new()
+$assessmentOptions = @{
+    Domain = $domain
+    Server = $server
+    Profile = $profile
+}
+$assessment = $collector.Collect($assessmentOptions, $credential)
 
 $secretIndicator = [ADAnalyzerSecretIndicator]::new()
 $safeRecord = $secretIndicator.ProjectRecord($settingRecord)
@@ -187,6 +194,8 @@ $rawValue = $projector.GetValue($record, @('Primary', 'Fallback'), $null)
 `ADAnalyzerHostCollector` owns the Windows CIM inventory for services, operating systems, patches, DNS, SMB and registry values. Construction performs no collection. `Collect(computerNames)` uses the current credential, the default profile and a 30-second CIM operation timeout. The full overload accepts a credential, timeout in seconds and profile. The result contains `Hosts` and `Errors` arrays. A failed registry read stays on its registry record, and a failed class query adds a host collection error. Each call uses fresh results and closes its sessions before returning. The PowerShell compatibility helper releases each session before emitting that host and stops opening sessions when the caller stops the pipeline.
 
 `ADAnalyzerHostPolicyEvaluator` evaluates service, registry, audit, and certificate rules. Its constructor performs no acquisition. `Evaluate(hosts)` uses the default profile, and the other overloads accept a profile or a credential and profile. Pass already collected host records. The method returns the checks in evaluation order, and configured audit and TLS probes run only during evaluation. The credential is scoped to that call. Check containers are fresh, and native CIM observations retain their original row and session metadata. The input owner retains those rows' disposal responsibility. `Test-ADAnalyzerHostPolicy` preserves native binding, diagnostics, and incremental pipeline output.
+
+`ADAnalyzerAssessmentCollector` composes directory collection, optional host checks, GPO reading, and assessment evaluation. The constructor has no side effects. Call `Collect(options)` to use the current credential or `Collect(options, credential)` to supply one for the operation. Options accept `Domain`, `Server`, `SearchBase`, either `Profile` or `ProfilePath`, and the boolean flags `IncludeAcl`, `IncludeHostChecks`, and `SkipGpo`. The method uses profile targets and the current domain when applicable, pins the selected domain controller, and returns the assessment with separate requested and resolved domain fields. It uses the bundled Windows provider, honors the profile's `PSDrive` or `Direct` setting, and releases the directory drive before policy evaluation. Each GPO's SYSVOL access is scoped to its read. `Get-ADAnalyzerAssessment` remains available with its existing PowerShell parameters and diagnostics.
 
 `ADAnalyzerProfile` owns fresh defaults, copying, merging, validation, and explicit JSON/PSD1 loading. `[ADAnalyzerProfile]::new()` and `::new(overrides)` construct independent normalized configuration without file reads or native-module imports. `[ADAnalyzerProfile]::Load(path)` reads a file explicitly and returns a profile instance; `ToHashtable()` returns a detached configuration snapshot for existing APIs. `DefaultSnapshot()` returns fresh raw defaults. Raw default policy thresholds retain their `Int32` contract, while normalization retains the established `Int64` policy values. Native JSON/CLIXML serialization of the profile object omits its private configuration state. Existing default/import commands delegate to these methods; the legacy merge adapter retains its in-place, no-output contract.
 
