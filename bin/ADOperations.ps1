@@ -3823,10 +3823,17 @@ function Undo-ADAnalyzerRemediation {
                 continue
             }
             if ($null -eq $lease) {
+                $reviewedJournalId = [string](Get-ADAnalyzerOperationValue $journal @('JournalId'))
+                $reviewedPlanId = [string](Get-ADAnalyzerOperationValue $journal @('PlanId'))
                 $lease = Enter-ADAnalyzerJournalLease $JournalPath
                 $journal = Read-ADAnalyzerOperationDocument $JournalPath 'Journal'
                 if ($journal.JournalType -ne 'ADAnalyzerRemediationJournal' -or $journal.Server -ine $Server) {
                     throw 'Journal type/server does not match this undo request'
+                }
+                $ownedJournalId = [string](Get-ADAnalyzerOperationValue $journal @('JournalId'))
+                $ownedPlanId = [string](Get-ADAnalyzerOperationValue $journal @('PlanId'))
+                if ($ownedJournalId -ine $reviewedJournalId -or $ownedPlanId -ine $reviewedPlanId) {
+                    throw 'Journal identity changed after undo review'
                 }
                 $plan = [pscustomobject]@{
                     Remediation = $journal.Remediation
@@ -3841,6 +3848,13 @@ function Undo-ADAnalyzerRemediation {
             $entry = $matching[0]
             if ($entry.Action -ne 'DisableAccount' -or $entry.Status -ne 'Succeeded') {
                 continue
+            }
+            foreach ($name in 'ActionId', 'ObjectGuid', 'SID', 'DistinguishedName') {
+                $reviewedValue = [string](Get-ADAnalyzerOperationValue $candidate @($name))
+                $ownedValue = [string](Get-ADAnalyzerOperationValue $entry @($name))
+                if ($ownedValue -ine $reviewedValue) {
+                    throw 'Journal entry identity changed after undo review'
+                }
             }
             try {
                 if ($entry.Before.Enabled -ne $true -or $entry.After.Enabled -ne $false) {

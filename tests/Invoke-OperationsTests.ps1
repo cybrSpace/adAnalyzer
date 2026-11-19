@@ -2189,6 +2189,145 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
         Assert-Equal 0 $script:Enables
         Assert-Equal $before (Get-Content -LiteralPath $script:Journal -Raw)
     }
+    & {
+        function Assert-UndoReviewBinding(
+            [string]$Field,
+            [string]$ChangedValue,
+            [string]$ExpectedMessage,
+            [switch]$JournalField
+        ) {
+            Reset-Fixture
+            $plan = New-FixturePlan
+            $action = $plan.Actions[0]
+            $server = 'dc.example.invalid'
+            $owner = [ADAnalyzerRemediationJournal]::new()
+            try {
+                $owner.Open($plan, $server, $script:Journal)
+                $journal = $owner.Read()
+                $after = $action.Preconditions.PSObject.Copy()
+                $after.Enabled = $false
+                $journal.Entries = @([pscustomobject]@{
+                        EntryId = '44444444-4444-4444-8444-444444444444'
+                        ActionId = $action.ActionId
+                        ObjectGuid = $action.ObjectGuid
+                        SID = $action.SID
+                        DistinguishedName = $action.DistinguishedName
+                        ObjectClass = $action.ObjectClass
+                        AccountType = $action.AccountType
+                        Action = 'DisableAccount'
+                        Before = $action.Preconditions
+                        After = $after
+                        Status = 'Succeeded'
+                        Undo = $null
+                    })
+                $owner.Write($journal)
+            }
+            finally {
+                $owner.Dispose()
+            }
+
+            $originalBytes = [IO.File]::ReadAllBytes($script:Journal)
+            $edited = [IO.File]::ReadAllText($script:Journal) | ConvertFrom-Json
+            $subject = $edited
+            if (-not $JournalField) {
+                $subject = $edited.Entries[0]
+            }
+            $property = $subject.PSObject.Properties[$Field]
+            Assert-True ($null -ne $property -and $property.Value -cne $ChangedValue) 'The fixture did not select a changed field.'
+            $property.Value = $ChangedValue
+            $expectedJson = ConvertTo-Json -InputObject $edited -Depth 30 -Compress
+            $encoding = [Text.UTF8Encoding]::new($false)
+            $expectedBytes = $encoding.GetBytes($expectedJson)
+            $expected = [Convert]::ToBase64String($expectedBytes)
+            Assert-True (
+                $expected -cne [Convert]::ToBase64String($originalBytes)
+            ) 'The review fixture did not change its journal.'
+
+            $script:UndoConsentLeaseCalls = 0
+            $script:UndoConsentEffects = [Collections.Generic.List[string]]::new()
+            $nativeLease = (Get-Command Enter-ADAnalyzerJournalLease -CommandType Function).ScriptBlock
+            function Enter-ADAnalyzerJournalLease([string]$Path) {
+                Assert-Equal $script:Journal $Path
+                $lease = & $nativeLease -Path $Path
+                try {
+                    Assert-True (
+                        [Convert]::ToBase64String([IO.File]::ReadAllBytes($Path)) -ceq [Convert]::ToBase64String($originalBytes)
+                    ) 'The journal changed before the fixture acquired its lease.'
+                    [IO.File]::WriteAllBytes($Path, $expectedBytes)
+                    $script:UndoConsentLeaseCalls++
+                    return $lease
+                }
+                catch {
+                    $lease.Dispose()
+                    throw
+                }
+            }
+            foreach ($name in @(
+                    'Get-ADObject', 'Get-ADGroup', 'Get-ADRootDSE', 'Enable-ADAccount', 'Disable-ADAccount',
+                    'Get-ADAnalyzerOperationCurrentObject', 'Save-ADAnalyzerOperationJournal', 'Write-ADAnalyzerOperationFile',
+                    'Write-ADAnalyzerFile', 'Import-Module', 'Invoke-Command', 'New-PSDrive'
+                )) {
+                Set-Item -LiteralPath ('Function:local:' + $name) -Value {
+                    $script:UndoConsentEffects.Add($MyInvocation.MyCommand.Name)
+                    throw 'The isolated Undo review fixture reached an external effect.'
+                }
+            }
+
+            $parameters = @{
+                JournalPath = $script:Journal
+                Server = $server
+                Confirm = $false
+            }
+            if ($ExpectedMessage) {
+                Assert-ThrowsMessage { Undo-ADAnalyzerRemediation @parameters } $ExpectedMessage
+            }
+            else {
+                Assert-Equal 0 @(Undo-ADAnalyzerRemediation @parameters).Count
+            }
+            Assert-Equal 1 $script:UndoConsentLeaseCalls
+            Assert-Equal 0 $script:UndoConsentEffects.Count
+            Assert-Equal 0 $script:Reads
+            Assert-Equal 0 $script:GroupReads
+            Assert-Equal 0 $script:Enables
+            Assert-Equal 0 $script:Disables
+            Assert-True (
+                [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:Journal)) -ceq $expected
+            ) 'Undo wrote beyond the fixture change.'
+            $reacquired = [IO.File]::Open(
+                ($script:Journal + '.lock'), [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None
+            )
+            try {
+                Assert-Equal 0 $reacquired.Length
+            }
+            finally {
+                $reacquired.Dispose()
+            }
+        }
+
+        Invoke-Test 'undo approval rejects changed journal and plan identifiers under the lease' {
+            foreach ($field in 'JournalId', 'PlanId') {
+                $binding = @{
+                    Field = $field
+                    ChangedValue = '55555555-5555-4555-8555-555555555555'
+                    ExpectedMessage = 'Journal identity changed after undo review'
+                    JournalField = $true
+                }
+                Assert-UndoReviewBinding @binding
+            }
+        }
+        Invoke-Test 'undo approval rejects changed selected entry identity and preserves ineligible skip' {
+            $fields = [ordered]@{
+                ActionId = '66666666-6666-4666-8666-666666666666'
+                ObjectGuid = '77777777-7777-4777-8777-777777777777'
+                SID = 'S-1-5-21-10-20-30-1777'
+                DistinguishedName = 'CN=Changed Fixture,DC=offline,DC=invalid'
+            }
+            foreach ($item in $fields.GetEnumerator()) {
+                Assert-UndoReviewBinding $item.Key $item.Value 'Journal entry identity changed after undo review'
+            }
+            Assert-UndoReviewBinding 'Status' 'Undone' ''
+        }
+    }
     Invoke-Test 'undo rejects concurrent state changes and new privileged membership' {
         $null = Apply-FixturePlan
         $script:Current.WhenChanged = $script:Current.WhenChanged.AddSeconds(30)
