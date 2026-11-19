@@ -262,6 +262,19 @@ $executor = [ADAnalyzerRemediationExecutor]::new()
 $preview = $executor.Preview($plan, $scan.Context.Server, '.\journal.json')
 ```
 
+Use the same executor to review and undo a previously journaled account disable. `PreviewUndo(journalPath, server)` reads the existing local journal and returns skipped rows for successful disables in journal order. It has no directory calls, lock acquisition, or file writes. `Undo(journalPath, server, approvedEntryIds)` takes the EntryIds you explicitly approve from that preview. A trailing `PSCredential` supplies optional credentials. An empty list skips every candidate. Duplicate, unknown, or ambiguous IDs fail before acquiring a lock.
+
+```powershell
+$server = $scan.Context.Server
+$journalPath = '.\journal.json'
+$undoPreview = $executor.PreviewUndo($journalPath, $server)
+
+# After reviewing the preview, supply the selected EntryId values.
+$undoResult = $executor.Undo($journalPath, $server, $reviewedEntryIds)
+```
+
+Undo reopens the same existing journal under its exclusive lock. It binds the selected entries to the journal snapshot read at the start of the call. It then checks the account’s current state and privileges on the selected controller and persists the prepared reversal before enabling the account. A successful entry follows a verified reread and durable journal update. Direct methods return completed results or throw on failure. `Undo-ADAnalyzerRemediation` retains native confirmation, `WhatIf`, and per-entry pipeline output.
+
 `ADAnalyzerAssessmentEngine` validates and copies its in-memory profile at construction without importing native modules or connecting to AD. Instance methods own assessment composition, policy/version evidence, suppression, duplicate detection, coverage, state, and safe report projection. Reports retain the existing detached assessment shape; the engine stores no credentials or collected records. A bundled C# configuration holder uses a private field, so serializing an engine does not serialize its profile. The built-in `Add-Type` loads that small source component; no separate build tool or external package is required. Each instance owns its configuration, and evaluating again does not retain earlier results. Direct methods throw on evaluation errors. The existing `Invoke-ADAnalyzerAssessment` command is a thin compatibility adapter with its original parameters and a transient command context for PowerShell error-stream/common-parameter behavior. Other engine components are being converted in separate verified units.
 
 `ADAnalyzerGpoReader` owns the actual folder reader and INI, CSV, Registry.pol, XML, INF-flag, and security-option parsers. It retains no scan data or handles. `Read(path)` returns the existing policy DTO, and `ReadRegistryPolicy(path, scope)` returns typed registry records. Raw INI/XML and scalar parsing methods are internal implementation helpers; their compatibility functions retain the original source-parser contracts. Direct registry parsing buffers records and throws on invalid content; the compatibility `Read-AnalyzerRegistryPolicy` command preserves its earlier record streaming before a late parse failure. Existing reader commands delegate to the class; their consumer boundaries remain available. Reader construction is inert, and file/reader resources are closed before a successful direct return or after failure.

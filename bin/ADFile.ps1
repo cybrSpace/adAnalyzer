@@ -76,12 +76,16 @@ function Resolve-ADAnalyzerFilePath {
 function Write-ADAnalyzerFile {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Content
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Content,
+        [switch]$RequireExisting
 
     )
     $full = Resolve-ADAnalyzerFilePath $Path
     $directory = [IO.Path]::GetDirectoryName($full)
     if (-not [IO.Directory]::Exists($directory)) {
+        if ($RequireExisting) {
+            throw 'Journal file does not exist'
+        }
         $null = [IO.Directory]::CreateDirectory($directory)
     }
     $temporary = Join-Path $directory ('.ad-analyzer-' + [guid]::NewGuid().ToString('N') + '.tmp')
@@ -100,7 +104,7 @@ function Write-ADAnalyzerFile {
         $stream.Dispose()
         $stream = $null
         # NullString passes an actual null backup path through PowerShell's method binder.
-        if ([IO.File]::Exists($full)) {
+        if ($RequireExisting -or [IO.File]::Exists($full)) {
             [IO.File]::Replace($temporary, $full, [Management.Automation.Language.NullString]::Value)
         }
         else {

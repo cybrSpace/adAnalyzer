@@ -723,9 +723,14 @@ function Resolve-ADAnalyzerOperationFilePath {
 function Write-ADAnalyzerOperationFile {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Content
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Content,
+        [switch]$RequireExisting
 
     )
+    if ($RequireExisting) {
+        Write-ADAnalyzerFile -Path $Path -Content $Content -RequireExisting
+        return
+    }
     Write-ADAnalyzerFile -Path $Path -Content $Content
 }
 
@@ -3115,17 +3120,7 @@ class ADAnalyzerRemediationJournal : System.IDisposable {
             if (-not [IO.Directory]::Exists($directory)) {
                 $null = [IO.Directory]::CreateDirectory($directory)
             }
-            $leaseType = 'ADAnalyzer.JournalLease' -as [type]
-            if ($null -eq $leaseType) {
-                Add-Type -Path (Join-Path $PSScriptRoot 'ADJournalLease.cs') -ErrorAction Stop
-                $leaseType = [type]'ADAnalyzer.JournalLease'
-            }
-            try {
-                $owner = $leaseType::Open($full, [string]$reviewedPlan.PlanId, $Server, $this)
-            }
-            catch {
-                throw $this.LeaseOpenFailure($full, $_.Exception)
-            }
+            $owner = $this.AcquireLease($full, [string]$reviewedPlan.PlanId, $Server)
 
             $opened = $false
             try {
@@ -3160,6 +3155,53 @@ class ADAnalyzerRemediationJournal : System.IDisposable {
         }
     }
 
+    hidden [object] OpenExisting(
+        [string]$Path,
+        [string]$Server,
+        [string]$PlanId,
+        [string]$JournalId
+    ) {
+        $ErrorActionPreference = 'Stop'
+        if ([Threading.Monitor]::IsEntered($this.OwnershipGate)) {
+            throw 'A remediation journal operation is active.'
+        }
+        [Threading.Monitor]::Enter($this.OwnershipGate)
+        try {
+            if ($null -ne $this.Lease) {
+                throw 'A remediation journal is already open'
+            }
+            if (-not [IO.File]::Exists($Path)) {
+                throw 'Journal file does not exist'
+            }
+            $owner = $this.AcquireLease($Path, $PlanId, $Server)
+            $opened = $false
+            try {
+                $reader = [ADAnalyzerOperationDocumentReader]::new()
+                $journal = $reader.Read($owner.GetPath(), 'Journal')
+                if (-not $this.IsUndoJournal($journal.JournalType, $journal.Server, $Server)) {
+                    throw 'Journal type/server does not match this undo request'
+                }
+                if ($journal.PlanId -isnot [string] -or $journal.PlanId -ine $PlanId -or
+                    $journal.JournalId -isnot [string] -or $journal.JournalId -ine $JournalId) {
+                    throw 'Journal identity changed after undo review'
+                }
+                $record = [ADAnalyzerEvidenceProjector]::new().Project($journal)
+                $owner.BindInitialRecord($journal.JournalId, $this.SerializeJournal($journal), $true)
+                $this.Lease = $owner
+                $opened = $true
+                return $record
+            }
+            finally {
+                if (-not $opened) {
+                    $owner.Dispose()
+                }
+            }
+        }
+        finally {
+            [Threading.Monitor]::Exit($this.OwnershipGate)
+        }
+    }
+
     [object] Read() {
         $ErrorActionPreference = 'Stop'
         $owner = $this.RequireLease()
@@ -3174,6 +3216,14 @@ class ADAnalyzerRemediationJournal : System.IDisposable {
     }
 
     [void] Write([object]$Journal) {
+        $this.WriteOwned($Journal, $false)
+    }
+
+    hidden [void] WriteExisting([object]$Journal) {
+        $this.WriteOwned($Journal, $true)
+    }
+
+    hidden [void] WriteOwned([object]$Journal, [bool]$RequireExisting) {
         $ErrorActionPreference = 'Stop'
         $owner = $this.RequireLease()
         $operation = $owner.EnterOperation()
@@ -3192,7 +3242,12 @@ class ADAnalyzerRemediationJournal : System.IDisposable {
             $record.UpdatedAt = $this.Timestamp()
             $path = $owner.GetPath()
             $content = $this.SerializeJournal($record)
-            $null = Write-ADAnalyzerOperationFile -Path $path -Content $content
+            if ($RequireExisting) {
+                $null = Write-ADAnalyzerOperationFile -Path $path -Content $content -RequireExisting
+            }
+            else {
+                $null = Write-ADAnalyzerOperationFile -Path $path -Content $content
+            }
             $owner.MarkWritten()
         }
         finally {
@@ -3223,6 +3278,20 @@ class ADAnalyzerRemediationJournal : System.IDisposable {
             throw 'No remediation journal is open'
         }
         return $owner
+    }
+
+    hidden [object] AcquireLease([string]$Path, [string]$PlanId, [string]$Server) {
+        $leaseType = 'ADAnalyzer.JournalLease' -as [type]
+        if ($null -eq $leaseType) {
+            Add-Type -Path (Join-Path $PSScriptRoot 'ADJournalLease.cs') -ErrorAction Stop
+            $leaseType = [type]'ADAnalyzer.JournalLease'
+        }
+        try {
+            return $leaseType::Open($Path, $PlanId, $Server, $this)
+        }
+        catch {
+            throw $this.LeaseOpenFailure($Path, $_.Exception)
+        }
     }
 
     hidden [bool] IsOwnedLease([object]$Owner) {
@@ -3286,6 +3355,11 @@ class ADAnalyzerRemediationJournal : System.IDisposable {
 
     hidden [bool] IsJournalType([object]$Type) {
         return -not ($Type -ne 'ADAnalyzerRemediationJournal')
+    }
+
+    hidden [bool] IsUndoJournal([object]$Type, [object]$ActualServer, [string]$ExpectedServer) {
+        return $Type -is [string] -and $this.IsJournalType($Type) -and
+            $ActualServer -is [string] -and $this.MatchesServer($ActualServer, $ExpectedServer)
     }
 
     hidden [bool] MatchesPlanId([object]$Actual, [object]$Expected) {
@@ -3447,6 +3521,314 @@ function Assert-ADAnalyzerOperationPlan {
 
 class ADAnalyzerRemediationExecutor {
     ADAnalyzerRemediationExecutor() {
+    }
+
+    [object[]] PreviewUndo([string]$JournalPath, [string]$Server) {
+        $ErrorActionPreference = 'Stop'
+        $target = $this.ReadUndoTarget($JournalPath, $Server, [pscredential]::Empty)
+        $rows = [Collections.Generic.List[object]]::new()
+        foreach ($entry in @($target.Journal.Entries)) {
+            if ($this.IsReviewedUndoEntry($entry)) {
+                $rows.Add($this.SkippedUndo($entry.EntryId, $entry.ObjectGuid))
+            }
+        }
+        return $rows.ToArray()
+    }
+
+    [object[]] Undo([string]$JournalPath, [string]$Server, [object[]]$ApprovedEntryIds) {
+        return $this.Undo($JournalPath, $Server, $ApprovedEntryIds, [pscredential]::Empty)
+    }
+
+    [object[]] Undo(
+        [string]$JournalPath,
+        [string]$Server,
+        [object[]]$ApprovedEntryIds,
+        [pscredential]$Credential
+    ) {
+        $ErrorActionPreference = 'Stop'
+        $target = $this.ReadUndoTarget($JournalPath, $Server, $Credential)
+        $approvals = $this.ApprovedUndoSet($target.Journal, $ApprovedEntryIds)
+        $rows = [Collections.Generic.List[object]]::new()
+        $owner = [ADAnalyzerRemediationJournal]::new()
+        $guard = [ADAnalyzerRemediationGuard]::new()
+        $journal = $null
+        $ownedEntries = $null
+        $plan = $null
+        $commands = $null
+        $connection = $target.Connection
+        try {
+            foreach ($candidate in @($target.Journal.Entries)) {
+                if (-not $this.IsReviewedUndoEntry($candidate)) {
+                    continue
+                }
+                $id = $this.UndoEntryId($candidate.EntryId)
+                if (-not $id -or -not $approvals.ContainsKey($id)) {
+                    $rows.Add($this.SkippedUndo($candidate.EntryId, $candidate.ObjectGuid))
+                    continue
+                }
+
+                if ($null -eq $journal) {
+                    $journal = $owner.OpenExisting(
+                        $target.Path, $Server, $target.Journal.PlanId, $target.Journal.JournalId
+                    )
+                    $ownedEntries = $this.IndexUndoEntries($journal)
+                    $plan = $this.UndoPolicy(
+                        $journal.Remediation, $journal.PrivilegedSids, $journal.AccountClassification
+                    )
+                }
+                if (-not $ownedEntries.ContainsKey($id) -or $ownedEntries[$id].Count -ne 1) {
+                    throw 'Journal entry identity is missing or ambiguous'
+                }
+                $entry = $ownedEntries[$id][0]
+                if (-not $this.IsReviewedUndoEntry($entry)) {
+                    continue
+                }
+                foreach ($name in $this.UndoIdentityFields()) {
+                    $reviewedValue = [string](Get-ADAnalyzerOperationValue $candidate @($name))
+                    $ownedValue = [string](Get-ADAnalyzerOperationValue $entry @($name))
+                    if (-not $this.IsSameUndoIdentity($reviewedValue, $ownedValue)) {
+                        throw 'Journal entry identity changed after undo review'
+                    }
+                }
+                try {
+                    if ($entry.Before.Enabled -isnot [bool] -or $entry.After.Enabled -isnot [bool] -or
+                        -not $this.IsReversibleDisable($entry)) {
+                        throw 'Journal does not contain a reversible enabled-to-disabled transition'
+                    }
+                    $approved = @(foreach ($value in @($journal.Remediation.ApprovedObjectGuids)) {
+                            ConvertTo-ADAnalyzerOperationGuid $value
+                        })
+                    if (-not $this.IsApprovedUndoEntry($entry, $approved)) {
+                        throw 'Journal entry identity is not bound to an approved reversible action'
+                    }
+                    if ($null -eq $commands) {
+                        $commands = $this.GetUndoDirectoryCommands()
+                    }
+                    $current = Get-ADAnalyzerOperationCurrentObject $entry.ObjectGuid $connection $plan $commands.Read
+                    $state = $guard.AssertPreconditions($entry.After, $current, $false)
+                    $guard.AssertPrivilege($current, $entry, $plan, $Server, $Credential)
+                    $this.PrepareUndoEntry($entry, $state)
+                    $owner.WriteExisting($journal)
+
+                    $mutation = @{
+                        Identity = [guid]$entry.ObjectGuid
+                        WhatIf = $false
+                        Confirm = $false
+                    }
+                    $enable = $commands.Enable
+                    $null = & $enable @mutation @connection
+                    $after = Get-ADAnalyzerOperationCurrentObject $entry.ObjectGuid $connection $plan $commands.Read
+                    $entry.Undo.After = $guard.ReadState($after)
+                    if (-not $this.IsVerifiedEnabled($entry.Before, $entry.Undo.After)) {
+                        throw 'Unable to verify the account enable result'
+                    }
+                    $this.CompleteUndoEntry($entry)
+                    $owner.WriteExisting($journal)
+                }
+                catch {
+                    $failure = $_
+                    $this.RecordUndoFailure($entry, $failure.Exception.Message)
+                    try {
+                        $owner.WriteExisting($journal)
+                    }
+                    catch {
+                        throw $this.UndoPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                    }
+                    throw $failure
+                }
+                $rows.Add([ADAnalyzerEvidenceProjector]::new().Project($entry))
+            }
+        }
+        finally {
+            $owner.Dispose()
+        }
+        return $rows.ToArray()
+    }
+
+    hidden [hashtable] ReadUndoTarget([string]$Path, [string]$Server, [pscredential]$Credential) {
+        $full = Resolve-ADAnalyzerOperationFilePath $Path
+        $reader = [ADAnalyzerOperationDocumentReader]::new()
+        $journal = $reader.Read($full, 'Journal')
+        $storage = [ADAnalyzerRemediationJournal]::new()
+        if (-not $storage.IsUndoJournal($journal.JournalType, $journal.Server, $Server)) {
+            throw 'Journal type/server does not match this undo request'
+        }
+        if ($journal.PlanId -isnot [string] -or [string]::IsNullOrWhiteSpace($journal.PlanId) -or
+            $journal.JournalId -isnot [string] -or [string]::IsNullOrWhiteSpace($journal.JournalId)) {
+            throw 'The remediation journal is missing its identity'
+        }
+        return @{
+            Path = $full
+            Journal = [ADAnalyzerEvidenceProjector]::new().Project($journal)
+            Connection = Get-ADAnalyzerOperationConnection $Server $Credential
+        }
+    }
+
+    hidden [object] UndoEntryId([object]$Value) {
+        if ($Value -isnot [string] -and $Value -isnot [guid]) {
+            return $null
+        }
+        return ConvertTo-ADAnalyzerOperationGuid $Value
+    }
+
+    hidden [hashtable] IndexUndoEntries([object]$Journal) {
+        $index = @{}
+        foreach ($entry in @($Journal.Entries)) {
+            if ($null -eq $entry) {
+                continue
+            }
+            $property = $entry.PSObject.Properties['EntryId']
+            if ($null -eq $property) {
+                continue
+            }
+            $id = $this.UndoEntryId($property.Value)
+            if ($id) {
+                if (-not $index.ContainsKey($id)) {
+                    $index[$id] = [Collections.Generic.List[object]]::new()
+                }
+                $index[$id].Add($entry)
+            }
+        }
+        return $index
+    }
+
+    hidden [hashtable] ApprovedUndoSet([object]$Journal, [object[]]$Requested) {
+        if ($null -eq $Requested) {
+            throw 'Supply explicit approved undo entry IDs'
+        }
+        $reviewed = $this.IndexUndoEntries($Journal)
+        $approved = @{}
+        foreach ($value in $Requested) {
+            $id = $this.UndoEntryId($value)
+            if (-not $id -or -not $reviewed.ContainsKey($id)) {
+                throw 'Approved undo entry ID does not belong to the reviewed journal'
+            }
+            if ($reviewed[$id].Count -ne 1) {
+                throw 'Journal entry identity is missing or ambiguous'
+            }
+            $entry = $reviewed[$id][0]
+            if (-not $this.IsReviewedUndoEntry($entry)) {
+                throw 'Approved undo entry ID does not belong to the reviewed journal'
+            }
+            if ($approved.ContainsKey($id)) {
+                throw 'Approved undo entry IDs must be unique'
+            }
+            $approved[$id] = $true
+        }
+        return $approved
+    }
+
+    hidden [hashtable] GetUndoDirectoryCommands() {
+        $providerPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'lib/Microsoft.ActiveDirectory.Management.dll'
+        $provider = Import-Module -Name $providerPath -Scope Local -PassThru -ErrorAction Stop
+        $exports = $provider.ExportedCmdlets
+        if ($null -eq $exports -or
+            $exports['Get-ADObject'] -isnot [Management.Automation.CommandInfo] -or
+            $exports['Enable-ADAccount'] -isnot [Management.Automation.CommandInfo]) {
+            throw 'Bundled AD assembly does not provide the required Undo commands'
+        }
+        return @{
+            Read = $exports['Get-ADObject']
+            Enable = $exports['Enable-ADAccount']
+        }
+    }
+
+    hidden [bool] IsUndoAction([object]$Action) {
+        return ($Action -eq 'DisableAccount')
+    }
+
+    hidden [bool] IsUndoStatus([object]$Status) {
+        return ($Status -eq 'Succeeded')
+    }
+
+    hidden [bool] IsReviewedUndoEntry([object]$Entry) {
+        if ($null -eq $Entry) {
+            return $false
+        }
+        $action = $Entry.PSObject.Properties['Action']
+        if ($null -eq $action -or $action.Value -isnot [string] -or -not $this.IsUndoAction($action.Value)) {
+            return $false
+        }
+        $status = $Entry.PSObject.Properties['Status']
+        return $null -ne $status -and $status.Value -is [string] -and $this.IsUndoStatus($status.Value)
+    }
+
+    hidden [object] SkippedUndo([object]$EntryId, [object]$ObjectGuid) {
+        return [pscustomobject]@{
+            EntryId = $EntryId
+            ObjectGuid = $ObjectGuid
+            Status = 'Skipped'
+        }
+    }
+
+    hidden [object] UndoPolicy([object]$Remediation, [object]$PrivilegedSids, [object]$AccountClassification) {
+        return [pscustomobject]@{
+            Remediation = $Remediation
+            PrivilegedSids = $PrivilegedSids
+            AccountClassification = $AccountClassification
+        }
+    }
+
+    hidden [string[]] UndoIdentityFields() {
+        return @('ActionId', 'ObjectGuid', 'SID', 'DistinguishedName')
+    }
+
+    hidden [bool] IsSameUndoIdentity([string]$Reviewed, [string]$Owned) {
+        return ($Owned -ieq $Reviewed)
+    }
+
+    hidden [bool] IsReversibleDisable([object]$Entry) {
+        return -not ($Entry.Before.Enabled -ne $true -or $Entry.After.Enabled -ne $false)
+    }
+
+    hidden [bool] IsApprovedUndoEntry([object]$Entry, [object[]]$ApprovedObjectGuids) {
+        return -not ($Entry.ObjectGuid -notin $ApprovedObjectGuids -or
+            $Entry.ObjectGuid -ne $Entry.Before.ObjectGuid -or
+            $Entry.ObjectGuid -ne $Entry.After.ObjectGuid -or
+            $Entry.SID -ne $Entry.Before.SID -or
+            $Entry.SID -ne $Entry.After.SID)
+    }
+
+    hidden [void] PrepareUndoEntry([object]$Entry, [object]$State) {
+        $Entry.Undo = [pscustomobject]@{
+            Timestamp = [datetimeoffset]::UtcNow.ToString('o')
+            Status = 'Prepared'
+            Before = $State
+            After = $null
+            Message = $null
+        }
+    }
+
+    hidden [bool] IsVerifiedEnabled([object]$Before, [object]$After) {
+        return -not ($After.ObjectGuid -ne $Before.ObjectGuid -or
+            $After.SID -ne $Before.SID -or
+            $After.DistinguishedName -ine $Before.DistinguishedName -or
+            $After.Enabled -isnot [bool] -or -not $After.Enabled)
+    }
+
+    hidden [void] CompleteUndoEntry([object]$Entry) {
+        $Entry.Undo.Status = 'Succeeded'
+        $Entry.Status = 'Undone'
+    }
+
+    hidden [void] RecordUndoFailure([object]$Entry, [string]$Message) {
+        if ($Entry.Undo) {
+            $Entry.Undo.Status = 'Failed'
+            $Entry.Undo.Message = $Message
+        }
+        else {
+            $Entry.Undo = [pscustomobject]@{
+                Timestamp = [datetimeoffset]::UtcNow.ToString('o')
+                Status = 'Rejected'
+                Before = $null
+                After = $null
+                Message = $Message
+            }
+        }
+    }
+
+    hidden [string] UndoPersistenceFailure([string]$Original, [string]$Persistence) {
+        return 'Undo journal persistence failed; no further changes were attempted. ' + $Original + '; ' + $Persistence
     }
 
     [object[]] Preview([object]$Plan, [string]$Server, [string]$JournalPath) {
@@ -3811,15 +4193,14 @@ function Undo-ADAnalyzerRemediation {
         throw 'Journal type/server does not match this undo request'
     }
     $connection = Get-ADAnalyzerOperationConnection $Server $Credential
+    $executor = [ADAnalyzerRemediationExecutor]::new()
     $lease = $null
     try {
-        foreach ($candidate in @($journal.Entries | Where-Object { $_.Action -eq 'DisableAccount' -and $_.Status -eq 'Succeeded' })) {
+        foreach ($candidate in @($journal.Entries | Where-Object {
+                    $executor.IsUndoAction($_.Action) -and $executor.IsUndoStatus($_.Status)
+                })) {
             if (-not $PSCmdlet.ShouldProcess($candidate.DistinguishedName, 'Undo a journaled account disable')) {
-                [pscustomobject]@{
-                    EntryId = $candidate.EntryId
-                    ObjectGuid = $candidate.ObjectGuid
-                    Status = 'Skipped'
-                }
+                $executor.SkippedUndo($candidate.EntryId, $candidate.ObjectGuid)
                 continue
             }
             if ($null -eq $lease) {
@@ -3832,14 +4213,13 @@ function Undo-ADAnalyzerRemediation {
                 }
                 $ownedJournalId = [string](Get-ADAnalyzerOperationValue $journal @('JournalId'))
                 $ownedPlanId = [string](Get-ADAnalyzerOperationValue $journal @('PlanId'))
-                if ($ownedJournalId -ine $reviewedJournalId -or $ownedPlanId -ine $reviewedPlanId) {
+                if (-not $executor.IsSameUndoIdentity($reviewedJournalId, $ownedJournalId) -or
+                    -not $executor.IsSameUndoIdentity($reviewedPlanId, $ownedPlanId)) {
                     throw 'Journal identity changed after undo review'
                 }
-                $plan = [pscustomobject]@{
-                    Remediation = $journal.Remediation
-                    PrivilegedSids = $journal.PrivilegedSids
-                    AccountClassification = $journal.AccountClassification
-                }
+                $plan = $executor.UndoPolicy(
+                    $journal.Remediation, $journal.PrivilegedSids, $journal.AccountClassification
+                )
             }
             $matching = @($journal.Entries | Where-Object { $_.EntryId -eq $candidate.EntryId })
             if (-not $candidate.EntryId -or $matching.Count -ne 1) {
@@ -3849,72 +4229,45 @@ function Undo-ADAnalyzerRemediation {
             if ($entry.Action -ne 'DisableAccount' -or $entry.Status -ne 'Succeeded') {
                 continue
             }
-            foreach ($name in 'ActionId', 'ObjectGuid', 'SID', 'DistinguishedName') {
+            foreach ($name in $executor.UndoIdentityFields()) {
                 $reviewedValue = [string](Get-ADAnalyzerOperationValue $candidate @($name))
                 $ownedValue = [string](Get-ADAnalyzerOperationValue $entry @($name))
-                if ($ownedValue -ine $reviewedValue) {
+                if (-not $executor.IsSameUndoIdentity($reviewedValue, $ownedValue)) {
                     throw 'Journal entry identity changed after undo review'
                 }
             }
             try {
-                if ($entry.Before.Enabled -ne $true -or $entry.After.Enabled -ne $false) {
+                if (-not $executor.IsReversibleDisable($entry)) {
                     throw 'Journal does not contain a reversible enabled-to-disabled transition'
                 }
                 $approved = @(foreach ($value in @($journal.Remediation.ApprovedObjectGuids)) {
                         ConvertTo-ADAnalyzerOperationGuid $value
                     })
-                if ($entry.ObjectGuid -notin $approved -or
-                    $entry.ObjectGuid -ne $entry.Before.ObjectGuid -or
-                    $entry.ObjectGuid -ne $entry.After.ObjectGuid -or
-                    $entry.SID -ne $entry.Before.SID -or
-                    $entry.SID -ne $entry.After.SID) {
+                if (-not $executor.IsApprovedUndoEntry($entry, $approved)) {
                     throw 'Journal entry identity is not bound to an approved reversible action'
                 }
                 $current = Get-ADAnalyzerOperationCurrentObject $entry.ObjectGuid $connection $plan
                 $state = Assert-ADAnalyzerOperationPreconditions $entry.After $current $false
                 Assert-ADAnalyzerOperationPrivilege $current $entry $plan $connection
-                $entry.Undo = [pscustomobject]@{
-                    Timestamp = [datetimeoffset]::UtcNow.ToString('o')
-                    Status = 'Prepared'
-                    Before = $state
-                    After = $null
-                    Message = $null
-                }
+                $executor.PrepareUndoEntry($entry, $state)
                 Save-ADAnalyzerOperationJournal $journal $JournalPath
                 Enable-ADAccount -Identity ([guid]$entry.ObjectGuid) @connection -WhatIf:$false -Confirm:$false
                 $after = Get-ADAnalyzerOperationCurrentObject $entry.ObjectGuid $connection $plan
                 $entry.Undo.After = Get-ADAnalyzerOperationState $after
-                if ($entry.Undo.After.ObjectGuid -ne $entry.Before.ObjectGuid -or
-                    $entry.Undo.After.SID -ne $entry.Before.SID -or
-                    $entry.Undo.After.DistinguishedName -ine $entry.Before.DistinguishedName -or
-                    $entry.Undo.After.Enabled -isnot [bool] -or
-                    -not $entry.Undo.After.Enabled) {
+                if (-not $executor.IsVerifiedEnabled($entry.Before, $entry.Undo.After)) {
                     throw 'Unable to verify the account enable result'
                 }
-                $entry.Undo.Status = 'Succeeded'
-                $entry.Status = 'Undone'
+                $executor.CompleteUndoEntry($entry)
                 Save-ADAnalyzerOperationJournal $journal $JournalPath
             }
             catch {
                 $failure = $_
-                if ($entry.Undo) {
-                    $entry.Undo.Status = 'Failed'
-                    $entry.Undo.Message = $failure.Exception.Message
-                }
-                else {
-                    $entry.Undo = [pscustomobject]@{
-                        Timestamp = [datetimeoffset]::UtcNow.ToString('o')
-                        Status = 'Rejected'
-                        Before = $null
-                        After = $null
-                        Message = $failure.Exception.Message
-                    }
-                }
+                $executor.RecordUndoFailure($entry, $failure.Exception.Message)
                 try {
                     Save-ADAnalyzerOperationJournal $journal $JournalPath
                 }
                 catch {
-                    throw ('Undo journal persistence failed; no further changes were attempted. ' + $failure.Exception.Message + '; ' + $_.Exception.Message)
+                    throw $executor.UndoPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
                 }
                 throw $failure
             }

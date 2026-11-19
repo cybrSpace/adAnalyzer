@@ -3355,6 +3355,46 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
         }
     }
 
+    $remediationUndoCases = [ordered]@{
+        Native = 8
+        Construction = 2
+        Standalone = 1
+        Direct = 10
+        Isolation = 2
+    }
+    foreach ($case in $remediationUndoCases.Keys) {
+        Invoke-Test ('Remediation Undo API: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $arguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                (Join-Path $PSScriptRoot 'RemediationUndoClassFixture.ps1')
+                '-Case'
+                $case
+                '-RepositoryRoot'
+                $RepositoryRoot
+            )
+            $previousPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $output = @(& $executable @arguments 2>&1)
+                $fixtureExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $previousPreference
+            }
+            if ($fixtureExitCode -ne 0) {
+                throw ("Remediation Undo fixture exited with code {0}.{1}{2}" -f
+                    $fixtureExitCode, [Environment]::NewLine, ($output -join [Environment]::NewLine))
+            }
+
+            $marker = 'PASS remediation undo ' + $case + ' ' + $remediationUndoCases[$case]
+            Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+        }
+    }
+
 
     $legacyValueCases = [ordered]@{
         Parity = 44
