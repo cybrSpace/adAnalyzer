@@ -376,23 +376,22 @@ function ConvertTo-FixtureError($Diagnostic) {
     }
     if ($record -is [Management.Automation.ErrorRecord]) {
         $exception = $record.Exception
-        return [pscustomobject][ordered]@{
+        $details = [ordered]@{
             Type = $type
             Id = $record.FullyQualifiedErrorId
             Category = [string]$record.CategoryInfo.Category
-            Message = if ($null -ne $exception) {
-                $exception.Message
-            }
-            ExceptionType = if ($null -ne $exception) {
-                $exception.GetType().FullName
-            }
-            Restore = if ($null -ne $exception) {
-                $exception.Data['ADAnalyzerLocationRestorationError']
-            }
-            Remove = if ($null -ne $exception) {
-                $exception.Data['ADAnalyzerDriveRemovalError']
-            }
+            Message = $null
+            ExceptionType = $null
+            Restore = $null
+            Remove = $null
         }
+        if ($null -ne $exception) {
+            $details.Message = $exception.Message
+            $details.ExceptionType = $exception.GetType().FullName
+            $details.Restore = $exception.Data['ADAnalyzerLocationRestorationError']
+            $details.Remove = $exception.Data['ADAnalyzerDriveRemovalError']
+        }
+        return [pscustomobject]$details
     }
     if ($Diagnostic -is [Exception]) {
         return [pscustomobject][ordered]@{
