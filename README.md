@@ -147,6 +147,13 @@ $membershipGraph = [ADAnalyzerMembershipGraph]::new($groups)
 $membership = $membershipGraph.Resolve($account, $domainSid, $privilegedSids)
 $accountClassifier = [ADAnalyzerAccountClassifier]::new()
 $classification = $accountClassifier.Classify($account, $profile, $membership)
+$directoryCollector = [ADAnalyzerDirectoryCollector]::new()
+$context = @{
+    Server = $server
+    Domain = $domain
+    Credential = $credential
+}
+$directorySnapshot = $directoryCollector.Collect($context, $profile)
 $directoryEvaluator = [ADAnalyzerDirectoryPolicyEvaluator]::new()
 $checks = $directoryEvaluator.Evaluate($directorySnapshot, $profile)
 $directoryProjector = [ADAnalyzerDirectoryObjectProjector]::new()
@@ -172,6 +179,8 @@ $rawValue = $projector.GetValue($record, @('Primary', 'Fallback'), $null)
 `ADAnalyzerAccountClassifier` owns schema, OU, group and attribute classification, including conflicting and invalid-rule evidence. Its inert constructor retains no configuration or results; pass a raw profile to `Classify(account, profile)` and optional membership to `Classify(account, profile, membership)`. `Classify(account)` uses no configured selectors. Each call creates fresh result containers; raw attribute evidence retains its existing value types and references. It does not normalize caller profiles or collect directory data. The modern collector reuses one classifier; legacy and remediation callers retain the thin `Get-ADAnalyzerAccountType` adapter.
 
 `ADAnalyzerDirectoryObjectProjector` turns supplied directory records and access control rules into the typed records used by assessment. Its constructor is inert. `Project(record, kind)` returns a new projected account with normalized identity, dates, delegation and lifecycle fields. The overload `Project(record, kind, additionalProperties)` accepts an array of additional directory attributes. `ProjectAces(descriptor, target, targetType)` returns access control entries from a supplied descriptor. Binary directory descriptors use the Windows .NET directory security API. A failed required cast or descriptor load terminates a direct projection. Existing command adapters retain native observation order, error capture, and streamed ACEs.
+
+`ADAnalyzerDirectoryCollector` owns the directory query plan, classification, policy and ACL coverage, and snapshot assembly. Its constructor is inert. `Collect(context, profile)` uses the packaged Windows AD provider and returns the snapshot accepted by the assessment engine. The operation uses the supplied server, with the domain as a fallback for an empty server. `Analysis.DirectoryConnection` defaults to `PSDrive`. The method closes the drive it creates and restores the caller location before returning. Set `Analysis.DirectoryConnection` to `Direct` to use direct queries. Unreadable observations remain explicit in the snapshot's coverage and errors.
 
 `ADAnalyzerHostCollector` owns the Windows CIM inventory for services, operating systems, patches, DNS, SMB and registry values. Construction performs no collection. `Collect(computerNames)` uses the current credential, the default profile and a 30-second CIM operation timeout. The full overload accepts a credential, timeout in seconds and profile. The result contains `Hosts` and `Errors` arrays. A failed registry read stays on its registry record, and a failed class query adds a host collection error. Each call uses fresh results and closes its sessions before returning. The PowerShell compatibility helper releases each session before emitting that host and stops opening sessions when the caller stops the pipeline.
 

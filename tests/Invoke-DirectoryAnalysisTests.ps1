@@ -2561,6 +2561,37 @@ foreach ($case in $hostCollectorCases.Keys) {
     }
 }
 
+$directoryCollectorCases = [ordered]@{
+    Native = 6
+    Construction = 3
+    Direct = 8
+    Isolation = 2
+}
+foreach ($case in $directoryCollectorCases.Keys) {
+    Invoke-DirectoryTest ('directory collector: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'DirectoryCollectorClassFixture.ps1'
+        $process = & {
+            $ErrorActionPreference = 'Continue'
+            $PSNativeCommandUseErrorActionPreference = $false
+            $arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $fixture,
+                '-RepositoryRoot', $RepositoryRoot, '-Case', $case)
+            $lines = @(& $executable @arguments 2>&1)
+            [pscustomobject]@{
+                ExitCode = $LASTEXITCODE
+                Lines = $lines
+            }
+        }
+        if ($process.ExitCode -ne 0) {
+            $diagnostics = @($process.Lines | Where-Object { [string]$_ -cnotlike 'DIRECTORY NATIVE OBSERVATION *' })
+            throw ($diagnostics -join [Environment]::NewLine)
+        }
+        $expected = 'PASS directory collector {0} {1}' -f $case, $directoryCollectorCases[$case]
+        $sentinels = @($process.Lines | Where-Object { [string]$_ -clike 'PASS directory collector *' })
+        Assert-DirectoryTrue ($sentinels.Count -eq 1 -and [string]$sentinels[0] -ceq $expected) 'Fresh process did not execute every selected directory collector check.'
+    }
+}
+
 Write-Host ("{0} directory tests passed; {1} failed" -f $script:Passed, $script:Failed)
 if ($script:Failed) {
     exit 1

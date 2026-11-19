@@ -1237,197 +1237,289 @@ function Get-ADAnalyzerHostData {
     }
 }
 
-function Get-ADAnalyzerDirectoryData {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]$Context,
-        [Parameter(Mandatory = $true)][hashtable]$Profile
+class ADAnalyzerDirectoryCollector {
+    ADAnalyzerDirectoryCollector() {
+    }
 
-    )
-    $connectionMode = Get-ADAnalyzerDirectoryField (Get-ADAnalyzerDirectoryField $Profile 'Analysis' @{}) 'DirectoryConnection' 'PSDrive'
-    if ($connectionMode -isnot [string] -or $connectionMode -notin 'PSDrive', 'Direct') {
-        throw 'Analysis.DirectoryConnection must be PSDrive or Direct'
-    }
-    $connectionMode = if ($connectionMode -ieq 'PSDrive') {
-        'PSDrive'
-    }
-    else {
-        'Direct'
-    }
-    $server = [string](Get-ADAnalyzerDirectoryField $Context 'Server')
-    if ([string]::IsNullOrWhiteSpace($server)) {
-        $server = [string](Get-ADAnalyzerDirectoryField $Context 'Domain')
-    }
-    if ([string]::IsNullOrWhiteSpace($server)) {
-        throw 'Context.Server or Context.Domain is required'
-    }
-    $credential = Get-ADAnalyzerDirectoryField $Context 'Credential'
-    $common = @{
-        Server = $server
-    }
-    if ($null -ne $credential -and $credential -ne [pscredential]::Empty) {
-        $common['Credential'] = $credential
-    }
-    $coverage = [ordered]@{}
-    $errors = [System.Collections.Generic.List[object]]::new()
-    $expectedDrive = $null
-    $connectionError = $null
-    $query = { param(
-            $Command,
-            $Arguments,
-            $Key
-
-        ) $splat = @{} + $common + $Arguments
-        @(Invoke-ADAnalyzerDirectoryQuery $Command $splat $Key $coverage $errors $server `
-                -ExpectedDrive $expectedDrive `
-                -ConnectionError $connectionError) }
-    $root = @(& $query 'Get-ADRootDSE' @{} 'RootDSE') | Select-Object -First 1
-    $domainIdentity = [string](Get-ADAnalyzerDirectoryField $Context 'Domain')
-    if ([string]::IsNullOrWhiteSpace($domainIdentity)) {
-        $domainIdentity = [string](Get-ADAnalyzerDirectoryField $root 'DefaultNamingContext' $server)
-    }
-    $domain = @(& $query 'Get-ADDomain' @{
-            Identity = $domainIdentity
-        } 'Domain') | Select-Object -First 1
-    $domainDn = [string](Get-ADAnalyzerDirectoryField $domain 'DistinguishedName' (Get-ADAnalyzerDirectoryField $root 'DefaultNamingContext'))
-    $domainSid = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $domain 'DomainSID')
-    $drive = $null
-    $previousLocation = $null
-    $primaryError = $null
-    $restorationError = $null
-    $removalError = $null
-    $result = $null
-    $connectionStatus = 'Direct'
-    $coverage['DirectoryConnection'] = 'NotConfigured'
-    try {
-        if ($connectionMode -eq 'PSDrive') {
-            try {
-                $previousLocation = Get-Location
-                $driveName = 'ADAnalyzerData' + [guid]::NewGuid().ToString('N')
-                $driveArguments = @{
-                    Name = $driveName
-                    PSProvider = 'ActiveDirectory'
-                    Root = $domainDn
-                    Server = $server
-                    Scope = 'Local'
-                    ErrorAction = 'Stop'
-                    WhatIf = $false
-                    Confirm = $false
-                }
-                if ($common.ContainsKey('Credential')) {
-                    $driveArguments.Credential = $credential
-                }
-                $drive = New-PSDrive @driveArguments
-                if ($drive.Provider.Name -ne 'ActiveDirectory') {
-                    throw 'The requested AD PSDrive provider was not established'
-                }
-                Set-Location -LiteralPath ($drive.Name + ':') -ErrorAction Stop
-                $expectedDrive = $drive.Name
-                $null = $common.Remove('Credential')
-                $connectionStatus = 'Connected'
-                $coverage['DirectoryConnection'] = 'Collected'
-            }
-            catch {
-                $connectionStatus = 'Unreadable'
-                $coverage['DirectoryConnection'] = 'Unreadable'
-                $connectionError = 'AD PSDrive connection is unavailable: ' + $_.Exception.Message
-                $errors.Add([pscustomobject]@{
-                        Collector = 'DirectoryConnection'
-                        Target = $server
-                        Status = 'Unreadable'
-                        Message = $_.Exception.Message
-                        ExceptionType = $_.Exception.GetType().FullName
-                    }) > $null
+    [object] Collect([object]$Context, [hashtable]$Profile) {
+        $ErrorActionPreference = 'Stop'
+        $collector = $this
+        $connectionMode = $collector.ResolveMode(
+            (Get-ADAnalyzerDirectoryField (Get-ADAnalyzerDirectoryField $Profile 'Analysis' @{}) 'DirectoryConnection' 'PSDrive')
+        )
+        if (-not $connectionMode) {
+            throw 'Analysis.DirectoryConnection must be PSDrive or Direct'
+        }
+        $server = [string](Get-ADAnalyzerDirectoryField $Context 'Server')
+        if ([string]::IsNullOrWhiteSpace($server)) {
+            $server = [string](Get-ADAnalyzerDirectoryField $Context 'Domain')
+        }
+        if ([string]::IsNullOrWhiteSpace($server)) {
+            throw 'Context.Server or Context.Domain is required'
+        }
+        $credential = Get-ADAnalyzerDirectoryField $Context 'Credential'
+        $common = @{
+            Server = $server
+        }
+        if ($null -ne $credential -and $credential -ne [pscredential]::Empty) {
+            $common['Credential'] = $credential
+        }
+        $observation = Get-ADAnalyzerDirectoryObservation
+        $providerPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'lib/Microsoft.ActiveDirectory.Management.dll'
+        $provider = Import-Module -Name $providerPath -Scope Local -PassThru -ErrorAction Stop
+        $capabilities = $provider.ExportedCmdlets
+        foreach ($name in $collector.RequiredCommands()) {
+            if (-not $capabilities -or $capabilities[$name] -isnot [Management.Automation.CommandInfo]) {
+                throw ('The bundled Active Directory provider did not export ' + $name)
             }
         }
-        $forest = @(& $query 'Get-ADForest' @{} 'Forest') | Select-Object -First 1
-        $rootDomainSid = $domainSid
-        $forestRoot = [string](Get-ADAnalyzerDirectoryField $forest 'RootDomain')
-        if ($forestRoot -and $forestRoot -ine (Get-ADAnalyzerDirectoryField $domain 'DNSRoot')) {
-            $rootDomain = @(& $query 'Get-ADDomain' @{
-                    Identity = $forestRoot
-                } 'ForestRootDomain') | Select-Object -First 1
-            $rootDomainSid = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $rootDomain 'DomainSID')
+
+        $coverage = [ordered]@{}
+        $errors = [System.Collections.Generic.List[object]]::new()
+        $expectedDrive = $null
+        $connectionError = $null
+        $query = {
+            param($Command, $Arguments, $Key)
+
+            $splat = @{} + $common + $Arguments
+            $collector.ObserveQuery(
+                $capabilities[$Command], $splat, $Key, $coverage, $errors, $server, $expectedDrive, $connectionError
+            )
         }
-        # Query schema metadata only, never managed-password attribute values.
-        $featureNames = @('msLAPS-PasswordExpirationTime',
-            'ms-Mcs-AdmPwdExpirationTime',
-            'msLAPS-Password',
-            'msLAPS-EncryptedPassword',
-            'ms-Mcs-AdmPwd',
-            'msDS-AllowedToActOnBehalfOfOtherIdentity',
-            'msDS-GroupMSAMembership',
-            'msDS-ResultantPSO')
-        $schema = @()
-        $schemaDn = [string](Get-ADAnalyzerDirectoryField $root 'SchemaNamingContext')
-        if ($schemaDn) {
-            $clauses = ($featureNames | ForEach-Object { '(lDAPDisplayName=' + $_ + ')' }) -join ''
-            $schema = @(& $query 'Get-ADObject' @{
-                    SearchBase = $schemaDn
-                    LDAPFilter = ('(|' + $clauses + ')')
-                    Properties = @('lDAPDisplayName', 'schemaIDGUID')
-                } 'FeatureSchema')
+        $root = @(& $query 'Get-ADRootDSE' @{} 'RootDSE') | Select-Object -First 1
+        $domainIdentity = [string](Get-ADAnalyzerDirectoryField $Context 'Domain')
+        if ([string]::IsNullOrWhiteSpace($domainIdentity)) {
+            $domainIdentity = [string](Get-ADAnalyzerDirectoryField $root 'DefaultNamingContext' $server)
         }
-        else {
-            $coverage['FeatureSchema'] = 'Unreadable'
+        $domain = @(& $query 'Get-ADDomain' @{
+                Identity = $domainIdentity
+            } 'Domain') | Select-Object -First 1
+        $domainDn = [string](Get-ADAnalyzerDirectoryField $domain 'DistinguishedName' (Get-ADAnalyzerDirectoryField $root 'DefaultNamingContext'))
+        $domainSid = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $domain 'DomainSID')
+
+        $drive = $null
+        $previousLocation = $null
+        $primaryError = $null
+        $restorationError = $null
+        $removalError = $null
+        $result = $null
+        $connectionStatus = 'Direct'
+        $coverage['DirectoryConnection'] = 'NotConfigured'
+        . $observation
+        if ($null -ne $primaryError) {
+            if ($null -ne $restorationError) {
+                $primaryError.Exception.Data['ADAnalyzerLocationRestorationError'] = $restorationError.Exception.Message
+            }
+            if ($null -ne $removalError) {
+                $primaryError.Exception.Data['ADAnalyzerDriveRemovalError'] = $removalError.Exception.Message
+            }
+            throw $primaryError
         }
-        $available = @($schema | ForEach-Object { [string](Get-ADAnalyzerDirectoryField $_ 'lDAPDisplayName') })
-        $searchBase = [string](Get-ADAnalyzerDirectoryField $Context 'SearchBase')
-        if ([string]::IsNullOrWhiteSpace($searchBase)) {
-            $searchBase = $domainDn
+        if ($null -ne $restorationError) {
+            if ($null -ne $removalError) {
+                $restorationError.Exception.Data['ADAnalyzerDriveRemovalError'] = $removalError.Exception.Message
+            }
+            throw $restorationError
         }
-        $userProperties = @('ObjectGuid',
-            'SID',
-            'SIDHistory',
-            'SamAccountName',
-            'Enabled',
-            'WhenChanged',
-            'WhenCreated',
-            'LastLogonDate',
-            'PasswordLastSet',
-            'PasswordNeverExpires',
-            'AdminCount',
-            'IsCriticalSystemObject',
-            'MemberOf',
-            'PrimaryGroupID',
-            'ServicePrincipalNames',
-            'UserAccountControl',
-            'ProtectedFromAccidentalDeletion',
-            'msDS-AllowedToDelegateTo',
-            'msDS-SupportedEncryptionTypes',
-            'Description')
-        $computerProperties = @('ObjectGuid',
-            'SID',
-            'SIDHistory',
-            'SamAccountName',
-            'Enabled',
-            'WhenChanged',
-            'WhenCreated',
-            'LastLogonDate',
-            'PasswordLastSet',
-            'AdminCount',
-            'MemberOf',
-            'PrimaryGroupID',
-            'UserAccountControl',
-            'ServicePrincipalNames',
-            'TrustedForDelegation',
-            'IsCriticalSystemObject',
-            'ProtectedFromAccidentalDeletion',
-            'OperatingSystem',
-            'OperatingSystemVersion',
-            'DNSHostName',
-            'msDS-AllowedToDelegateTo',
-            'msDS-SupportedEncryptionTypes')
+        if ($null -ne $removalError) {
+            throw $removalError
+        }
+        return $result
+    }
+
+    hidden [object[]] ObserveQuery(
+        [Management.Automation.CommandInfo]$Capability,
+        [hashtable]$Parameters,
+        [string]$Key,
+        [System.Collections.IDictionary]$Coverage,
+        [System.Collections.Generic.List[object]]$Errors,
+        [string]$Server,
+        [string]$ExpectedDrive,
+        [string]$ConnectionError
+    ) {
+        try {
+            if ($ConnectionError) {
+                throw $ConnectionError
+            }
+            if ($ExpectedDrive -and (Get-Location).Drive.Name -ne $ExpectedDrive) {
+                $Coverage['DirectoryConnection'] = 'Unreadable'
+                throw 'The owned AD PSDrive is no longer the active directory context'
+            }
+            $items = @(& $Capability @Parameters -ErrorAction Stop)
+            $Coverage[$Key] = 'Collected'
+            return $items
+        }
+        catch {
+            $Coverage[$Key] = 'Unreadable'
+            $Errors.Add([pscustomobject]@{
+                    Collector = $Key
+                    Target = $Server
+                    Status = 'Unreadable'
+                    Message = $_.Exception.Message
+                    ExceptionType = $_.Exception.GetType().FullName
+                })
+            return @()
+        }
+    }
+
+    hidden [string[]] RequiredCommands() {
+        return @(
+            'Get-ADRootDSE'
+            'Get-ADDomain'
+            'Get-ADForest'
+            'Get-ADObject'
+            'Get-ADUser'
+            'Get-ADComputer'
+            'Get-ADGroup'
+            'Get-ADTrust'
+            'Get-ADDomainController'
+            'Get-ADServiceAccount'
+            'Get-ADDefaultDomainPasswordPolicy'
+            'Get-ADFineGrainedPasswordPolicy'
+            'Get-ADOptionalFeature'
+            'Get-ADUserResultantPasswordPolicy'
+            'Get-ADOrganizationalUnit'
+        )
+    }
+
+    hidden [string] ResolveMode([object]$Mode) {
+        if ($Mode -isnot [string] -or $Mode -notin 'PSDrive', 'Direct') {
+            return ''
+        }
+        if ($Mode -ieq 'PSDrive') {
+            return 'PSDrive'
+        }
+        return 'Direct'
+    }
+
+    hidden [hashtable] CreateDriveParameters(
+        [string]$Name,
+        [string]$Root,
+        [hashtable]$Connection
+    ) {
+        $parameters = @{
+            Name = $Name
+            PSProvider = 'ActiveDirectory'
+            Root = $Root
+            Server = $Connection.Server
+            Scope = 'Local'
+            ErrorAction = 'Stop'
+            WhatIf = $false
+            Confirm = $false
+        }
+        if ($Connection.ContainsKey('Credential')) {
+            $parameters.Credential = $Connection.Credential
+        }
+        return $parameters
+    }
+
+    hidden [object] FeatureSchemaRequest([string]$SchemaDn, [System.Collections.IDictionary]$Coverage) {
+        if (-not $SchemaDn) {
+            $Coverage['FeatureSchema'] = 'Unreadable'
+            return $null
+        }
+        # Query only schema names and GUIDs. Never request managed-password values.
+        $featureNames = @(
+            'msLAPS-PasswordExpirationTime'
+            'ms-Mcs-AdmPwdExpirationTime'
+            'msLAPS-Password'
+            'msLAPS-EncryptedPassword'
+            'ms-Mcs-AdmPwd'
+            'msDS-AllowedToActOnBehalfOfOtherIdentity'
+            'msDS-GroupMSAMembership'
+            'msDS-ResultantPSO'
+        )
+        $clauses = ($featureNames | ForEach-Object { '(lDAPDisplayName=' + $_ + ')' }) -join ''
+        return [pscustomobject]@{
+            Command = 'Get-ADObject'
+            Key = 'FeatureSchema'
+            Arguments = @{
+                SearchBase = $SchemaDn
+                LDAPFilter = ('(|' + $clauses + ')')
+                Properties = @('lDAPDisplayName', 'schemaIDGUID')
+            }
+        }
+    }
+
+    hidden [object] ForestRootRequest([string]$ForestRoot, [object]$DomainDns) {
+        if (-not $ForestRoot -or $ForestRoot -ieq $DomainDns) {
+            return $null
+        }
+        return [pscustomobject]@{
+            Command = 'Get-ADDomain'
+            Key = 'ForestRootDomain'
+            Arguments = @{
+                Identity = $ForestRoot
+            }
+        }
+    }
+
+    hidden [object] AccountPlan(
+        [string]$SearchBase,
+        [string]$DomainDn,
+        [object[]]$Available,
+        [hashtable]$Profile,
+        [System.Collections.IDictionary]$Coverage,
+        [System.Collections.Generic.List[object]]$Errors,
+        [string]$Server
+    ) {
+        $userProperties = @(
+            'ObjectGuid'
+            'SID'
+            'SIDHistory'
+            'SamAccountName'
+            'Enabled'
+            'WhenChanged'
+            'WhenCreated'
+            'LastLogonDate'
+            'PasswordLastSet'
+            'PasswordNeverExpires'
+            'AdminCount'
+            'IsCriticalSystemObject'
+            'MemberOf'
+            'PrimaryGroupID'
+            'ServicePrincipalNames'
+            'UserAccountControl'
+            'ProtectedFromAccidentalDeletion'
+            'msDS-AllowedToDelegateTo'
+            'msDS-SupportedEncryptionTypes'
+            'Description'
+        )
+        $computerProperties = @(
+            'ObjectGuid'
+            'SID'
+            'SIDHistory'
+            'SamAccountName'
+            'Enabled'
+            'WhenChanged'
+            'WhenCreated'
+            'LastLogonDate'
+            'PasswordLastSet'
+            'AdminCount'
+            'MemberOf'
+            'PrimaryGroupID'
+            'UserAccountControl'
+            'ServicePrincipalNames'
+            'TrustedForDelegation'
+            'IsCriticalSystemObject'
+            'ProtectedFromAccidentalDeletion'
+            'OperatingSystem'
+            'OperatingSystemVersion'
+            'DNSHostName'
+            'msDS-AllowedToDelegateTo'
+            'msDS-SupportedEncryptionTypes'
+        )
         $classificationAttributes = @()
-        foreach ($rule in @(Get-ADAnalyzerDirectoryField (Get-ADAnalyzerDirectoryField $Profile 'AccountClassification' @{}) 'AttributeRules' @())) {
+        $classification = Get-ADAnalyzerDirectoryField $Profile 'AccountClassification' @{}
+        foreach ($rule in @(Get-ADAnalyzerDirectoryField $classification 'AttributeRules' @())) {
             $attribute = [string](Get-ADAnalyzerDirectoryField $rule 'Attribute')
             if (Test-ADAnalyzerClassificationAttribute $attribute) {
                 $classificationAttributes += $attribute
             }
             else {
-                $errors.Add([pscustomobject]@{
+                $Errors.Add([pscustomobject]@{
                         Collector = 'AccountClassification'
-                        Target = $server
+                        Target = $Server
                         Status = 'Invalid'
                         Message = ('Unsafe or invalid classification attribute: ' + $attribute)
                     })
@@ -1435,15 +1527,17 @@ function Get-ADAnalyzerDirectoryData {
         }
         $classificationAttributes = @($classificationAttributes | Select-Object -Unique)
         $userProperties = @($userProperties + $classificationAttributes | Select-Object -Unique)
-        $resultantPsoAvailable = $coverage['FeatureSchema'] -eq 'Collected' -and 'msDS-ResultantPSO' -in $available
+        $resultantPsoAvailable = $Coverage['FeatureSchema'] -eq 'Collected' -and 'msDS-ResultantPSO' -in $Available
         if ($resultantPsoAvailable) {
             $userProperties += 'msDS-ResultantPSO'
         }
         $computerProperties = @($computerProperties + $classificationAttributes | Select-Object -Unique)
-        foreach ($attribute in @('msLAPS-PasswordExpirationTime',
-                'ms-Mcs-AdmPwdExpirationTime',
-                'msDS-AllowedToActOnBehalfOfOtherIdentity')) {
-            if ($attribute -in $available) {
+        foreach ($attribute in @(
+                'msLAPS-PasswordExpirationTime'
+                'ms-Mcs-AdmPwdExpirationTime'
+                'msDS-AllowedToActOnBehalfOfOtherIdentity'
+            )) {
+            if ($attribute -in $Available) {
                 $computerProperties += $attribute
                 if ($attribute -eq 'msDS-AllowedToActOnBehalfOfOtherIdentity') {
                     $userProperties += $attribute
@@ -1458,114 +1552,130 @@ function Get-ADAnalyzerDirectoryData {
             Filter = '*'
             Properties = $computerProperties
         }
-        if ($searchBase) {
-            $userArgs['SearchBase'] = $searchBase
-            $computerArgs['SearchBase'] = $searchBase
+        if ($SearchBase) {
+            $userArgs.SearchBase = $SearchBase
+            $computerArgs.SearchBase = $SearchBase
         }
-        $rawUsers = @(& $query 'Get-ADUser' $userArgs 'Users')
-        $rawComputers = @(& $query 'Get-ADComputer' $computerArgs 'Computers')
-        # Groups are collected at domain scope even when account scanning is OU-scoped.
+
+        # Membership needs domain-wide groups even when account scanning is OU-scoped.
         $groupArgs = @{
             Filter = '*'
-            Properties = @('SID',
-                'ObjectGuid',
-                'MemberOf',
-                'Members',
-                'PrimaryGroupID',
-                'AdminCount',
-                'ProtectedFromAccidentalDeletion',
-                'ManagedBy')
+            Properties = @(
+                'SID'
+                'ObjectGuid'
+                'MemberOf'
+                'Members'
+                'PrimaryGroupID'
+                'AdminCount'
+                'ProtectedFromAccidentalDeletion'
+                'ManagedBy'
+            )
         }
-        if ($domainDn) {
-            $groupArgs['SearchBase'] = $domainDn
-        }
-        $groups = @(& $query 'Get-ADGroup' $groupArgs 'Groups')
-        $trusts = @(& $query 'Get-ADTrust' @{
-                Filter = '*'
-                Properties = @('SIDFilteringForestAware',
-                    'SIDFilteringQuarantined',
-                    'SelectiveAuthentication',
-                    'TGTDelegation',
-                    'ForestTransitive',
-                    'IntraForest',
-                    'Direction',
-                    'TrustType',
-                    'Source',
-                    'Target')
-            } 'Trusts')
-        $controllers = @(& $query 'Get-ADDomainController' @{
-                Filter = '*'
-            } 'DomainControllers')
         $serviceArgs = @{
             Filter = '*'
-            Properties = @('SID',
-                'ObjectGuid',
-                'SIDHistory',
-                'Enabled',
-                'AdminCount',
-                'IsCriticalSystemObject',
-                'UserAccountControl',
-                'MemberOf',
-                'PrimaryGroupID',
-                'ServicePrincipalNames',
-                'PrincipalsAllowedToRetrieveManagedPassword',
-                'ManagedPasswordIntervalInDays',
-                'DNSHostName',
-                'msDS-SupportedEncryptionTypes',
-                'WhenChanged',
-                'WhenCreated',
-                'ProtectedFromAccidentalDeletion')
+            Properties = @(
+                'SID'
+                'ObjectGuid'
+                'SIDHistory'
+                'Enabled'
+                'AdminCount'
+                'IsCriticalSystemObject'
+                'UserAccountControl'
+                'MemberOf'
+                'PrimaryGroupID'
+                'ServicePrincipalNames'
+                'PrincipalsAllowedToRetrieveManagedPassword'
+                'ManagedPasswordIntervalInDays'
+                'DNSHostName'
+                'msDS-SupportedEncryptionTypes'
+                'WhenChanged'
+                'WhenCreated'
+                'ProtectedFromAccidentalDeletion'
+            )
         }
         $serviceArgs.Properties = @($serviceArgs.Properties + $classificationAttributes | Select-Object -Unique)
-        if ($domainDn) {
-            $serviceArgs['SearchBase'] = $domainDn
+        if ($DomainDn) {
+            $groupArgs.SearchBase = $DomainDn
+            $serviceArgs.SearchBase = $DomainDn
         }
-        $rawServices = @(& $query 'Get-ADServiceAccount' $serviceArgs 'ServiceAccounts')
-        $settings = $null
-        $optional = @()
-        $defaultPolicy = $null
-        $fineGrained = @()
-        $resultant = [System.Collections.Generic.List[object]]::new()
-        if ($domainDn) {
-            $settings = @(& $query 'Get-ADObject' @{
-                    Identity = $domainDn
-                    Properties = @('ms-DS-MachineAccountQuota', 'msDS-Behavior-Version')
-                } 'DomainSettings') | Select-Object -First 1
-            $defaultPolicy = @(& $query 'Get-ADDefaultDomainPasswordPolicy' @{
-                    Identity = $domainDn
-                } 'DefaultPasswordPolicy') | Select-Object -First 1
-            $fineGrained = @(& $query 'Get-ADFineGrainedPasswordPolicy' @{
-                    Filter = '*'
-                    Properties = @('AppliesTo',
-                        'Precedence',
-                        'MinPasswordLength',
-                        'PasswordHistoryCount',
-                        'ComplexityEnabled',
-                        'ReversibleEncryptionEnabled',
-                        'MaxPasswordAge',
-                        'MinPasswordAge',
-                        'LockoutThreshold',
-                        'LockoutDuration',
-                        'LockoutObservationWindow')
-                } 'FineGrainedPasswordPolicies')
-            $optional = @(& $query 'Get-ADOptionalFeature' @{
-                    Filter = '*'
-                    Properties = @('EnabledScopes', 'FeatureGUID')
-                } 'OptionalFeatures')
+        return [pscustomobject]@{
+            UserArguments = $userArgs
+            ComputerArguments = $computerArgs
+            GroupArguments = $groupArgs
+            TrustArguments = @{
+                Filter = '*'
+                Properties = @(
+                    'SIDFilteringForestAware'
+                    'SIDFilteringQuarantined'
+                    'SelectiveAuthentication'
+                    'TGTDelegation'
+                    'ForestTransitive'
+                    'IntraForest'
+                    'Direction'
+                    'TrustType'
+                    'Source'
+                    'Target'
+                )
+            }
+            ControllerArguments = @{
+                Filter = '*'
+            }
+            ServiceArguments = $serviceArgs
+            AdditionalProperties = $classificationAttributes
+            PreserveClassificationInput = 'ObjectClass' -in $classificationAttributes -or 'SID' -in $classificationAttributes
+            ResultantPsoAvailable = $resultantPsoAvailable
         }
-        else {
+    }
+
+    hidden [object] DomainPolicyPlan([string]$DomainDn, [System.Collections.IDictionary]$Coverage) {
+        if (-not $DomainDn) {
             foreach ($key in @('DomainSettings', 'DefaultPasswordPolicy', 'FineGrainedPasswordPolicies', 'OptionalFeatures')) {
-                $coverage[$key] = 'Unreadable'
+                $Coverage[$key] = 'Unreadable'
+            }
+            return $null
+        }
+        return [pscustomobject]@{
+            SettingsArguments = @{
+                Identity = $DomainDn
+                Properties = @('ms-DS-MachineAccountQuota', 'msDS-Behavior-Version')
+            }
+            DefaultArguments = @{
+                Identity = $DomainDn
+            }
+            FineGrainedArguments = @{
+                Filter = '*'
+                Properties = @(
+                    'AppliesTo'
+                    'Precedence'
+                    'MinPasswordLength'
+                    'PasswordHistoryCount'
+                    'ComplexityEnabled'
+                    'ReversibleEncryptionEnabled'
+                    'MaxPasswordAge'
+                    'MinPasswordAge'
+                    'LockoutThreshold'
+                    'LockoutDuration'
+                    'LockoutObservationWindow'
+                )
+            }
+            OptionalArguments = @{
+                Filter = '*'
+                Properties = @('EnabledScopes', 'FeatureGUID')
             }
         }
-        $preserveClassificationInput = 'ObjectClass' -in $classificationAttributes -or 'SID' -in $classificationAttributes
-        $projection = @{
-            AdditionalProperties = $classificationAttributes
-            PreserveClassificationInput = $preserveClassificationInput
-        }
-        $users = @($rawUsers | ForEach-Object { ConvertTo-ADAnalyzerDirectoryObject $_ 'User' @projection })
-        $computers = @($rawComputers | ForEach-Object { ConvertTo-ADAnalyzerDirectoryObject $_ 'Computer' @projection })
-        $services = @($rawServices | ForEach-Object { ConvertTo-ADAnalyzerDirectoryObject $_ 'ServiceAccount' @projection })
+    }
+
+    hidden [object] ClassifyAccounts(
+        [object[]]$Users,
+        [object[]]$Computers,
+        [object[]]$Services,
+        [object[]]$Groups,
+        [string]$DomainSid,
+        [string]$RootDomainSid,
+        [hashtable]$Profile,
+        [System.Collections.IDictionary]$Coverage,
+        [bool]$PreserveClassificationInput
+    ) {
         $serviceIds = @($services | ForEach-Object { if ($_.SID) {
                     $_.SID
                 }
@@ -1639,287 +1749,650 @@ function Get-ADAnalyzerDirectoryData {
             $object | Add-Member NoteProperty AccountClassification $type -Force
             $object | Add-Member NoteProperty DelegationSchemaStatus $coverage['FeatureSchema'] -Force
         }
-        # Only a positive server-computed association can select cached policy.
-        # An absent attribute can also mean unreadable; retain the dedicated query.
-        $psoIndex = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
-        if ($resultantPsoAvailable -and $coverage['FineGrainedPasswordPolicies'] -eq 'Collected') {
-            foreach ($pso in $fineGrained) {
-                $dn = Get-ADAnalyzerDirectoryField $pso 'DistinguishedName'
-                if ($dn -isnot [string] -or [string]::IsNullOrWhiteSpace($dn)) {
-                    continue
-                }
-                if ($psoIndex.ContainsKey($dn)) {
-                    $psoIndex[$dn].Count++
-                    continue
-                }
-                $complete = $true
-                foreach ($field in @('MinPasswordLength',
-                        'PasswordHistoryCount',
-                        'ComplexityEnabled',
-                        'ReversibleEncryptionEnabled',
-                        'LockoutThreshold',
-                        'LockoutDuration',
-                        'LockoutObservationWindow',
-                        'MinPasswordAge',
-                        'MaxPasswordAge')) {
-                    if ($null -eq (Get-ADAnalyzerDirectoryField $pso $field)) {
-                        $complete = $false
-                        break
-                    }
-                }
-                $psoIndex[$dn] = [pscustomobject]@{
-                    Policy = $pso
-                    Count = 1
-                    Complete = $complete
+        return [pscustomobject]@{
+            Computers = $computers
+            PrivilegedSids = $privilegedSids
+        }
+    }
+
+    hidden [Collections.Generic.Dictionary[string, object]] BuildResultantPolicyIndex(
+        [bool]$ResultantPsoAvailable,
+        [Collections.IDictionary]$Coverage,
+        [object[]]$FineGrained
+    ) {
+        $index = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+        if (-not $ResultantPsoAvailable -or $Coverage['FineGrainedPasswordPolicies'] -ne 'Collected') {
+            return $index
+        }
+
+        $requiredFields = @(
+            'MinPasswordLength'
+            'PasswordHistoryCount'
+            'ComplexityEnabled'
+            'ReversibleEncryptionEnabled'
+            'LockoutThreshold'
+            'LockoutDuration'
+            'LockoutObservationWindow'
+            'MinPasswordAge'
+            'MaxPasswordAge'
+        )
+        foreach ($pso in $FineGrained) {
+            $dn = Get-ADAnalyzerDirectoryField $pso 'DistinguishedName'
+            if ($dn -isnot [string] -or [string]::IsNullOrWhiteSpace($dn)) {
+                continue
+            }
+            if ($index.ContainsKey($dn)) {
+                $index[$dn].Count++
+                continue
+            }
+            $complete = $true
+            foreach ($field in $requiredFields) {
+                if ($null -eq (Get-ADAnalyzerDirectoryField $pso $field)) {
+                    $complete = $false
+                    break
                 }
             }
+            $index[$dn] = [pscustomobject]@{
+                Policy = $pso
+                Count = 1
+                Complete = $complete
+            }
         }
-        foreach ($user in $users) {
-            $key = 'ResultantPasswordPolicy:' + $user.DistinguishedName
-            $effective = $null
-            $dn = $user.ResultantPasswordPolicyDN
-            if ($dn -and $psoIndex.ContainsKey($dn) -and $psoIndex[$dn].Count -eq 1 -and $psoIndex[$dn].Complete) {
-                $effective = $psoIndex[$dn].Policy
-                $coverage[$key] = 'Collected'
+        return $index
+    }
+
+    hidden [pscustomobject] PlanResultantPolicy(
+        [object]$User,
+        [Collections.Generic.Dictionary[string, object]]$Index,
+        [Collections.IDictionary]$Coverage
+    ) {
+        $key = 'ResultantPasswordPolicy:' + $User.DistinguishedName
+        # Only a positive server-computed association can select cached policy.
+        # An absent attribute can also mean unreadable and requires the dedicated query.
+        $dn = $User.ResultantPasswordPolicyDN
+        if ($dn -and $Index.ContainsKey($dn) -and $Index[$dn].Count -eq 1 -and $Index[$dn].Complete) {
+            $Coverage[$key] = 'Collected'
+            return [pscustomobject]@{
+                Key = $key
+                Arguments = $null
+                CachedPolicy = $Index[$dn].Policy
+            }
+        }
+        return [pscustomobject]@{
+            Key = $key
+            Arguments = @{
+                Identity = $User.DistinguishedName
+            }
+            CachedPolicy = $null
+        }
+    }
+
+    hidden [pscustomobject] CreateResultantPolicyRecord(
+        [object]$Target,
+        [object]$Effective,
+        [object]$DefaultPolicy,
+        [object]$Status
+    ) {
+        return [pscustomobject]@{
+            Target = $Target
+            Policy = if ($Effective) {
+                $Effective
             }
             else {
-                $effective = @(& $query 'Get-ADUserResultantPasswordPolicy' @{
-                        Identity = $user.DistinguishedName
-                    } $key) | Select-Object -First 1
+                $DefaultPolicy
             }
-            $resultant.Add([pscustomobject]@{
-                    Target = $user.DistinguishedName
-                    Policy = if ($effective) {
-                        $effective
-                    }
-                    else {
-                        $defaultPolicy
-                    }
-                    Source = if ($effective) {
-                        'FineGrained'
-                    }
-                    else {
-                        'DefaultDomain'
-                    }
-                    Status = $coverage[$key]
-                })
+            Source = if ($Effective) {
+                'FineGrained'
+            }
+            else {
+                'DefaultDomain'
+            }
+            Status = $Status
         }
-        $coverage['ResultantPasswordPolicies'] = if (@($resultant | Where-Object Status -ne 'Collected').Count) {
+    }
+
+    hidden [void] CompleteResultantPolicyCoverage(
+        [Collections.IDictionary]$Coverage,
+        [Collections.Generic.List[object]]$Resultant
+    ) {
+        $Coverage['ResultantPasswordPolicies'] = if (@($Resultant | Where-Object Status -ne 'Collected').Count) {
             'Partial'
         }
-        elseif ($coverage['Users'] -eq 'Collected') {
+        elseif ($Coverage['Users'] -eq 'Collected') {
             'Collected'
         }
         else {
             'Unreadable'
         }
-        $analysis = Get-ADAnalyzerDirectoryField $Profile 'Analysis' @{}
-        $includeAcl = [bool](Get-ADAnalyzerDirectoryField $Context 'IncludeAcl' (Get-ADAnalyzerDirectoryField $analysis 'IncludeAcl' $false))
-        $aces = [System.Collections.Generic.List[object]]::new()
-        $aclTargets = [System.Collections.Generic.List[object]]::new()
-        $guidMap = @{}
-        if ($includeAcl -and $domainDn) {
-            if ($schemaDn) {
-                foreach ($entry in @(& $query 'Get-ADObject' @{
-                            SearchBase = $schemaDn
-                            LDAPFilter = '(|(objectClass=attributeSchema)(objectClass=classSchema))'
-                            Properties = @('lDAPDisplayName', 'schemaIDGUID')
-                        } 'AclSchema')) {
-                    $guid = Get-ADAnalyzerDirectoryField $entry 'schemaIDGUID'
-                    if ($guid) {
-                        try {
-                            $guidMap[([guid]$guid).ToString()] = [string](Get-ADAnalyzerDirectoryField $entry 'lDAPDisplayName')
-                        }
-                        catch {
-                            $errors.Add([pscustomobject]@{
-                                    Collector = 'AclSchema'
-                                    Target = $schemaDn
-                                    Status = 'Unknown'
-                                    Message = 'Unparseable schema GUID'
-                                })
-                        }
-                    }
+    }
+
+    hidden [pscustomobject] PlanAcl(
+        [bool]$IncludeAcl,
+        [string]$DomainDn,
+        [string]$SchemaDn,
+        [string]$SearchBase
+    ) {
+        $plan = [pscustomobject]@{
+            IncludeAcl = $IncludeAcl
+            Enabled = [bool]($IncludeAcl -and $DomainDn)
+            GuidMap = @{}
+            Entries = [Collections.Generic.List[object]]::new()
+            Observations = [Collections.Generic.List[object]]::new()
+            Targets = [Collections.Generic.List[object]]::new()
+            SchemaArguments = $null
+            OuArguments = $null
+            GpoArguments = $null
+        }
+        if ($plan.Enabled) {
+            if ($SchemaDn) {
+                $plan.SchemaArguments = @{
+                    SearchBase = $SchemaDn
+                    LDAPFilter = '(|(objectClass=attributeSchema)(objectClass=classSchema))'
+                    Properties = @('lDAPDisplayName', 'schemaIDGUID')
                 }
             }
-            $configDn = [string](Get-ADAnalyzerDirectoryField $root 'ConfigurationNamingContext')
-            if ($configDn) {
-                foreach ($right in @(& $query 'Get-ADObject' @{
-                            SearchBase = ('CN=Extended-Rights,' + $configDn)
-                            LDAPFilter = '(objectClass=controlAccessRight)'
-                            Properties = @('rightsGuid', 'displayName')
-                        } 'ExtendedRights')) {
-                    $guidMap[[string](Get-ADAnalyzerDirectoryField $right 'rightsGuid')] = [string](Get-ADAnalyzerDirectoryField $right 'displayName')
+            $plan.OuArguments = @{
+                Filter = '*'
+                SearchBase = if ($SearchBase) {
+                    $SearchBase
+                }
+                else {
+                    $DomainDn
                 }
             }
-            $targets = [System.Collections.Generic.List[object]]::new()
-            $targets.Add([pscustomobject]@{
-                    DN = $domainDn
-                    Type = 'DomainRoot'
-                })
-            $targets.Add([pscustomobject]@{
-                    DN = ('CN=AdminSDHolder,CN=System,' + $domainDn)
-                    Type = 'AdminSDHolder'
-                })
-            $ouBase = if ($searchBase) {
-                $searchBase
+            $plan.GpoArguments = @{
+                SearchBase = ('CN=Policies,CN=System,' + $DomainDn)
+                LDAPFilter = '(objectClass=groupPolicyContainer)'
+                Properties = @('displayName')
             }
-            else {
-                $domainDn
+        }
+        return $plan
+    }
+
+    hidden [hashtable] PlanAclExtendedRights([string]$ConfigurationDn) {
+        if (-not $ConfigurationDn) {
+            return $null
+        }
+        return @{
+            SearchBase = ('CN=Extended-Rights,' + $ConfigurationDn)
+            LDAPFilter = '(objectClass=controlAccessRight)'
+            Properties = @('rightsGuid', 'displayName')
+        }
+    }
+
+    hidden [void] AddAclGuidLabel([hashtable]$GuidMap, [string]$Key, [string]$Label) {
+        $GuidMap[$Key] = $Label
+    }
+
+    hidden [pscustomobject] CreateAclSchemaError([string]$SchemaDn) {
+        return [pscustomobject]@{
+            Collector = 'AclSchema'
+            Target = $SchemaDn
+            Status = 'Unknown'
+            Message = 'Unparseable schema GUID'
+        }
+    }
+
+    hidden [void] AddAclBaseTargets([Collections.Generic.List[object]]$Targets, [string]$DomainDn) {
+        $this.AddAclTarget($Targets, $DomainDn, 'DomainRoot')
+        $this.AddAclTarget($Targets, ('CN=AdminSDHolder,CN=System,' + $DomainDn), 'AdminSDHolder')
+    }
+
+    hidden [void] AddAclTarget([Collections.Generic.List[object]]$Targets, [string]$Dn, [string]$Kind) {
+        $Targets.Add([pscustomobject]@{
+                DN = $Dn
+                Type = $Kind
+            })
+    }
+
+    hidden [pscustomobject] PlanAclDescriptor([pscustomobject]$Target) {
+        return [pscustomobject]@{
+            Key = ('Acl:' + $Target.DN)
+            Arguments = @{
+                Identity = $Target.DN
+                Properties = @('nTSecurityDescriptor')
             }
-            foreach ($ou in @(& $query 'Get-ADOrganizationalUnit' @{
-                        Filter = '*'
-                        SearchBase = $ouBase
-                    } 'AclOUs')) {
-                $targets.Add([pscustomobject]@{
-                        DN = [string](Get-ADAnalyzerDirectoryField $ou 'DistinguishedName')
-                        Type = 'OU'
-                    })
-            }
-            foreach ($gpo in @(& $query 'Get-ADObject' @{
-                        SearchBase = ('CN=Policies,CN=System,' + $domainDn)
-                        LDAPFilter = '(objectClass=groupPolicyContainer)'
-                        Properties = @('displayName')
-                    } 'AclGPOs')) {
-                $targets.Add([pscustomobject]@{
-                        DN = [string](Get-ADAnalyzerDirectoryField $gpo 'DistinguishedName')
-                        Type = 'GPO'
-                    })
-            }
-            foreach ($target in $targets) {
-                $key = 'Acl:' + $target.DN
-                $record = @(& $query 'Get-ADObject' @{
-                        Identity = $target.DN
-                        Properties = @('nTSecurityDescriptor')
-                    } $key) | Select-Object -First 1
-                $descriptor = Get-ADAnalyzerDirectoryField $record 'nTSecurityDescriptor'
-                $status = $coverage[$key]
-                if ($status -eq 'Collected' -and $null -eq $descriptor) {
-                    $status = 'Unreadable'
-                }
-                try {
-                    foreach ($ace in @(Get-ADAnalyzerSecurityAces $descriptor $target.DN $target.Type)) {
-                        $ace | Add-Member NoteProperty ObjectTypeName (Get-ADAnalyzerDirectoryField $guidMap $ace.ObjectType $ace.ObjectType)
-                        $aces.Add($ace)
-                    }
-                }
-                catch {
-                    $status = 'Unreadable'
-                    $errors.Add([pscustomobject]@{
-                            Collector = 'Acl'
-                            Target = $target.DN
-                            Status = 'Unreadable'
-                            Message = $_.Exception.Message
-                        })
-                }
-                $aclTargets.Add([pscustomobject]@{
-                        Target = $target.DN
-                        Type = $target.Type
-                        Status = $status
-                    })
-            }
-            $coverage['Acl'] = if (@($aclTargets | Where-Object Status -ne 'Collected').Count) {
+        }
+    }
+
+    hidden [object] AclDescriptorStatus([object]$Status, [object]$Descriptor) {
+        if ($Status -eq 'Collected' -and $null -eq $Descriptor) {
+            return 'Unreadable'
+        }
+        return $Status
+    }
+
+    hidden [pscustomobject] CreateAclReadError([object]$Target, [string]$Message) {
+        return [pscustomobject]@{
+            Collector = 'Acl'
+            Target = $Target
+            Status = 'Unreadable'
+            Message = $Message
+        }
+    }
+
+    hidden [void] AddAclObservation(
+        [Collections.Generic.List[object]]$Observations,
+        [pscustomobject]$Target,
+        [object]$Status
+    ) {
+        $Observations.Add([pscustomobject]@{
+                Target = $Target.DN
+                Type = $Target.Type
+                Status = $Status
+            })
+    }
+
+    hidden [void] CompleteAclCoverage([Collections.IDictionary]$Coverage, [pscustomobject]$Plan) {
+        $Coverage['Acl'] = if ($Plan.Enabled) {
+            if (@($Plan.Observations | Where-Object Status -ne 'Collected').Count) {
                 'Partial'
             }
             else {
                 'Collected'
             }
         }
-        else {
-            $coverage['Acl'] = if ($includeAcl) {
-                'Unreadable'
-            }
-            else {
-                'NotConfigured'
-            }
-        }
-        $hosts = @()
-        $includeHosts = [bool](Get-ADAnalyzerDirectoryField $Context 'IncludeHostChecks' (Get-ADAnalyzerDirectoryField $analysis 'IncludeHostChecks' $false))
-        if ($includeHosts) {
-            $names = @($controllers | ForEach-Object { [string](Get-ADAnalyzerDirectoryField $_ 'HostName') })
-            $hosts = @(Get-ADAnalyzerHostData `
-                    -ComputerNames $names `
-                    -Credential $credential `
-                    -Errors $errors `
-                    -TimeoutSeconds (Get-ADAnalyzerDirectoryField $analysis 'HostTimeoutSeconds' 30) `
-                    -Profile $Profile)
-            $coverage['Hosts'] = if (@($hosts | Where-Object Status -ne 'Observed').Count) {
-                'Partial'
-            }
-            elseif ($hosts.Count) {
-                'Collected'
-            }
-            else {
-                'Unreadable'
-            }
+        elseif ($Plan.IncludeAcl) {
+            'Unreadable'
         }
         else {
-            $coverage['Hosts'] = 'NotConfigured'
+            'NotConfigured'
         }
-        $domainDto = [pscustomobject]@{
-            DistinguishedName = $domainDn
-            DNSRoot = Get-ADAnalyzerDirectoryField $domain 'DNSRoot'
-            SID = $domainSid
-            RootDomainSID = $rootDomainSid
-            DomainMode = Get-ADAnalyzerDirectoryField $domain 'DomainMode'
-            ForestMode = Get-ADAnalyzerDirectoryField $forest 'ForestMode'
-            MachineAccountQuota = Get-ADAnalyzerDirectoryField $settings 'ms-DS-MachineAccountQuota'
-            OptionalFeatures = $optional
-            FeatureSchema = $available
-            PrivilegedSids = @($privilegedSids | Select-Object -Unique)
+    }
+
+    hidden [pscustomobject] CreateAclSnapshot(
+        [Collections.Generic.List[object]]$Observations,
+        [Collections.Generic.List[object]]$Entries,
+        [hashtable]$GuidMap
+    ) {
+        return [pscustomobject]@{
+            Targets = $Observations.ToArray()
+            Entries = $Entries.ToArray()
+            GuidMap = $GuidMap
+            EffectiveAccessCalculated = $false
         }
-        if ($connectionMode -eq 'PSDrive' -and $coverage['DirectoryConnection'] -ne 'Collected') {
+    }
+
+    hidden [object] PlanHosts([object]$Context, [object]$Analysis, [object[]]$Controllers) {
+        $fallback = Get-ADAnalyzerDirectoryField $Analysis 'IncludeHostChecks' $false
+        if (-not [bool](Get-ADAnalyzerDirectoryField $Context 'IncludeHostChecks' $fallback)) {
+            return $null
+        }
+        return [pscustomobject]@{
+            Names = @($Controllers | ForEach-Object { [string](Get-ADAnalyzerDirectoryField $_ 'HostName') })
+            TimeoutSeconds = Get-ADAnalyzerDirectoryField $Analysis 'HostTimeoutSeconds' 30
+        }
+    }
+
+    hidden [void] CompleteHostCoverage(
+        [System.Collections.IDictionary]$Coverage,
+        [object[]]$Hosts,
+        [bool]$Enabled
+    ) {
+        if (-not $Enabled) {
+            $Coverage['Hosts'] = 'NotConfigured'
+        }
+        elseif (@($Hosts | Where-Object Status -ne 'Observed').Count) {
+            $Coverage['Hosts'] = 'Partial'
+        }
+        elseif ($Hosts.Count) {
+            $Coverage['Hosts'] = 'Collected'
+        }
+        else {
+            $Coverage['Hosts'] = 'Unreadable'
+        }
+    }
+
+    hidden [object] CreateSnapshot([hashtable]$Observations) {
+        $connectionStatus = $Observations.ConnectionStatus
+        if ($Observations.ConnectionMode -eq 'PSDrive' -and $Observations.Coverage['DirectoryConnection'] -ne 'Collected') {
             $connectionStatus = 'Unreadable'
         }
-        $result = [pscustomobject]@{
-            Server = $server
-            Domain = $domainDto
-            Users = $users
-            Groups = $groups
-            Computers = $computers
-            ServiceAccounts = $services
+        return [pscustomobject]@{
+            Server = $Observations.Server
+            Domain = [pscustomobject]@{
+                DistinguishedName = $Observations.DomainDn
+                DNSRoot = Get-ADAnalyzerDirectoryField $Observations.Domain 'DNSRoot'
+                SID = $Observations.DomainSid
+                RootDomainSID = $Observations.RootDomainSid
+                DomainMode = Get-ADAnalyzerDirectoryField $Observations.Domain 'DomainMode'
+                ForestMode = Get-ADAnalyzerDirectoryField $Observations.Forest 'ForestMode'
+                MachineAccountQuota = Get-ADAnalyzerDirectoryField $Observations.Settings 'ms-DS-MachineAccountQuota'
+                OptionalFeatures = $Observations.OptionalFeatures
+                FeatureSchema = $Observations.FeatureSchema
+                PrivilegedSids = @($Observations.PrivilegedSids | Select-Object -Unique)
+            }
+            Users = $Observations.Users
+            Groups = $Observations.Groups
+            Computers = $Observations.Computers
+            ServiceAccounts = $Observations.ServiceAccounts
             DirectoryConnection = [pscustomobject]@{
-                Mode = $connectionMode
-                Server = $server
+                Mode = $Observations.ConnectionMode
+                Server = $Observations.Server
                 Status = $connectionStatus
             }
-            Objects = @($users) + @($computers) + @($services)
-            Trusts = $trusts
+            Objects = @($Observations.Users) + @($Observations.Computers) + @($Observations.ServiceAccounts)
+            Trusts = $Observations.Trusts
             PasswordPolicies = [pscustomobject]@{
-                Default = $defaultPolicy
-                FineGrained = $fineGrained
-                Resultant = $resultant.ToArray()
+                Default = $Observations.DefaultPolicy
+                FineGrained = $Observations.FineGrained
+                Resultant = $Observations.Resultant.ToArray()
             }
-            DomainControllers = $controllers
-            Acl = [pscustomobject]@{
-                Targets = $aclTargets.ToArray()
-                Entries = $aces.ToArray()
-                GuidMap = $guidMap
-                EffectiveAccessCalculated = $false
-            }
-            Hosts = $hosts
-            Errors = $errors.ToArray()
-            Coverage = $coverage
+            DomainControllers = $Observations.Controllers
+            Acl = $Observations.Acl
+            Hosts = $Observations.Hosts
+            Errors = $Observations.Errors.ToArray()
+            Coverage = $Observations.Coverage
         }
     }
-    catch {
-        $primaryError = $_
-    }
-    finally {
-        if ($null -ne $drive) {
-            try {
-                Set-Location -LiteralPath $previousLocation.Path -ErrorAction Stop
+}
+
+# Dot-source the observation in the caller that owns the local drive. Keep
+# preflight throws and terminal rethrows in the entry point's native scope.
+function Get-ADAnalyzerDirectoryObservation {
+    return {
+        try {
+            if ($connectionMode -eq 'PSDrive') {
+                try {
+                    $previousLocation = Get-Location
+                    $driveName = 'ADAnalyzerData' + [guid]::NewGuid().ToString('N')
+                    $driveArguments = $collector.CreateDriveParameters($driveName, $domainDn, $common)
+                    $drive = New-PSDrive @driveArguments
+                    if ($drive.Provider.Name -ne 'ActiveDirectory') {
+                        throw 'The requested AD PSDrive provider was not established'
+                    }
+                    Set-Location -LiteralPath ($drive.Name + ':') -ErrorAction Stop
+                    $expectedDrive = $drive.Name
+                    $null = $common.Remove('Credential')
+                    $connectionStatus = 'Connected'
+                    $coverage['DirectoryConnection'] = 'Collected'
+                }
+                catch {
+                    $connectionStatus = 'Unreadable'
+                    $coverage['DirectoryConnection'] = 'Unreadable'
+                    $connectionError = 'AD PSDrive connection is unavailable: ' + $_.Exception.Message
+                    $errors.Add([pscustomobject]@{
+                            Collector = 'DirectoryConnection'
+                            Target = $server
+                            Status = 'Unreadable'
+                            Message = $_.Exception.Message
+                            ExceptionType = $_.Exception.GetType().FullName
+                        }) > $null
+                }
             }
-            catch {
-                $restorationError = $_
+            $forest = @(& $query 'Get-ADForest' @{} 'Forest') | Select-Object -First 1
+            $rootDomainSid = $domainSid
+            $forestRoot = [string](Get-ADAnalyzerDirectoryField $forest 'RootDomain')
+            if ($forestRoot) {
+                $request = $collector.ForestRootRequest($forestRoot, (Get-ADAnalyzerDirectoryField $domain 'DNSRoot'))
+                if ($null -ne $request) {
+                    $rootDomain = @(& $query $request.Command $request.Arguments $request.Key) | Select-Object -First 1
+                    $rootDomainSid = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $rootDomain 'DomainSID')
+                }
             }
-            try {
-                Remove-PSDrive -Name $drive.Name -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false
+
+            $schema = @()
+            $schemaDn = [string](Get-ADAnalyzerDirectoryField $root 'SchemaNamingContext')
+            $request = $collector.FeatureSchemaRequest($schemaDn, $coverage)
+            if ($null -ne $request) {
+                $schema = @(& $query $request.Command $request.Arguments $request.Key)
             }
-            catch {
-                $removalError = $_
+            $available = @($schema | ForEach-Object { [string](Get-ADAnalyzerDirectoryField $_ 'lDAPDisplayName') })
+            $searchBase = [string](Get-ADAnalyzerDirectoryField $Context 'SearchBase')
+            if ([string]::IsNullOrWhiteSpace($searchBase)) {
+                $searchBase = $domainDn
+            }
+
+            $accountPlan = $collector.AccountPlan($searchBase, $domainDn, $available, $Profile, $coverage, $errors, $server)
+            $rawUsers = @(& $query 'Get-ADUser' $accountPlan.UserArguments 'Users')
+            $rawComputers = @(& $query 'Get-ADComputer' $accountPlan.ComputerArguments 'Computers')
+            $groups = @(& $query 'Get-ADGroup' $accountPlan.GroupArguments 'Groups')
+            $trusts = @(& $query 'Get-ADTrust' $accountPlan.TrustArguments 'Trusts')
+            $controllers = @(& $query 'Get-ADDomainController' $accountPlan.ControllerArguments 'DomainControllers')
+            $rawServices = @(& $query 'Get-ADServiceAccount' $accountPlan.ServiceArguments 'ServiceAccounts')
+
+            $settings = $null
+            $optional = @()
+            $defaultPolicy = $null
+            $fineGrained = @()
+            $resultant = [System.Collections.Generic.List[object]]::new()
+            $policyPlan = $collector.DomainPolicyPlan($domainDn, $coverage)
+            if ($null -ne $policyPlan) {
+                $settings = @(& $query 'Get-ADObject' $policyPlan.SettingsArguments 'DomainSettings') | Select-Object -First 1
+                $defaultPolicy = @(& $query 'Get-ADDefaultDomainPasswordPolicy' $policyPlan.DefaultArguments 'DefaultPasswordPolicy') |
+                    Select-Object -First 1
+                $fineGrained = @(& $query 'Get-ADFineGrainedPasswordPolicy' $policyPlan.FineGrainedArguments 'FineGrainedPasswordPolicies')
+                $optional = @(& $query 'Get-ADOptionalFeature' $policyPlan.OptionalArguments 'OptionalFeatures')
+            }
+
+            $projection = @{
+                AdditionalProperties = $accountPlan.AdditionalProperties
+                PreserveClassificationInput = $accountPlan.PreserveClassificationInput
+            }
+            $users = @($rawUsers | ForEach-Object { ConvertTo-ADAnalyzerDirectoryObject $_ 'User' @projection })
+            $computers = @($rawComputers | ForEach-Object { ConvertTo-ADAnalyzerDirectoryObject $_ 'Computer' @projection })
+            $services = @($rawServices | ForEach-Object { ConvertTo-ADAnalyzerDirectoryObject $_ 'ServiceAccount' @projection })
+            $classified = $collector.ClassifyAccounts(
+                $users, $computers, $services, $groups, $domainSid, $rootDomainSid, $Profile, $coverage,
+                $accountPlan.PreserveClassificationInput
+            )
+            $computers = $classified.Computers
+            $privilegedSids = $classified.PrivilegedSids
+            $resultantPsoAvailable = $accountPlan.ResultantPsoAvailable
+
+            $psoIndex = $collector.BuildResultantPolicyIndex($resultantPsoAvailable, $coverage, $fineGrained)
+            foreach ($user in $users) {
+                $policyPlan = $collector.PlanResultantPolicy($user, $psoIndex, $coverage)
+                $effective = $policyPlan.CachedPolicy
+                if ($null -ne $policyPlan.Arguments) {
+                    $effective = @(& $query 'Get-ADUserResultantPasswordPolicy' $policyPlan.Arguments $policyPlan.Key) |
+                        Select-Object -First 1
+                }
+                $resultant.Add($collector.CreateResultantPolicyRecord(
+                        $user.DistinguishedName, $effective, $defaultPolicy, $coverage[$policyPlan.Key]
+                    ))
+            }
+            $collector.CompleteResultantPolicyCoverage($coverage, $resultant)
+
+            $analysis = Get-ADAnalyzerDirectoryField $Profile 'Analysis' @{}
+            $includeAcl = [bool](Get-ADAnalyzerDirectoryField $Context 'IncludeAcl' (Get-ADAnalyzerDirectoryField $analysis 'IncludeAcl' $false))
+            $aclPlan = $collector.PlanAcl($includeAcl, $domainDn, $schemaDn, $searchBase)
+            $aces = $aclPlan.Entries
+            $aclTargets = $aclPlan.Observations
+            $guidMap = $aclPlan.GuidMap
+            if ($aclPlan.Enabled) {
+                if ($null -ne $aclPlan.SchemaArguments) {
+                    foreach ($entry in @(& $query 'Get-ADObject' $aclPlan.SchemaArguments 'AclSchema')) {
+                        $guid = Get-ADAnalyzerDirectoryField $entry 'schemaIDGUID'
+                        if ($guid) {
+                            try {
+                                $label = [string](Get-ADAnalyzerDirectoryField $entry 'lDAPDisplayName')
+                                $key = ([guid]$guid).ToString()
+                                $collector.AddAclGuidLabel($guidMap, $key, $label)
+                            }
+                            catch {
+                                $errors.Add($collector.CreateAclSchemaError($schemaDn))
+                            }
+                        }
+                    }
+                }
+
+                $configDn = [string](Get-ADAnalyzerDirectoryField $root 'ConfigurationNamingContext')
+                $rightsArguments = $collector.PlanAclExtendedRights($configDn)
+                if ($null -ne $rightsArguments) {
+                    foreach ($right in @(& $query 'Get-ADObject' $rightsArguments 'ExtendedRights')) {
+                        $label = [string](Get-ADAnalyzerDirectoryField $right 'displayName')
+                        $key = [string](Get-ADAnalyzerDirectoryField $right 'rightsGuid')
+                        $collector.AddAclGuidLabel($guidMap, $key, $label)
+                    }
+                }
+
+                $targets = $aclPlan.Targets
+                $collector.AddAclBaseTargets($targets, $domainDn)
+                foreach ($ou in @(& $query 'Get-ADOrganizationalUnit' $aclPlan.OuArguments 'AclOUs')) {
+                    $dn = [string](Get-ADAnalyzerDirectoryField $ou 'DistinguishedName')
+                    $collector.AddAclTarget($targets, $dn, 'OU')
+                }
+                foreach ($gpo in @(& $query 'Get-ADObject' $aclPlan.GpoArguments 'AclGPOs')) {
+                    $dn = [string](Get-ADAnalyzerDirectoryField $gpo 'DistinguishedName')
+                    $collector.AddAclTarget($targets, $dn, 'GPO')
+                }
+                foreach ($target in $targets) {
+                    $descriptorPlan = $collector.PlanAclDescriptor($target)
+                    $record = @(& $query 'Get-ADObject' $descriptorPlan.Arguments $descriptorPlan.Key) |
+                        Select-Object -First 1
+                    $descriptor = Get-ADAnalyzerDirectoryField $record 'nTSecurityDescriptor'
+                    $status = $collector.AclDescriptorStatus($coverage[$descriptorPlan.Key], $descriptor)
+                    try {
+                        foreach ($ace in @(Get-ADAnalyzerSecurityAces $descriptor $target.DN $target.Type)) {
+                            $ace | Add-Member NoteProperty ObjectTypeName (Get-ADAnalyzerDirectoryField $guidMap $ace.ObjectType $ace.ObjectType)
+                            $aces.Add($ace)
+                        }
+                    }
+                    catch {
+                        $status = 'Unreadable'
+                        $errors.Add($collector.CreateAclReadError($target.DN, $_.Exception.Message))
+                    }
+                    $collector.AddAclObservation($aclTargets, $target, $status)
+                }
+            }
+            $collector.CompleteAclCoverage($coverage, $aclPlan)
+
+            $hosts = @()
+            $hostPlan = $collector.PlanHosts($Context, $analysis, $controllers)
+            if ($null -ne $hostPlan) {
+                if ($null -eq $capabilities) {
+                    $hostArguments = @{
+                        ComputerNames = $hostPlan.Names
+                        Credential = $credential
+                        Errors = $errors
+                        TimeoutSeconds = $hostPlan.TimeoutSeconds
+                        Profile = $Profile
+                    }
+                    $hosts = @(Get-ADAnalyzerHostData @hostArguments)
+                }
+                else {
+                    $hostCollector = [ADAnalyzerHostCollector]::new()
+                    $hostResults = $hostCollector.Collect($hostPlan.Names, $credential, $hostPlan.TimeoutSeconds, $Profile)
+                    $hosts = $hostResults.Hosts
+                    foreach ($failure in $hostResults.Errors) {
+                        $errors.Add($failure)
+                    }
+                }
+            }
+            $collector.CompleteHostCoverage($coverage, $hosts, ($null -ne $hostPlan))
+            $result = $collector.CreateSnapshot(@{
+                    Server = $server
+                    Domain = $domain
+                    DomainDn = $domainDn
+                    DomainSid = $domainSid
+                    RootDomainSid = $rootDomainSid
+                    Forest = $forest
+                    Settings = $settings
+                    OptionalFeatures = $optional
+                    FeatureSchema = $available
+                    PrivilegedSids = $privilegedSids
+                    Users = $users
+                    Groups = $groups
+                    Computers = $computers
+                    ServiceAccounts = $services
+                    ConnectionMode = $connectionMode
+                    ConnectionStatus = $connectionStatus
+                    Trusts = $trusts
+                    DefaultPolicy = $defaultPolicy
+                    FineGrained = $fineGrained
+                    Resultant = $resultant
+                    Controllers = $controllers
+                    Acl = $collector.CreateAclSnapshot($aclTargets, $aces, $guidMap)
+                    Hosts = $hosts
+                    Errors = $errors
+                    Coverage = $coverage
+                })
+        }
+        catch {
+            $primaryError = $_
+        }
+        finally {
+            if ($null -ne $drive) {
+                try {
+                    Set-Location -LiteralPath $previousLocation.Path -ErrorAction Stop
+                }
+                catch {
+                    $restorationError = $_
+                }
+                try {
+                    Remove-PSDrive -Name $drive.Name -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false
+                }
+                catch {
+                    $removalError = $_
+                }
             }
         }
     }
+}
+
+function Get-ADAnalyzerDirectoryData {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][hashtable]$Profile
+
+    )
+    $collector = [ADAnalyzerDirectoryCollector]::new()
+    $connectionMode = $collector.ResolveMode(
+        (Get-ADAnalyzerDirectoryField (Get-ADAnalyzerDirectoryField $Profile 'Analysis' @{}) 'DirectoryConnection' 'PSDrive')
+    )
+    if (-not $connectionMode) {
+        throw 'Analysis.DirectoryConnection must be PSDrive or Direct'
+    }
+    $server = [string](Get-ADAnalyzerDirectoryField $Context 'Server')
+    if ([string]::IsNullOrWhiteSpace($server)) {
+        $server = [string](Get-ADAnalyzerDirectoryField $Context 'Domain')
+    }
+    if ([string]::IsNullOrWhiteSpace($server)) {
+        throw 'Context.Server or Context.Domain is required'
+    }
+    $credential = Get-ADAnalyzerDirectoryField $Context 'Credential'
+    $common = @{
+        Server = $server
+    }
+    if ($null -ne $credential -and $credential -ne [pscredential]::Empty) {
+        $common['Credential'] = $credential
+    }
+    $capabilities = $null
+    $coverage = [ordered]@{}
+    $errors = [System.Collections.Generic.List[object]]::new()
+    $expectedDrive = $null
+    $connectionError = $null
+    $query = { param(
+            $Command,
+            $Arguments,
+            $Key
+
+        ) $splat = @{} + $common + $Arguments
+        @(Invoke-ADAnalyzerDirectoryQuery $Command $splat $Key $coverage $errors $server `
+                -ExpectedDrive $expectedDrive `
+                -ConnectionError $connectionError) }
+    $root = @(& $query 'Get-ADRootDSE' @{} 'RootDSE') | Select-Object -First 1
+    $domainIdentity = [string](Get-ADAnalyzerDirectoryField $Context 'Domain')
+    if ([string]::IsNullOrWhiteSpace($domainIdentity)) {
+        $domainIdentity = [string](Get-ADAnalyzerDirectoryField $root 'DefaultNamingContext' $server)
+    }
+    $domain = @(& $query 'Get-ADDomain' @{
+            Identity = $domainIdentity
+        } 'Domain') | Select-Object -First 1
+    $domainDn = [string](Get-ADAnalyzerDirectoryField $domain 'DistinguishedName' (Get-ADAnalyzerDirectoryField $root 'DefaultNamingContext'))
+    $domainSid = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $domain 'DomainSID')
+    $drive = $null
+    $previousLocation = $null
+    $primaryError = $null
+    $restorationError = $null
+    $removalError = $null
+    $result = $null
+    $connectionStatus = 'Direct'
+    $coverage['DirectoryConnection'] = 'NotConfigured'
+    $observation = Get-ADAnalyzerDirectoryObservation
+    . $observation
     if ($null -ne $primaryError) {
         if ($null -ne $restorationError) {
             $primaryError.Exception.Data['ADAnalyzerLocationRestorationError'] = $restorationError.Exception.Message

@@ -13,27 +13,48 @@ if (Get-Module -ListAvailable -Name ActiveDirectory, GroupPolicy) {
 }
 $module = Import-Module (Join-Path $RepositoryRoot 'ADEnvironment.psd1') -Force -PassThru -WarningAction SilentlyContinue
 $expected = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'lib/Microsoft.ActiveDirectory.Management.dll'))
+# List the parameter combinations from the directory collector, including scans without a search base.
+$directoryRequests = [ordered]@{
+    'Get-ADRootDSE' = , @()
+    'Get-ADDomain' = , @('Identity')
+    'Get-ADForest' = , @()
+    'Get-ADObject' = @(
+        @('SearchBase', 'LDAPFilter', 'Properties'),
+        @('Identity', 'Properties')
+    )
+    'Get-ADUser' = @(
+        @('Filter', 'Properties', 'SearchBase'),
+        @('Filter', 'Properties')
+    )
+    'Get-ADComputer' = @(
+        @('Filter', 'Properties', 'SearchBase'),
+        @('Filter', 'Properties')
+    )
+    'Get-ADGroup' = @(
+        @('Filter', 'Properties', 'SearchBase'),
+        @('Filter', 'Properties')
+    )
+    'Get-ADTrust' = , @('Filter', 'Properties')
+    'Get-ADDomainController' = , @('Filter')
+    'Get-ADServiceAccount' = @(
+        @('Filter', 'Properties', 'SearchBase'),
+        @('Filter', 'Properties')
+    )
+    'Get-ADDefaultDomainPasswordPolicy' = , @('Identity')
+    'Get-ADFineGrainedPasswordPolicy' = , @('Filter', 'Properties')
+    'Get-ADOptionalFeature' = , @('Filter', 'Properties')
+    'Get-ADUserResultantPasswordPolicy' = , @('Identity')
+    'Get-ADOrganizationalUnit' = , @('Filter', 'SearchBase')
+}
+$packagedNames = @($directoryRequests.Keys) + @('Set-ADObject', 'Disable-ADAccount', 'Enable-ADAccount', 'Remove-ADObject')
 $paths = & $module {
-    foreach ($name in @('Get-ADDomain',
-            'Get-ADRootDSE',
-            'Get-ADObject',
-            'Get-ADUser',
-            'Get-ADGroup',
-            'Get-ADComputer',
-            'Get-ADTrust',
-            'Get-ADDomainController',
-            'Get-ADServiceAccount',
-            'Get-ADDefaultDomainPasswordPolicy',
-            'Get-ADFineGrainedPasswordPolicy',
-            'Get-ADUserResultantPasswordPolicy',
-            'Set-ADObject',
-            'Disable-ADAccount',
-            'Enable-ADAccount',
-            'Remove-ADObject')) {
+    param([string[]]$Names)
+
+    foreach ($name in $Names) {
         $command = Get-Command $name -CommandType Cmdlet -ErrorAction Stop
         $command.Module.Path
     }
-}
+} $packagedNames
 foreach ($path in $paths) {
     if ([IO.Path]::GetFullPath($path) -ne $expected) {
         throw "External AD dependency: $path"
@@ -53,11 +74,43 @@ foreach ($parameter in @('Server', 'Credential', 'Root', 'Scope')) {
     }
 }
 Write-Host 'PASS bundled AD provider exposes drive server credential root and scope parameters without a live bind'
-if (Get-Command Get-ADComputer -ListImported -ErrorAction SilentlyContinue) {
-    throw 'Private AD computer command was visible before the local import probe'
+$localNames = @($directoryRequests.Keys) + 'New-ADUser'
+foreach ($name in $localNames) {
+    if (Get-Command $name -ListImported -ErrorAction SilentlyContinue) {
+        throw "Private AD command was visible before the local import probe: $name"
+    }
 }
 $localPaths = @(& {
-        Import-Module -Name $expected -Scope Local -ErrorAction Stop
+        $provider = Import-Module -Name $expected -Scope Local -PassThru -ErrorAction Stop
+        foreach ($name in $directoryRequests.Keys) {
+            $command = $provider.ExportedCmdlets[$name]
+            $visible = Get-Command $name -CommandType Cmdlet -ListImported -ErrorAction Stop
+            if ($command -isnot [Management.Automation.CmdletInfo] -or
+                [IO.Path]::GetFullPath($command.Module.Path) -ne $expected -or
+                [IO.Path]::GetFullPath($visible.Module.Path) -ne $expected -or
+                $command.ImplementingType -ne $visible.ImplementingType) {
+                throw "Directory query did not resolve to the packaged cmdlet: $name"
+            }
+
+            foreach ($request in $directoryRequests[$name]) {
+                $supplied = @('Server', 'ErrorAction') + $request
+                $required = $supplied + 'Credential'
+                $supported = $false
+                foreach ($parameterSet in $visible.ParameterSets) {
+                    $names = $parameterSet.Parameters.Name
+                    $missing = @($required | Where-Object { $_ -notin $names })
+                    $unbound = @($parameterSet.Parameters | Where-Object { $_.IsMandatory -and $_.Name -notin $supplied })
+                    if ($missing.Count -eq 0 -and $unbound.Count -eq 0) {
+                        $supported = $true
+                        break
+                    }
+                }
+                if (-not $supported) {
+                    throw "Bundled cmdlet $name lacks a parameter set for $($required -join ', ') with optional credentials"
+                }
+            }
+        }
+
         foreach ($name in @('Get-ADComputer', 'Get-ADGroup', 'Get-ADObject', 'Get-ADUser', 'New-ADUser')) {
             $command = Get-Command $name -CommandType Cmdlet -ListImported -ErrorAction Stop
             $required = if ($name -eq 'New-ADUser') {
@@ -101,11 +154,12 @@ foreach ($localPath in $localPaths) {
         throw 'Scoped AD command came from an external dependency'
     }
 }
-foreach ($name in @('Get-ADComputer', 'Get-ADGroup', 'Get-ADObject', 'Get-ADUser', 'New-ADUser')) {
+foreach ($name in $localNames) {
     if (Get-Command $name -ListImported -ErrorAction SilentlyContinue) {
-        throw 'Local binary import leaked a private AD command'
+        throw "Local binary import leaked a private AD command: $name"
     }
 }
+Write-Host ('PASS {0} bundled directory query cmdlets are locally scoped and support their request parameter sets without a live bind' -f $directoryRequests.Count)
 Write-Host 'PASS bundled AD computer metadata is locally scoped without invoking a directory query'
 Write-Host 'PASS bundled group and object lookup metadata is locally scoped without a directory query'
 Write-Host 'PASS bundled user creation metadata is locally scoped without account operations'
