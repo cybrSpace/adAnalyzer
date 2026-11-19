@@ -598,6 +598,65 @@ function ConvertTo-ADAnalyzerSafeData {
     }
 }
 
+class ADAnalyzerOperationDocumentReader {
+    ADAnalyzerOperationDocumentReader() {
+    }
+
+    [object] Read([object]$InputObject) {
+        return $this.Read($InputObject, 'Assessment')
+    }
+
+    [object] Read([object]$InputObject, [string]$Kind) {
+        $ErrorActionPreference = 'Stop'
+        if ($InputObject -is [string]) {
+            if (-not (Test-Path -LiteralPath $InputObject -PathType Leaf)) {
+                throw "$Kind file does not exist"
+            }
+
+            $jsonParameters = @{
+                ErrorAction = 'Stop'
+            }
+            $runtime = Get-Variable -Name PSVersionTable -ValueOnly -ErrorAction Stop
+            if ($runtime.PSVersion.Major -ge 7) {
+                $jsonParameters.NoEnumerate = $true
+            }
+            $readParameters = Get-ADAnalyzerJsonReadParameters $InputObject
+            $PSDefaultParameterValues = Get-ADAnalyzerJsonReadDefaults
+            $InputObject = Microsoft.PowerShell.Management\Get-Content @readParameters |
+                ConvertTo-ADAnalyzerJsonText |
+                ConvertFrom-Json @jsonParameters
+        }
+
+        $document = @{
+            Value = $InputObject
+        }
+        if (-not $this.PrepareRecord($document)) {
+            throw "$Kind must be a structured object or JSON file"
+        }
+        $version = Get-ADAnalyzerOperationValue $document.Value @('SchemaVersion')
+        if ($null -ne $version -and -not $this.IsSupportedVersion([string]$version)) {
+            throw "Unsupported $Kind SchemaVersion"
+        }
+        return $document.Value
+    }
+
+    hidden [bool] PrepareRecord([hashtable]$Document) {
+        $value = $Document.Value
+        if ($value -is [array] -and $value.Rank -eq 1 -and $value.Length -eq 1) {
+            $value = $value.GetValue($value.GetLowerBound(0))
+            $Document.Value = $value
+        }
+        return -not ($null -eq $value -or
+            $value -is [ValueType] -or
+            $value -is [string] -or
+            ($value -is [Collections.IEnumerable] -and $value -isnot [Collections.IDictionary]))
+    }
+
+    hidden [bool] IsSupportedVersion([string]$Version) {
+        return ($Version -match '^1(?:\.|$)')
+    }
+}
+
 function Read-ADAnalyzerOperationDocument {
     param(
         [Parameter(Mandatory)]$InputObject,
@@ -621,17 +680,16 @@ function Read-ADAnalyzerOperationDocument {
             ConvertTo-ADAnalyzerJsonText |
             ConvertFrom-Json @jsonParameters
     }
-    if ($InputObject -is [array] -and $InputObject.Rank -eq 1 -and $InputObject.Length -eq 1) {
-        $InputObject = $InputObject.GetValue($InputObject.GetLowerBound(0))
+    $reader = [ADAnalyzerOperationDocumentReader]::new()
+    $document = @{
+        Value = $InputObject
     }
-    if ($null -eq $InputObject -or
-        $InputObject -is [ValueType] -or
-        $InputObject -is [string] -or
-        ($InputObject -is [Collections.IEnumerable] -and $InputObject -isnot [Collections.IDictionary])) {
+    if (-not $reader.PrepareRecord($document)) {
         throw "$Kind must be a structured object or JSON file"
     }
+    $InputObject = $document.Value
     $version = Get-ADAnalyzerOperationValue $InputObject @('SchemaVersion')
-    if ($null -ne $version -and [string]$version -notmatch '^1(?:\.|$)') {
+    if ($null -ne $version -and -not $reader.IsSupportedVersion([string]$version)) {
         throw "Unsupported $Kind SchemaVersion"
     }
     return $InputObject
