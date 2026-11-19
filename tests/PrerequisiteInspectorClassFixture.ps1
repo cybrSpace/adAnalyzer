@@ -76,6 +76,154 @@ function Assert-InspectorPackage([object[]]$Checks, [string]$Root, [string]$Sha)
     Assert-InspectorEqual $Sha $Checks[3].Observed
 }
 
+function Describe-InspectorPathError($Record) {
+    if ($null -eq $Record) {
+        return $null
+    }
+    $recordType = $Record.GetType().FullName
+    if ($Record -is [Collections.IList]) {
+        return [pscustomobject]@{
+            RecordType = $recordType
+            Entries = @(
+                foreach ($entry in $Record) {
+                    Describe-InspectorPathError $entry
+                }
+            )
+        }
+    }
+    if ($Record -is [Management.Automation.IContainsErrorRecord]) {
+        $Record = $Record.ErrorRecord
+    }
+    if ($Record -isnot [Management.Automation.ErrorRecord]) {
+        return [pscustomobject]@{
+            RecordType = $recordType
+        }
+    }
+    $cause = $Record.Exception.GetBaseException()
+    [pscustomobject]@{
+        RecordType = $recordType
+        Id = $Record.FullyQualifiedErrorId
+        Category = [string]$Record.CategoryInfo.Category
+        Message = $Record.Exception.Message
+        CauseType = $cause.GetType().FullName
+        Cause = $cause.Message
+    }
+}
+
+function Invoke-InspectorPathFault([string]$Root, [string]$Action) {
+    $script:fixtureFault = 'Path'
+    $script:prerequisiteReads.Clear()
+    $global:Error.Clear()
+    $captured = @()
+    $sequence = [Collections.Generic.List[string]]::new()
+    $items = [Collections.Generic.List[object]]::new()
+    $failure = $null
+    try {
+        Get-ADAnalyzerPrerequisite -RepositoryRoot $Root -ErrorAction $Action -ErrorVariable +captured 2>&1 |
+            ForEach-Object {
+                if ($_ -is [Management.Automation.ErrorRecord]) {
+                    $sequence.Add(('Error:' + $_.FullyQualifiedErrorId))
+                    $items.Add((Describe-InspectorPathError $_))
+                }
+                else {
+                    $sequence.Add(('Row:' + $_.RuleId))
+                    $items.Add($_)
+                }
+            }
+    }
+    catch {
+        $sequence.Add(('Caught:' + $_.FullyQualifiedErrorId))
+        $failure = Describe-InspectorPathError $_
+    }
+    $history = @($global:Error)
+    $pathErrorCount = @($captured | Where-Object FullyQualifiedErrorId -like 'FixturePrerequisitePathDenied,*').Count
+    $capture = @(
+        foreach ($record in $captured) {
+            Describe-InspectorPathError $record
+        }
+    )
+    [pscustomobject]@{
+        Sequence = $sequence.ToArray()
+        Stream = $items.ToArray()
+        Caught = $failure
+        Captured = $capture
+        PathErrorCount = $pathErrorCount
+        History = @(
+            foreach ($record in $history) {
+                Describe-InspectorPathError $record
+            }
+        )
+        Reads = $script:prerequisiteReads.ToArray()
+    }
+}
+
+function Assert-InspectorPathIgnore([string]$Root) {
+    $functionPath = 'Function:script:Get-ADAnalyzerPrerequisite'
+    $current = (Get-Command Get-ADAnalyzerPrerequisite -CommandType Function).ScriptBlock
+    # The frozen 015d026 command prefix retains binding, runtime rows and the negative path branch.
+    $accepted = [scriptblock]::Create(@'
+    [CmdletBinding()]
+    param(
+        [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
+        [string]$Server,
+        [pscredential]$Credential = [pscredential]::Empty,
+        [switch]$Online,
+        [hashtable]$Profile
+
+    )
+    $configuration = Import-ADAnalyzerProfile -Profile $Profile
+    $windows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    New-ADAnalyzerCheck `
+        -RuleId 'PACKAGE.WINDOWS' `
+        -Status $(if ($windows) {
+            'Pass'
+        }
+        else {
+            'NotApplicable'
+        }) `
+        -Category Prerequisite `
+        -Target $RepositoryRoot `
+        -Observed $windows `
+        -Expected $true `
+        -Message 'Live AD/SMB collection uses Windows; offline policy analysis is portable'
+    New-ADAnalyzerCheck -RuleId 'PACKAGE.POWERSHELL' -Status $(if ($PSVersionTable.PSVersion -ge [version]'5.1') {
+            'Pass'
+        }
+        else {
+            'Fail'
+        }) -Category Prerequisite -Target $RepositoryRoot -Observed $PSVersionTable.PSVersion.ToString() -Expected '>=5.1'
+    $dll = Join-Path $RepositoryRoot 'lib/Microsoft.ActiveDirectory.Management.dll'
+    $packagePath = $null
+    $packageLiteralPath = $null
+    if (Test-Path -LiteralPath $dll -PathType Leaf) {
+        throw 'The path-fault fixture unexpectedly supplied a present package.'
+    }
+    else {
+        New-ADAnalyzerCheck `
+            -RuleId 'PACKAGE.BUNDLED_AD' `
+            -Status Fail `
+            -Severity High `
+            -Category Prerequisite `
+            -Target $dll `
+            -Message 'The package AD assembly is missing'
+    }
+'@)
+    try {
+        Set-Item -LiteralPath $functionPath -Value $accepted
+        $installed = (Get-Command Get-ADAnalyzerPrerequisite -CommandType Function).ScriptBlock
+        Assert-InspectorEqual ($accepted.ToString()) ($installed.ToString())
+        $expected = Invoke-InspectorPathFault $Root 'Ignore'
+    }
+    finally {
+        Set-Item -LiteralPath $functionPath -Value $current
+    }
+    $restored = (Get-Command Get-ADAnalyzerPrerequisite -CommandType Function).ScriptBlock
+    Assert-InspectorEqual ($current.ToString()) ($restored.ToString())
+    $actual = Invoke-InspectorPathFault $Root 'Ignore'
+    Assert-InspectorEqual 'Path' ($expected.Reads -join ',')
+    Assert-InspectorEqual (Get-InspectorJson $expected) (Get-InspectorJson $actual)
+}
+
 class PrerequisiteFixtureWait {
     [int]$Port
 
@@ -327,39 +475,20 @@ $ErrorActionPreference = 'Stop'
 
         foreach ($action in 'Continue', 'SilentlyContinue', 'Ignore', 'Stop') {
             Test-Inspector ('path fault preference ' + $action) {
-                $script:fixtureFault = 'Path'
-                $script:prerequisiteReads.Clear()
-                $captured = @()
-                $sequence = [Collections.Generic.List[string]]::new()
-                try {
-                    Get-ADAnalyzerPrerequisite -RepositoryRoot $fixture.Root -ErrorAction $action -ErrorVariable +captured 2>&1 |
-                        ForEach-Object {
-                            if ($_ -is [Management.Automation.ErrorRecord]) {
-                                $sequence.Add(('Error:' + $_.FullyQualifiedErrorId))
-                            }
-                            else {
-                                $sequence.Add(('Row:' + $_.RuleId))
-                            }
-                        }
+                if ($action -eq 'Ignore') {
+                    Assert-InspectorPathIgnore $fixture.Root
+                    return
                 }
-                catch {
-                    $sequence.Add(('Caught:' + $_.FullyQualifiedErrorId))
-                }
+                $observed = Invoke-InspectorPathFault $fixture.Root $action
                 $prefix = 'Row:PACKAGE.WINDOWS,Row:PACKAGE.POWERSHELL'
                 $expected = switch ($action) {
                     Continue { $prefix + ',Error:FixturePrerequisitePathDenied,Test-Path,Row:PACKAGE.BUNDLED_AD' }
                     Stop { $prefix + ',Caught:FixturePrerequisitePathDenied,Test-Path' }
                     default { $prefix + ',Row:PACKAGE.BUNDLED_AD' }
                 }
-                Assert-InspectorEqual $expected ($sequence -join ',')
-                Assert-InspectorEqual 'Path' ($script:prerequisiteReads -join ',')
-                $observedError = @($captured | Where-Object FullyQualifiedErrorId -like 'FixturePrerequisitePathDenied,*')
-                if ($action -eq 'Ignore') {
-                    Assert-InspectorEqual 0 $observedError.Count
-                }
-                else {
-                    Assert-Inspector ($observedError.Count -gt 0) 'The native path error was lost from ErrorVariable.'
-                }
+                Assert-InspectorEqual $expected ($observed.Sequence -join ',')
+                Assert-InspectorEqual 'Path' ($observed.Reads -join ',')
+                Assert-Inspector ($observed.PathErrorCount -gt 0) 'The native path error was lost from ErrorVariable.'
             }
 
             Test-Inspector ('hash fault preference ' + $action) {
