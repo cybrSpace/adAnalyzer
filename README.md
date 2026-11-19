@@ -110,6 +110,17 @@ $groups = Get-ADAnalyzerLocalAdminGpo -InputObject $policy
 $xml = Get-ADAnalyzerGpoXml -InputObject $policy
 ```
 
+`ADAnalyzerGpoXmlInventory` is available after dot sourcing `etc/Get-GPOXML.ps1`. The constructor is inert. `RenderProvided(report)` renders a supplied package report. `Collect(selection)` reads the selected GPO using a hashtable with `Domain`, optional `Server`, and exactly one `Name` or `Guid`. A trailing credential supplies explicit authentication. Both methods return canonical XML with Boolean presence for recognized secrets.
+
+```powershell
+. .\etc\Get-GPOXML.ps1
+$inventory = [ADAnalyzerGpoXmlInventory]::new()
+$xml = $inventory.RenderProvided($policy)
+$xml = $inventory.ExportProvided($policy, '.\reports\policy.xml')
+```
+
+`ExportProvided(report, path)` and `ExportSelected(selection, path)` return the XML after writing it. Both require a FileSystem path. Pass a trailing `$true` to `ExportProvided` for a dry run. For `ExportSelected`, pass the credential or `[PSCredential]::Empty` before the trailing dry-run argument. A dry run returns the XML without writing it. The compatibility command retains native `WhatIf` and its existing output timing.
+
 `ADAnalyzerLocalAdminPolicyInventory` is available after dot sourcing `etc/Get-LocalAdminGPO.ps1`. Construction has no file or network effects. `AnalyzeProvided(reports)` accepts package reports or their JSON round-trip and returns detached ordered checks. A trailing profile path selects an explicit profile. `Collect(selection)` uses a hashtable with `Domain`, optional `Server`, and one of `Name`, `Guid`, or `All = $true`. It uses the bundled catalog and policy reader on the selected controller. Supply an optional credential and profile path as trailing arguments.
 
 ```powershell

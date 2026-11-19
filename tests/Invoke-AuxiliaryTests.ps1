@@ -1756,6 +1756,39 @@ Write-Output ('PASS legacy '+$Script+' '+$Mode)
         }
     }
 
+    $xmlInventoryCases = [ordered]@{
+        Construction = 2
+        OtherFirst = 2
+        Render = 5
+        Export = 5
+        Isolation = 2
+        Collection = 6
+    }
+    foreach ($case in $xmlInventoryCases.Keys) {
+        Invoke-AuxiliaryTest ('GPO XML inventory class: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $fixture = Join-Path $PSScriptRoot 'GpoXmlInventoryClassFixture.ps1'
+            $savedErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -RepositoryRoot $RepositoryRoot -Mode $case 2>&1
+                $childExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $savedErrorActionPreference
+            }
+            if ($childExitCode -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw ($output -join [Environment]::NewLine)
+            }
+            $expected = 'PASS GPO XML inventory class {0} {1}' -f $case, $xmlInventoryCases[$case]
+            $sentinels = @($output | Where-Object { [string]$_ -clike 'PASS GPO XML inventory class *' })
+            Assert-True ($sentinels.Count -eq 1 -and [string]$sentinels[0] -ceq $expected) 'Fresh process did not execute every selected XML inventory control.'
+        }
+    }
+
     Assert-Equal 0 $script:ExternalCalls
 }
 finally {
