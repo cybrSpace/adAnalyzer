@@ -1,12 +1,11 @@
 using namespace ADAnalyzer.PrincipalFixture
 param(
     [string]$RepositoryRoot,
-    [string]$ScriptName,
-    [string]$Mode
+    [ValidateSet('Get-ServerHPA.ps1', 'Get-ServerHPA copy.ps1')][string]$ScriptName,
+    [ValidateSet('Inert', 'Success', 'Failures', 'Validation', 'Cli', 'Direct', 'Worker')][string]$Mode
 )
 $ErrorActionPreference = 'Stop'
-Add-Type `
-    -TypeDefinition @'
+$fixtureTypes = @'
 using System;
 using System.Collections.Generic;
 namespace ADAnalyzer.PrincipalFixture {
@@ -33,10 +32,10 @@ namespace ADAnalyzer.PrincipalFixture {
  public class GroupPrincipal : IDisposable {
   bool disposed;
   void Check(){if(disposed)throw new ObjectDisposedException("fixture principal");if(Probe.Fault=="Projection" || Probe.Fault=="ProjectionAndDispose")throw new Exception("fixture projection failure");}
-  public string Name {get{Check();return "Fixture Group";}}
-  public string SamAccountName {get{Check();return "FixtureGroup";}}
-  public FixtureSid Sid {get{Check();return new FixtureSid();}}
-  public string Description {get{Check();return "Detached fixture metadata";}}
+  public string Name {get{Probe.Events.Add("get.Name");Check();return "Fixture Group";}}
+  public string SamAccountName {get{Probe.Events.Add("get.SamAccountName");Check();return "FixtureGroup";}}
+  public FixtureSid Sid {get{Probe.Events.Add("get.Sid");Check();return Probe.Fault=="NoSid"?null:new FixtureSid();}}
+  public string Description {get{Probe.Events.Add("get.Description");Check();return "Detached fixture metadata";}}
   public static GroupPrincipal FindByIdentity(PrincipalContext context,IdentityType type,string identity) {
    if(context.Disposed || type!=IdentityType.SamAccountName || identity!="FixtureGroup")throw new Exception("Unexpected lookup contract");
    Probe.Events.Add("group.lookup");if(Probe.Fault=="Lookup" || Probe.Fault=="LookupContextDispose")throw new Exception("fixture lookup failure");
@@ -46,6 +45,7 @@ namespace ADAnalyzer.PrincipalFixture {
  }
 }
 '@
+Microsoft.PowerShell.Utility\Add-Type -TypeDefinition $fixtureTypes -ErrorAction Stop
 
 function Assert-Principal($Value, [string]$Message) {
     if (-not $Value) {
@@ -53,35 +53,81 @@ function Assert-Principal($Value, [string]$Message) {
     }
 }
 
-function ConvertTo-PrincipalFixtureBlock($Ast) {
+function ConvertTo-PrincipalFixtureSource([string]$Path) {
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+    Assert-Principal ($errors.Count -eq 0) ('Principal source did not parse: ' + $Path)
     $source = $Ast.Extent.Text
     $offset = $Ast.Extent.StartOffset
-    $mapping = @{
-        PrincipalContext = 'PrincipalContext'
-        GroupPrincipal = 'GroupPrincipal'
-        ContextType = 'ContextType'
-        IdentityType = 'IdentityType'
-    }
-    $edits = @($Ast.FindAll({ param($node) $node -is [Management.Automation.Language.TypeExpressionAst] },
-            $true) | Sort-Object { $_.Extent.StartOffset } `
-            -Descending)
-    foreach ($node in $edits) {
-        $name = $node.TypeName.FullName -replace '^System\.DirectoryServices\.AccountManagement\.', ''
-        if ($mapping.ContainsKey($name)) {
-            $replacement = '[ADAnalyzer.PrincipalFixture.' + $mapping[$name] + ']'
-            $source = $source.Remove($node.Extent.StartOffset - $offset,
-                $node.Extent.EndOffset - $node.Extent.StartOffset).Insert($node.Extent.StartOffset - $offset,
-                $replacement)
+    $typeNames = @('PrincipalContext', 'GroupPrincipal', 'ContextType', 'IdentityType')
+    $seen = @{}
+    $nodes = @($ast.FindAll({
+                param($node)
+
+                $node -is [Management.Automation.Language.TypeExpressionAst] -or
+                    ($node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                        $node.Parent -is [Management.Automation.Language.ConvertExpressionAst] -and
+                        $node.Parent.Type.TypeName.FullName -ieq 'type' -and
+                        [object]::ReferenceEquals($node, $node.Parent.Child))
+            }, $true) | Sort-Object -Property { $_.Extent.StartOffset } -Descending)
+    foreach ($node in $nodes) {
+        $isStatic = $node -is [Management.Automation.Language.TypeExpressionAst]
+        $name = if ($isStatic) {
+            $node.TypeName.FullName
         }
+        else {
+            $node.Value
+        }
+        $name = $name -replace '^System\.DirectoryServices\.AccountManagement\.', ''
+        if ($name -notin $typeNames) {
+            continue
+        }
+        $seen[$name] = $true
+        $fakeType = 'ADAnalyzer.PrincipalFixture.' + $name
+        $replacement = if ($isStatic) {
+            '[' + $fakeType + ']'
+        }
+        else {
+            "'" + $fakeType + "'"
+        }
+        $start = $node.Extent.StartOffset - $offset
+        $length = $node.Extent.EndOffset - $node.Extent.StartOffset
+        $source = $source.Remove($start, $length).Insert($start, $replacement)
     }
-    [scriptblock]::Create($source)
+    foreach ($name in $typeNames) {
+        Assert-Principal ($seen.ContainsKey($name)) ('Missing isolated type mapping for ' + $name + ' in ' + $Path)
+    }
+    Assert-Principal ($source -notmatch '(?i)System\.DirectoryServices\.AccountManagement\.' -and
+        $source -notmatch '(?i)\\Add-Type\b') ('Unsafe framework reference in transformed source: ' + $Path)
+    $null = [Management.Automation.Language.Parser]::ParseInput($source, $Path, [ref]$tokens, [ref]$errors)
+    Assert-Principal ($errors.Count -eq 0) ('Isolated principal source did not parse: ' + $Path)
+    return $source
+}
+
+function New-PrincipalFixturePackage([string]$Stage) {
+    $names = @(
+        'bin/ADPrincipalGroupReader.ps1'
+        'etc/Get-ServerHPA.ps1'
+        'etc/Get-ServerHPA copy.ps1'
+    )
+    foreach ($name in $names) {
+        $path = Join-Path $Stage $name
+        $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path))
+        $source = ConvertTo-PrincipalFixtureSource (Join-Path $RepositoryRoot $name)
+        [IO.File]::WriteAllText($path, $source, [Text.UTF8Encoding]::new($false))
+    }
 }
 $global:ADAnalyzerHpaFrameworkLoads = 0
+$global:ADAnalyzerHpaFrameworkBlocked = $Mode -eq 'Inert'
 
 function Add-Type {
     [CmdletBinding()]param([string]$AssemblyName)
     Assert-Principal ($AssemblyName -eq 'System.DirectoryServices.AccountManagement') 'Unexpected framework dependency'
     $global:ADAnalyzerHpaFrameworkLoads++
+    if ($global:ADAnalyzerHpaFrameworkBlocked) {
+        throw 'Unexpected framework load during inert bootstrap'
+    }
 }
 $global:ADAnalyzerHpaPromptBlocked = $Mode -in 'Inert', 'Cli', 'Validation'
 
@@ -92,28 +138,210 @@ function Get-Credential {
     }
     [pscredential]::new('fixture-user', (ConvertTo-SecureString 'fixture-only' -AsPlainText -Force))
 }
+
+function Assert-PrincipalSnapshot($Row, [bool]$HasSid = $true) {
+    $expectedSid = $null
+    if ($HasSid) {
+        $expectedSid = 'S-1-5-32-544'
+    }
+    Assert-Principal ($Row -is [pscustomobject] -and
+        ($Row.PSObject.Properties.Name -join ',') -ceq 'Computer,Name,SamAccountName,SID,Description' -and
+        $Row.Computer -ceq 'fixture-host' -and $Row.Name -ceq 'Fixture Group' -and
+        $Row.SamAccountName -ceq 'FixtureGroup' -and $Row.SID -ceq $expectedSid -and
+        $Row.Description -ceq 'Detached fixture metadata') 'Expected one detached ordered host group snapshot'
+}
+
+function Assert-PrincipalLifecycle([int]$Arity) {
+    $events = [ADAnalyzer.PrincipalFixture.Probe]::Events -join '|'
+    $expected = 'context.create|group.lookup|get.Name|get.SamAccountName|get.Sid|get.Description|group.dispose|context.dispose'
+    Assert-Principal ($events -ceq $expected -and [ADAnalyzer.PrincipalFixture.Probe]::Arity -eq $Arity -and
+        [ADAnalyzer.PrincipalFixture.Probe]::ContextDisposals -eq 1 -and
+        [ADAnalyzer.PrincipalFixture.Probe]::GroupDisposals -eq 1 -and
+        [ADAnalyzer.PrincipalFixture.Probe]::Prompts -eq 0) 'Principal getter order, constructor or resource ownership changed'
+}
+
+function Invoke-PrincipalDirectCases {
+    [ADAnalyzer.PrincipalFixture.Probe]::Reset('')
+    $before = $global:ADAnalyzerHpaFrameworkLoads
+    $owner = [ADAnalyzerPrincipalGroupReader]::new()
+    foreach ($inputs in @(@('', 'FixtureGroup'), @('fixture-host', ' '))) {
+        $failure = $null
+        try {
+            $null = $owner.Read($inputs[0], $inputs[1])
+        }
+        catch {
+            $failure = $_
+        }
+        Assert-Principal ($null -ne $failure -and $failure.Exception.Message -match 'Specify a computer and group target') 'Direct validation did not stop before framework access'
+    }
+    Assert-Principal ($global:ADAnalyzerHpaFrameworkLoads -eq $before -and
+        [ADAnalyzer.PrincipalFixture.Probe]::Contexts -eq 0) 'Construction or rejected input loaded the framework'
+
+    $row = $owner.Read('fixture-host', 'FixtureGroup')
+    Assert-PrincipalSnapshot $row
+    Assert-PrincipalLifecycle 2
+    Assert-Principal ($global:ADAnalyzerHpaFrameworkLoads -eq $before + 1) 'Explicit Read did not use the selected framework load seam'
+    [ADAnalyzer.PrincipalFixture.Probe]::Reset('')
+    $native = @(Get-ServerHPA -Computer fixture-host -Target FixtureGroup)
+    Assert-Principal ($native.Count -eq 1 -and
+        (ConvertTo-Json -InputObject $native[0] -Compress) -ceq (ConvertTo-Json -InputObject $row -Compress)) 'Explicit reader and native command returned different snapshots'
+    Assert-PrincipalLifecycle 2
+
+    $credential = [pscredential]::new('fixture-user', (ConvertTo-SecureString 'fixture-only' -AsPlainText -Force))
+    [ADAnalyzer.PrincipalFixture.Probe]::Reset('')
+    $explicit = $owner.Read('fixture-host', 'FixtureGroup', $credential)
+    Assert-PrincipalSnapshot $explicit
+    Assert-PrincipalLifecycle 4
+    Assert-Principal ([ADAnalyzer.PrincipalFixture.Probe]::CredentialsCorrect -and
+        [Management.Automation.PSSerializer]::Serialize($owner) -cnotmatch 'fixture-user|fixture-only|PSCredential') 'Credentials changed or persisted in the reader'
+
+    [ADAnalyzer.PrincipalFixture.Probe]::Reset('NoSid')
+    $missingSid = $owner.Read('fixture-host', 'FixtureGroup', [pscredential]::Empty)
+    Assert-PrincipalSnapshot $missingSid $false
+    Assert-PrincipalLifecycle 2
+    $explicit.Name = 'caller change'
+    Assert-Principal ($missingSid.Name -ceq 'Fixture Group' -and $row.Name -ceq 'Fixture Group') 'Reader reused a mutable snapshot'
+
+    [ADAnalyzer.PrincipalFixture.Probe]::Reset('ProjectionAndDispose')
+    $emitted = [Collections.Generic.List[object]]::new()
+    $failure = $null
+    try {
+        $owner.Read('fixture-host', 'FixtureGroup') | ForEach-Object { $emitted.Add($_) }
+    }
+    catch {
+        $failure = $_
+    }
+    Assert-Principal ($null -ne $failure -and $emitted.Count -eq 0 -and
+        $failure.Exception.Message -match 'fixture projection failure' -and
+        [ADAnalyzer.PrincipalFixture.Probe]::GroupDisposals -eq 1 -and
+        [ADAnalyzer.PrincipalFixture.Probe]::ContextDisposals -eq 1) 'Compound failure lost the primary error or disposed resources incorrectly'
+    $diagnostics = @()
+    $exception = $failure.Exception
+    while ($null -ne $exception) {
+        if ($exception.Data.Contains('ADAnalyzerCleanupErrors')) {
+            $diagnostics = @($exception.Data['ADAnalyzerCleanupErrors'])
+            break
+        }
+        $exception = $exception.InnerException
+    }
+    Assert-Principal ($diagnostics.Count -eq 2 -and $diagnostics[0] -match 'fixture group cleanup failure' -and
+        $diagnostics[1] -match 'fixture context cleanup failure') 'Secondary cleanup evidence or its order changed'
+    [ADAnalyzer.PrincipalFixture.Probe]::Reset('')
+    Assert-PrincipalSnapshot ($owner.Read('fixture-host', 'FixtureGroup'))
+    Assert-PrincipalLifecycle 2
+}
+
+function Invoke-PrincipalWorkerCases([string]$Stage, [string]$SelectedPath) {
+    $planSource = Join-Path $RepositoryRoot 'etc/Test-Runspace.ps1'
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($planSource, [ref]$tokens, [ref]$errors)
+    Assert-Principal ($errors.Count -eq 0 -and $ast.Extent.Text -match 'MyInvocation\.InvocationName' -and
+        $ast.Extent.Text -notmatch '(?i)System\.DirectoryServices\.AccountManagement') 'Unexpected connection startup in the worker source'
+    $plan = Join-Path $Stage 'etc/Test-Runspace.ps1'
+    [IO.File]::Copy($planSource, $plan)
+    $startup = @(. $plan)
+    Assert-Principal ($startup.Count -eq 0 -and
+        $constant['HostGroupHelperPath'] -ceq (Join-Path $Stage 'etc/Get-ServerHPA.ps1')) 'Connection loader did not select its real sibling'
+    $constant['HostGroupHelperPath'] = $SelectedPath
+    $state = $null
+    $runner = $null
+    try {
+        $state = Initialize-RunspacePool -MaxRunspaces 1
+        $state.pool.Open()
+
+        $startup = @(. $SelectedPath)
+        Assert-Principal ($startup.Count -eq 0) 'Parent wrapper load was not inert'
+        $parent = [ADAnalyzerPrincipalGroupReader]::new()
+        [ADAnalyzer.PrincipalFixture.Probe]::Reset('')
+        Assert-PrincipalSnapshot ($parent.Read('fixture-host', 'FixtureGroup'))
+        Assert-PrincipalLifecycle 2
+
+        $runner = [powershell]::Create()
+        $runner.RunspacePool = $state.pool
+        $command = @'
+param([pscredential]$Credential)
+$ErrorActionPreference = 'Stop'
+$global:ADAnalyzerHpaFrameworkLoads = 0
+$global:ADAnalyzerHpaFrameworkBlocked = $false
+$global:ADAnalyzerHpaPromptBlocked = $true
+if ('ADAnalyzerPrincipalGroupReader' -as [type]) {
+    throw 'Worker inherited a preloaded reader'
+}
+[ADAnalyzer.PrincipalFixture.Probe]::Reset('')
+$borrowed = [pscustomobject]@{ Disposed = $false }
+$borrowed | Add-Member ScriptMethod Dispose { $this.Disposed = $true }
+$rows = @(Connect-WindowsServer -context fixture-host -principal FixtureGroup -domain $borrowed -Credential $Credential)
+if ($rows.Count -ne 1 -or $borrowed.Disposed -or $global:ADAnalyzerHpaFrameworkLoads -ne 1 -or
+    (Test-Path -LiteralPath 'Function:Get-ServerHPA')) {
+    throw 'Worker could not load its private named reader without leaking a dependency or disposing borrowed data'
+}
+$rows[0]
+'@
+        $credential = [pscredential]::new('fixture-user', (ConvertTo-SecureString 'fixture-only' -AsPlainText -Force))
+        $null = $runner.AddScript($command).AddArgument($credential)
+        $rows = @($runner.Invoke())
+        Assert-Principal (-not $runner.HadErrors -and $rows.Count -eq 1) (
+            'Fresh selected worker failed. State={0}, HadErrors={1}, Rows={2}, Errors={3}' -f
+            $runner.InvocationStateInfo.State, $runner.HadErrors, $rows.Count, ($runner.Streams.Error -join ' | ')
+        )
+        Assert-PrincipalSnapshot $rows[0]
+        Assert-PrincipalLifecycle 4
+        Assert-Principal ([ADAnalyzer.PrincipalFixture.Probe]::CredentialsCorrect) 'The selected worker did not forward the credential'
+    }
+    finally {
+        if ($null -ne $runner) {
+            $runner.Dispose()
+        }
+        if ($null -ne $state) {
+            $state.pool.Dispose()
+        }
+    }
+    [ADAnalyzer.PrincipalFixture.Probe]::Reset('')
+    Assert-PrincipalSnapshot ($parent.Read('fixture-host', 'FixtureGroup'))
+    Assert-PrincipalLifecycle 2
+}
+
 $path = Join-Path $RepositoryRoot ('etc/' + $ScriptName)
 if ($Mode -eq 'Inert') {
     [ADAnalyzer.PrincipalFixture.Probe]::Reset('')
     $computer = 'caller-computer'
     $target = 'caller-target'
     $output = @(. $path)
+    $owner = [ADAnalyzerPrincipalGroupReader]::new()
+    $otherName = if ($ScriptName -ceq 'Get-ServerHPA.ps1') {
+        'Get-ServerHPA copy.ps1'
+    }
+    else {
+        'Get-ServerHPA.ps1'
+    }
+    $other = Join-Path $RepositoryRoot ('etc/' + $otherName)
+    $alternateOutput = @(. $other)
+    $alternateOwner = [ADAnalyzerPrincipalGroupReader]::new()
     Assert-Principal ($output.Count -eq 0 -and
+        $alternateOutput.Count -eq 0 -and $global:ADAnalyzerHpaFrameworkLoads -eq 0 -and
         [ADAnalyzer.PrincipalFixture.Probe]::Prompts -eq 0 -and
-        [ADAnalyzer.PrincipalFixture.Probe]::Contexts -eq 0) 'Dot sourcing performed authentication or emitted data'
+        [ADAnalyzer.PrincipalFixture.Probe]::Contexts -eq 0 -and
+        [object]::ReferenceEquals($owner.GetType(), $alternateOwner.GetType())) 'Dot loading or construction loaded the framework, changed the type or emitted data'
     Assert-Principal ($computer -eq 'caller-computer' -and $target -eq 'caller-target') 'Dot sourcing changed caller inputs'
+    'PASS host-group principal contract ' + $ScriptName + ' ' + $Mode
+    return
 }
-else {
-    $tokens = $null
-    $errors = $null
-    $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
-    Assert-Principal ($errors.Count -eq 0) 'Host-group source did not parse'
-    $function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq 'Get-ServerHPA' },
-        $true)
-    Assert-Principal ($null -ne $function) 'Host-group function is missing'
-    . (ConvertTo-PrincipalFixtureBlock $function)
+
+$stage = Join-Path ([IO.Path]::GetTempPath()) ('ad-principal-class-fixture-' + [guid]::NewGuid().ToString('N'))
+$null = [IO.Directory]::CreateDirectory($stage)
+try {
+    New-PrincipalFixturePackage $stage
+    $entry = Join-Path $stage ('etc/' + $ScriptName)
     Assert-Principal ([ADAnalyzer.PrincipalFixture.PrincipalContext]::FixtureMarker) 'Fixture did not bind its isolated CLR contracts'
+    if ($Mode -eq 'Worker') {
+        Invoke-PrincipalWorkerCases $stage $entry
+        'PASS host-group principal contract ' + $ScriptName + ' ' + $Mode
+        return
+    }
+
+    $output = @(. $entry)
+    Assert-Principal ($output.Count -eq 0 -and $global:ADAnalyzerHpaFrameworkLoads -eq 0) 'The staged wrapper was not inert'
     if ($Mode -eq 'Success') {
         foreach ($explicit in @($false, $true)) {
             [ADAnalyzer.PrincipalFixture.Probe]::Reset('')
@@ -243,7 +471,6 @@ else {
         }
     }
     elseif ($Mode -eq 'Cli') {
-        $entry = ConvertTo-PrincipalFixtureBlock $ast
         [ADAnalyzer.PrincipalFixture.Probe]::Reset('')
         $caught = $false
         try {
@@ -262,8 +489,14 @@ else {
             [ADAnalyzer.PrincipalFixture.Probe]::ContextDisposals -eq 1 -and
             [ADAnalyzer.PrincipalFixture.Probe]::GroupDisposals -eq 1) 'Explicit CLI did not return detached metadata'
     }
+    elseif ($Mode -eq 'Direct') {
+        Invoke-PrincipalDirectCases
+    }
     else {
         throw 'Unknown principal fixture mode'
     }
+}
+finally {
+    [IO.Directory]::Delete($stage, $true)
 }
 'PASS host-group principal contract ' + $ScriptName + ' ' + $Mode

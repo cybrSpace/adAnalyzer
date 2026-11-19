@@ -90,6 +90,14 @@ The two `etc/Get-LocalGroup*.ps1` helpers expose pipeline-capable `Get-LocalGrou
 
 The two `etc/Get-ServerHPA*.ps1` helpers expose `Get-ServerHPA -Computer <host> -Target <SAM-group-name>` with optional `Credential`. They use the Windows principal framework without RSAT, return detached `Computer`, `Name`, `SamAccountName`, `SID`, and `Description` fields, and dispose their group/context before returning. Principal methods and member enumeration are not part of the returned snapshot. Credential prompts and hardcoded startup targets are removed; dot sourcing is inert. Lookup/projection/cleanup failures remain terminating, with secondary cleanup evidence attached to the primary error.
 
+```powershell
+. .\etc\Get-ServerHPA.ps1
+$reader = [ADAnalyzerPrincipalGroupReader]::new()
+$group = $reader.Read('server1', 'Administrators')
+```
+
+Either helper loads the same packaged class from the checkout. The constructor is inert. `Read(computer, target)` returns the detached group after closing its principal resources. Supply a trailing `PSCredential` for explicit authentication. The worker can load either helper using the existing package-relative layout.
+
 `etc/Get-ADServers.ps1` exposes `Get-ADServers -Identity @('server1','server2')` with optional `Server`, `Credential`, and `OutputPath`. It loads the bundled AD library in the owning function scope, preserves the `name,ipv4Address` columns and input order, and buffers all requested lookups before returning/exporting. Missing or ambiguous identities and lookup/conversion/write errors preserve previous output. Dot sourcing is inert; direct execution requires explicit identities and writes only with `OutputPath`. `WhatIf` returns inventory while suppressing file writes.
 
 ```powershell

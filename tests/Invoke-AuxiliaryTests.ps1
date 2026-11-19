@@ -519,7 +519,7 @@ if((`$rows -join ',') -ne 'Display One,Display Two'){throw 'Explicit name CLI fa
         }
     }
     foreach ($scriptName in @('Get-ServerHPA.ps1', 'Get-ServerHPA copy.ps1')) {
-        foreach ($mode in @('Inert', 'Success', 'Failures', 'Validation', 'Cli')) {
+        foreach ($mode in @('Inert', 'Success', 'Failures', 'Validation', 'Cli', 'Direct', 'Worker')) {
             Invoke-AuxiliaryTest ('host-group principal contract: ' + $scriptName + ' ' + $mode) {
                 $output = @(& (Get-Process `
                             -Id $PID).Path `

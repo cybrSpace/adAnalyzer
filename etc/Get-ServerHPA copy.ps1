@@ -6,6 +6,8 @@ param(
     [Alias('Credential')][pscredential]$CliCredential = [pscredential]::Empty
 )
 
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'bin/ADPrincipalGroupReader.ps1')
+
 function Get-ServerHPA {
     <# .SYNOPSIS Returns detached metadata for a selected host group without retaining principal resources. #>
     [CmdletBinding()]
@@ -15,7 +17,8 @@ function Get-ServerHPA {
         [pscredential]$Credential = [pscredential]::Empty
 
     )
-    if ([string]::IsNullOrWhiteSpace($Computer) -or [string]::IsNullOrWhiteSpace($Target)) {
+    $reader = [ADAnalyzerPrincipalGroupReader]::new()
+    if ($reader.MissingTarget($Computer, $Target)) {
         throw 'Specify a computer and group target.'
     }
     $context = $null
@@ -25,7 +28,7 @@ function Get-ServerHPA {
     $cleanupErrors = [Collections.Generic.List[object]]::new()
     try {
         Add-Type -AssemblyName System.DirectoryServices.AccountManagement -ErrorAction Stop
-        if ($null -ne $Credential -and $Credential -ne [pscredential]::Empty) {
+        if ($reader.UsesCredential($Credential)) {
             $context = [System.DirectoryServices.AccountManagement.PrincipalContext]::new([System.DirectoryServices.AccountManagement.ContextType]::Machine,
                 $Computer,
                 $Credential.UserName,
@@ -43,7 +46,7 @@ function Get-ServerHPA {
         }
         $metadata = @{}
         $principalType = $principal.GetType()
-        foreach ($name in @('Name', 'SamAccountName', 'Sid', 'Description')) {
+        foreach ($name in $reader.MetadataFields()) {
             $property = $principalType.GetProperty($name)
             if ($null -eq $property) {
                 throw 'A required host group metadata getter is unavailable.'
@@ -51,18 +54,13 @@ function Get-ServerHPA {
             $metadata[$name] = $property.GetValue($principal, $null)
         }
         $sid = $metadata.Sid
-        $snapshot = [pscustomobject][ordered]@{
-            Computer = $Computer
-            Name = $metadata.Name
-            SamAccountName = $metadata.SamAccountName
-            SID = if ($null -ne $sid) {
-                [string]$sid.Value
-            }
-            else {
-                $null
-            }
-            Description = $metadata.Description
+        $sidValue = if ($null -ne $sid) {
+            [string]$sid.Value
         }
+        else {
+            $null
+        }
+        $snapshot = $reader.Snapshot($Computer, $metadata, $sidValue)
     }
     catch {
         $failure = $_
@@ -87,15 +85,17 @@ function Get-ServerHPA {
     }
     if ($null -ne $failure) {
         if ($cleanupErrors.Count) {
-            $failure.Exception.Data['ADAnalyzerCleanupErrors'] = @($cleanupErrors | ForEach-Object { $_.Exception.Message })
+            $reader.RecordCleanup($failure.Exception, @($cleanupErrors | ForEach-Object { $_.Exception.Message }))
         }
         throw $failure
     }
     if ($cleanupErrors.Count) {
         $errorRecord = $cleanupErrors[0]
         if ($cleanupErrors.Count -gt 1) {
-            $errorRecord.Exception.Data['ADAnalyzerCleanupErrors'] = @($cleanupErrors | Select-Object `
-                    -Skip 1 | ForEach-Object { $_.Exception.Message })
+            $reader.RecordCleanup(
+                $errorRecord.Exception,
+                @($cleanupErrors | Select-Object -Skip 1 | ForEach-Object { $_.Exception.Message })
+            )
         }
         throw $errorRecord
     }
