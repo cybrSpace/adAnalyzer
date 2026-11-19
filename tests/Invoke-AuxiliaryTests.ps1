@@ -519,6 +519,37 @@ if((`$rows -join ',') -ne 'Display One,Display Two'){throw 'Explicit name CLI fa
             Assert-True (($output -join ' ') -match ('PASS standalone AD server inventory ' + $mode)) 'Server inventory child did not finish'
         }
     }
+    $serverInventoryCases = [ordered]@{
+        Construction = 2
+        Collect = 5
+        Export = 6
+        Isolation = 2
+    }
+    foreach ($case in $serverInventoryCases.Keys) {
+        Invoke-AuxiliaryTest ('AD server inventory class: ' + $case) {
+            $executable = (Get-Process -Id $PID).Path
+            $fixture = Join-Path $PSScriptRoot 'ServerInventoryClassFixture.ps1'
+            $savedErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $output = & $executable -NoLogo -NoProfile -NonInteractive -File $fixture -RepositoryRoot $RepositoryRoot -Mode $case 2>&1
+                $childExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $savedErrorActionPreference
+            }
+            if ($childExitCode -ne 0) {
+                foreach ($line in $output) {
+                    Write-Host ('Fixture output: ' + [string]$line)
+                }
+                throw ($output -join [Environment]::NewLine)
+            }
+            $expected = 'PASS AD server inventory class {0} {1}' -f $case, $serverInventoryCases[$case]
+            $sentinels = @($output | Where-Object { [string]$_ -clike 'PASS AD server inventory class *' })
+            Assert-True ($sentinels.Count -eq 1 -and [string]$sentinels[0] -ceq $expected) 'Fresh process did not execute every selected server inventory control.'
+        }
+    }
+
     . (Join-Path $RepositoryRoot 'etc/Get-GPOXML.ps1')
     . (Join-Path $RepositoryRoot 'etc/Get-LocalAdminGPO.ps1')
     Invoke-AuxiliaryTest 'dot sourcing both GPO tools is inert and preserves caller state' {

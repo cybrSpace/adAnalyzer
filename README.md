@@ -83,6 +83,15 @@ The two `etc/Get-ServerHPA*.ps1` helpers expose `Get-ServerHPA -Computer <host> 
 
 `etc/Get-ADServers.ps1` exposes `Get-ADServers -Identity @('server1','server2')` with optional `Server`, `Credential`, and `OutputPath`. It loads the bundled AD library in the owning function scope, preserves the `name,ipv4Address` columns and input order, and buffers all requested lookups before returning/exporting. Missing or ambiguous identities and lookup/conversion/write errors preserve previous output. Dot sourcing is inert; direct execution requires explicit identities and writes only with `OutputPath`. `WhatIf` returns inventory while suppressing file writes.
 
+```powershell
+. .\etc\Get-ADServers.ps1
+$inventory = [ADAnalyzerServerInventory]::new()
+$servers = $inventory.Collect(@('server1', 'server2'))
+$servers = $inventory.Export(@('server1', 'server2'), '.\reports\servers.csv')
+```
+
+`ADAnalyzerServerInventory` has an inert constructor. `Collect(identities)` accepts an optional server and credential as trailing arguments. It validates all identities, uses the bundled library, then returns rows in input order with duplicates and nullable IPv4 addresses intact. `Export(identities, path)` collects the same rows, writes the complete CSV, then returns the rows. Pass a trailing `$true` for a dry run. To select a server and credential for export, supply both after the path and optionally add the dry-run Boolean. The compatibility command retains native binding, confirmation and `WhatIf`.
+
 `etc/Test-ServerConnection.ps1` defines `Test-ServerConnection -ComputerName <hosts>` with optional `Port` (default 445), `OutputPath`, and `WhatIf`. Its scan class validates and copies explicit selectors, probes each requested host/port pair once through the built-in Windows `Test-NetConnection`, and returns detached rows in input order. The five columns remain `ComputerName,RemoteAddress,RemotePort,tcpTest,result`: `tcpTest` is reachability; `result` means the probe completed with one boolean result. Refused connections retain `tcpTest=false,result=true`; thrown, nonterminating, empty, ambiguous, or malformed probe results have null address/TCP fields and `result=false`. Optional CSV export uses the shared UTF-8 atomic writer after complete serialization; failures preserve the prior report and emit no rows. There is no automatic filename or formatting-object output. `WhatIf` collects rows while suppressing file/directory writes. Dot sourcing is inert and CLI computers are explicit. This utility needs the built-in Windows networking command, not RSAT; probe timing follows that command's native behavior.
 
 `etc/Get-NTLMEvents.ps1` now loads inertly and requires explicit hosts. Its class-owned scan reads Security event 4624 with the named `LmPackageName=NTLM V1` filter and excludes anonymous logons. The explicit workflow uses a server-side XPath query on Windows PowerShell 5.1 and PowerShell 7; it does not require RSAT. The default start time is computed once per invocation as one day before the call. Event-derived time and the existing eight CSV fields are preserved.
