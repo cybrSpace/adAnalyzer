@@ -2362,6 +2362,158 @@ Invoke-DirectoryTest 'required ESU support does not pass without active enrollme
             -Entries @($entry) `
             -ReferenceTime ([datetimeoffset]'2026-11-12')).Status
 }
+
+function New-DirectoryOsRule([string]$Name) {
+    @{
+        Name = $Name
+        VersionPattern = '^10\.0'
+        MinimumBuild = 20348
+        MaximumBuild = 20348
+        SupportedUntil = '2099-01-01T00:00:00Z'
+        RequireEsu = $false
+    }
+}
+
+function Get-DirectoryPolicyCheckOrder([object[]]$Checks) {
+    @($Checks | ForEach-Object { $_.RuleId + '|' + $_.Target }) -join ','
+}
+
+function Assert-DirectoryOsPolicyRoutes($Data, [hashtable]$Profile, [string]$Status, [string]$CheckOrder) {
+    foreach ($route in 'Continue', 'Stop', 'Object') {
+        $checks = if ($route -eq 'Object') {
+            $evaluator = [ADAnalyzerDirectoryPolicyEvaluator]::new()
+            @($evaluator.Evaluate($Data, $Profile))
+        }
+        else {
+            @(Test-ADAnalyzerDirectoryPolicy -Data $Data -Profile $Profile -ErrorAction $route 2>&1)
+        }
+        Assert-DirectoryTrue (@($checks | Where-Object { $_ -is [Management.Automation.ErrorRecord] }).Count -eq 0) (
+            $route + ' leaked an OS input error to the caller.'
+        )
+        $finding = @($checks | Where-Object RuleId -eq 'COMPUTER.OS_POLICY')
+        Assert-DirectoryEqual 1 $finding.Count
+        Assert-DirectoryEqual $Status $finding[0].Status
+        Assert-DirectoryEqual $CheckOrder (Get-DirectoryPolicyCheckOrder $checks)
+    }
+}
+
+Invoke-DirectoryTest 'overflowing projected OS version leaves the default policy unconfigured' {
+    $savedComputer = $script:Computer
+    $profile = New-DirectoryProfile
+    try {
+        $script:Computer = $savedComputer.PSObject.Copy()
+        $script:Computer.OperatingSystemVersion = '10.0 (20348)'
+        $ordinary = Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile $profile
+        $reference = @(Test-ADAnalyzerDirectoryPolicy -Data $ordinary -Profile $profile -ErrorAction Stop)
+        $script:Computer.OperatingSystemVersion = '10.0 (9223372036854775808)'
+        $projected = Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile $profile
+    }
+    finally {
+        $script:Computer = $savedComputer
+    }
+    Assert-DirectoryEqual 0 $profile.Policy.SupportedOperatingSystems.Count
+    Assert-DirectoryEqual '10.0 (9223372036854775808)' $projected.Computers[0].OperatingSystemVersion
+    Assert-DirectoryTrue ($reference.Count -gt 10) 'The control snapshot did not exercise directory policy checks.'
+    Assert-DirectoryOsPolicyRoutes $projected $profile 'NotConfigured' (Get-DirectoryPolicyCheckOrder $reference)
+    $standalone = Test-ADAnalyzerOperatingSystemProfile -Object $projected.Computers[0]
+    Assert-DirectoryEqual 'NotConfigured' $standalone.Status
+    Assert-DirectoryEqual $null $standalone.Observed.Build
+}
+
+Invoke-DirectoryTest 'malformed explicit OS build in an offline snapshot is inconclusive' {
+    $profile = New-DirectoryProfile
+    $directory = Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile $profile
+    $computer = $directory.Computers[0]
+    $computer.OperatingSystemVersion = '10.0 (20348)'
+    $profile.Policy.SupportedOperatingSystems = @(New-DirectoryOsRule $computer.OperatingSystem)
+    $reference = @(Test-ADAnalyzerDirectoryPolicy -Data $directory -Profile $profile -ErrorAction Stop)
+    Assert-DirectoryEqual 'Pass' (Select-DirectoryCheck $reference 'COMPUTER.OS_POLICY').Status
+    $computer.BuildNumber = 'unreported'
+    $before = ConvertTo-Json -InputObject $computer -Depth 20 -Compress
+    Assert-DirectoryOsPolicyRoutes $directory $profile 'Unknown' (Get-DirectoryPolicyCheckOrder $reference)
+    $standalone = Test-ADAnalyzerOperatingSystemProfile -Object $computer -Entries $profile.Policy.SupportedOperatingSystems
+    Assert-DirectoryEqual 'Unknown' $standalone.Status
+    Assert-DirectoryEqual $before (ConvertTo-Json -InputObject $computer -Depth 20 -Compress)
+}
+
+foreach ($malformedOsRule in 'MinimumBuild', 'MaximumBuild', 'NamedWildcard', 'LegacyWildcard') {
+    Invoke-DirectoryTest ('malformed OS policy reports Invalid for ' + $malformedOsRule) {
+        $profile = New-DirectoryProfile
+        $directory = Get-ADAnalyzerDirectoryData -Context (New-DirectoryContext) -Profile $profile
+        $computer = $directory.Computers[0]
+        $computer.OperatingSystemVersion = '10.0 (20348)'
+        $rule = New-DirectoryOsRule $computer.OperatingSystem
+        $profile.Policy.SupportedOperatingSystems = @($rule)
+        $reference = @(Test-ADAnalyzerDirectoryPolicy -Data $directory -Profile $profile -ErrorAction Stop)
+        Assert-DirectoryEqual 'Pass' (Select-DirectoryCheck $reference 'COMPUTER.OS_POLICY').Status
+
+        if ($malformedOsRule -eq 'LegacyWildcard') {
+            $profile.Policy.SupportedOperatingSystems = @('Fixture[')
+        }
+        elseif ($malformedOsRule -eq 'NamedWildcard') {
+            $rule.Name = 'Fixture['
+        }
+        else {
+            $rule[$malformedOsRule] = 'not a build number'
+        }
+        $profile = Import-ADAnalyzerProfile -Profile $profile
+        Assert-DirectoryOsPolicyRoutes $directory $profile 'Invalid' (Get-DirectoryPolicyCheckOrder $reference)
+        $standalone = Test-ADAnalyzerOperatingSystemProfile -Object $computer -Entries $profile.Policy.SupportedOperatingSystems
+        Assert-DirectoryEqual 'Invalid' $standalone.Status
+        Assert-DirectoryEqual 1 $standalone.Evidence.Matches.Count
+        Assert-DirectoryTrue (-not [string]::IsNullOrWhiteSpace($standalone.Evidence.Matches[0].Reason)) 'Invalid OS policy has no reason.'
+    }
+}
+
+Invoke-DirectoryTest 'OS policy keeps build precedence native coercion and lifecycle evidence' {
+    $computer = @{
+        OperatingSystem = 'Fixture OS'
+        OperatingSystemVersion = '10.0 (20348)'
+        BuildNumber = [decimal]20349
+        EsuStatus = 'Active'
+        EsuValidUntil = '2027-01-01T00:00:00Z'
+    }
+    $rule = New-DirectoryOsRule 'fixture*'
+    $rule.MinimumBuild = '0x4F7C'
+    $rule.MaximumBuild = [decimal]20348
+    $rule.SupportedUntil = '2027-01-01T00:00:00Z'
+    $referenceTime = [datetimeoffset]'2027-01-01T00:00:00Z'
+    $parameters = @{
+        Object = $computer
+        Entries = @($rule)
+        ReferenceTime = $referenceTime
+    }
+    $explicitOutside = Test-ADAnalyzerOperatingSystemProfile @parameters
+    Assert-DirectoryEqual 'Fail' $explicitOutside.Status
+    Assert-DirectoryEqual 20349 $explicitOutside.Observed.Build
+    Assert-DirectoryTrue ($explicitOutside.Observed.Build -is [decimal]) 'Explicit build evidence lost its type.'
+
+    $computer.BuildNumber = $null
+    $parenthesized = Test-ADAnalyzerOperatingSystemProfile @parameters
+    Assert-DirectoryEqual 'Pass' $parenthesized.Status
+    Assert-DirectoryEqual 20348 $parenthesized.Observed.Build
+    Assert-DirectoryTrue ($parenthesized.Observed.Build -is [long]) 'Parenthesized build evidence lost its type.'
+    Assert-DirectoryEqual $referenceTime.ToString('o') $parenthesized.Evidence.ReferenceTime
+    Assert-DirectoryEqual $false $parenthesized.Evidence.LifecycleInferred
+
+    $computer.OperatingSystemVersion = '10.0.20348'
+    $rule.Remove('MaximumBuild')
+    $rule.RequireEsu = $true
+    $dotted = Test-ADAnalyzerOperatingSystemProfile @parameters
+    Assert-DirectoryEqual 'Pass' $dotted.Status
+    Assert-DirectoryEqual 20348 $dotted.Observed.Build
+    Assert-DirectoryTrue ($dotted.Observed.Build -is [int]) 'Dotted build evidence lost its type.'
+    Assert-DirectoryEqual 'Active' $dotted.Observed.EsuStatus
+    Assert-DirectoryEqual '2027-01-01T00:00:00Z' $dotted.Observed.EsuValidUntil
+
+    $rule.VersionPattern = '^11\.'
+    Assert-DirectoryEqual 'Fail' (Test-ADAnalyzerOperatingSystemProfile @parameters).Status
+    $rule.Name = 'Unmatched*'
+    $unmatched = Test-ADAnalyzerOperatingSystemProfile @parameters
+    Assert-DirectoryEqual 'Fail' $unmatched.Status
+    Assert-DirectoryEqual 0 $unmatched.Evidence.Matches.Count
+}
+
 Invoke-DirectoryTest 'partial CIM inventory retains per-class errors and partial coverage' {
     $script:DeniedHostClass = 'Win32_Service'
     try {
