@@ -836,9 +836,23 @@ function Get-ADAnalyzerPrerequisite {
             'Fail'
         }) -Category Prerequisite -Target $RepositoryRoot -Observed $PSVersionTable.PSVersion.ToString() -Expected '>=5.1'
     $dll = Join-Path $RepositoryRoot 'lib/Microsoft.ActiveDirectory.Management.dll'
+    $packagePath = $null
+    $packageLiteralPath = $null
     if (Test-Path -LiteralPath $dll -PathType Leaf) {
-        $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($dll)
-        $sha = (Get-FileHash -LiteralPath $dll -Algorithm SHA256 -ErrorAction Stop).Hash
+        $packageProvider = $null
+        $packageDrive = $null
+        $packagePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
+            $dll,
+            [ref]$packageProvider,
+            [ref]$packageDrive
+        )
+        if ($packageProvider.Name -ne 'FileSystem') {
+            throw 'The package AD assembly must use the FileSystem provider'
+        }
+
+        $packageLiteralPath = 'FileSystem::' + $packagePath
+        $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($packagePath)
+        $sha = (Get-FileHash -LiteralPath $packageLiteralPath -Algorithm SHA256 -ErrorAction Stop).Hash
         New-ADAnalyzerCheck -RuleId 'PACKAGE.BUNDLED_AD' -Status Pass -Category Prerequisite -Target $dll -Observed @{
             Version = $info.FileVersion
             Sha256 = $sha
@@ -916,13 +930,14 @@ function Get-ADAnalyzerPrerequisite {
             $splat.Credential = $Credential
         }
         try {
-            if (-not $windows -or -not (Test-Path -LiteralPath $dll -PathType Leaf)) {
+            if (-not $windows -or -not $packageLiteralPath -or
+                -not (Test-Path -LiteralPath $packageLiteralPath -PathType Leaf)) {
                 throw 'Online directory checks require the bundled Windows AD assembly'
             }
             if ($expected -and $sha -ine $expected) {
                 throw 'Bundled AD assembly checksum does not match the configured pin'
             }
-            $binary = Import-Module -Name $dll -Scope Local -PassThru -ErrorAction Stop
+            $binary = Import-Module -Name $packagePath -Scope Local -PassThru -ErrorAction Stop
             $command = $binary.ExportedCmdlets['Get-ADRootDSE']
             if ($null -eq $command) {
                 throw 'Bundled AD assembly does not provide RootDSE queries'

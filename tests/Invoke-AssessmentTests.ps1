@@ -1523,6 +1523,125 @@ try {
         $checks = @(Get-ADAnalyzerPrerequisite -RepositoryRoot $temp)
         Assert-Equal Fail ($checks | Where-Object RuleId -eq PACKAGE.BUNDLED_AD).Status
     }
+
+    $prerequisiteLocation = (Get-Location).Path
+    $prerequisiteProcessDirectory = [Environment]::CurrentDirectory
+    $prerequisiteDrive = $null
+    try {
+        $fixtureRoot = Join-Path $temp 'prerequisite-paths'
+        $packageName = 'copied[package]'
+        $packageRoot = Join-Path $fixtureRoot $packageName
+        $separateDirectory = Join-Path $fixtureRoot 'process-directory'
+        $dllName = 'Microsoft.ActiveDirectory.Management.dll'
+        $dllRelativePath = Join-Path 'lib' $dllName
+        $packageFile = Join-Path $packageRoot $dllRelativePath
+        $null = [IO.Directory]::CreateDirectory((Split-Path -Parent $packageFile))
+        $null = [IO.Directory]::CreateDirectory($separateDirectory)
+        [IO.File]::Copy((Join-Path $RepositoryRoot $dllRelativePath), $packageFile)
+        $sha = (Get-FileHash -LiteralPath $packageFile -Algorithm SHA256).Hash
+        $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($packageFile).FileVersion
+        $pins = @{
+            DependencyHashes = @{
+                $dllName = $sha
+            }
+        }
+        $originalPins = ConvertTo-Json -InputObject $pins -Depth 6 -Compress
+        $driveName = 'Prereq' + [guid]::NewGuid().ToString('N')
+        $prerequisiteDrive = New-PSDrive -Name $driveName -PSProvider FileSystem -Root $fixtureRoot
+        [Environment]::CurrentDirectory = $separateDirectory
+        $fixtureProcessDirectory = [Environment]::CurrentDirectory
+
+        $roots = [ordered]@{
+            'absolute FileSystem path' = $packageRoot
+            'relative PowerShell path' = (Join-Path '.' $packageName)
+            'named FileSystem drive' = ('{0}:/{1}' -f $driveName, $packageName)
+            'provider-qualified path from Env' = ('FileSystem::' + $packageRoot)
+        }
+        foreach ($pathCase in $roots.Keys) {
+            Test-Assessment ('prerequisite inspects the same DLL through ' + $pathCase) {
+                if ($pathCase -eq 'provider-qualified path from Env') {
+                    Set-Location Env:
+                }
+                else {
+                    Set-Location -LiteralPath $fixtureRoot
+                }
+                $root = $roots[$pathCase]
+                $target = Join-Path $root $dllRelativePath
+                $callerLocation = (Get-Location).Path
+                $checks = @(Get-ADAnalyzerPrerequisite -RepositoryRoot $root -Profile $pins)
+                Assert-Equal 'PACKAGE.WINDOWS,PACKAGE.POWERSHELL,PACKAGE.BUNDLED_AD,PACKAGE.CHECKSUM' ($checks.RuleId -join ',')
+                Assert-Equal $root $checks[0].Target
+                Assert-Equal $root $checks[1].Target
+                Assert-Equal 'Pass' $checks[2].Status
+                Assert-Equal 'Pass' $checks[3].Status
+                Assert-Equal $version $checks[2].Observed.Version
+                Assert-Equal $sha $checks[2].Observed.Sha256
+                Assert-Equal $sha $checks[3].Observed
+                Assert-Equal $sha $checks[3].Expected
+
+                foreach ($check in $checks[2..3]) {
+                    Assert-Equal $target $check.Target
+                    $shape = New-ADAnalyzerCheck -RuleId $check.RuleId -Target $target -Status Pass
+                    Assert-Equal $shape.CheckId $check.CheckId
+                }
+                Assert-Equal $callerLocation (Get-Location).Path
+                Assert-Equal $fixtureProcessDirectory ([Environment]::CurrentDirectory)
+                Assert-Equal $originalPins (ConvertTo-Json -InputObject $pins -Depth 6 -Compress)
+            }
+        }
+
+        Set-Location -LiteralPath $fixtureRoot
+        Test-Assessment 'prerequisite keeps package evidence on a wrong pin and rejects an invalid online server' {
+            $wrongPin = @{
+                DependencyHashes = @{
+                    $dllName = ('0' * 64)
+                }
+            }
+            $parameters = @{
+                RepositoryRoot = $packageRoot
+                Profile = $wrongPin
+                Online = $true
+                Server = '! invalid fixture host !'
+            }
+            $observed = [Collections.Generic.List[object]]::new()
+            $failure = $null
+            try {
+                Get-ADAnalyzerPrerequisite @parameters | ForEach-Object { $observed.Add($_) }
+            }
+            catch {
+                $failure = $_.Exception.Message
+            }
+            Assert-Equal 'Online checks require a valid Server host name' $failure
+            Assert-Equal 'PACKAGE.WINDOWS,PACKAGE.POWERSHELL,PACKAGE.BUNDLED_AD,PACKAGE.CHECKSUM' ($observed.RuleId -join ',')
+            Assert-Equal 'Pass' $observed[2].Status
+            Assert-Equal 'Fail' $observed[3].Status
+            Assert-Equal $sha $observed[3].Observed
+            Assert-Equal $wrongPin.DependencyHashes[$dllName] $observed[3].Expected
+        }
+
+        Test-Assessment 'prerequisite streams its platform check before inspecting a package path' {
+            $missingDrive = 'Missing' + [guid]::NewGuid().ToString('N')
+            $invalidRoot = '{0}:/no-package' -f $missingDrive
+            $first = @(Get-ADAnalyzerPrerequisite -RepositoryRoot $invalidRoot | Select-Object -First 1)
+            Assert-Equal 1 $first.Count
+            Assert-Equal 'PACKAGE.WINDOWS' $first[0].RuleId
+            $failure = $null
+            try {
+                $null = Get-ADAnalyzerPrerequisite -RepositoryRoot $invalidRoot -ErrorAction Stop
+            }
+            catch {
+                $failure = $_.FullyQualifiedErrorId
+            }
+            Assert-True ($failure -like 'DriveNotFound,*') 'A full inspection lost the native drive error'
+        }
+    }
+    finally {
+        Set-Location -LiteralPath $prerequisiteLocation
+        [Environment]::CurrentDirectory = $prerequisiteProcessDirectory
+        if ($null -ne $prerequisiteDrive) {
+            Remove-PSDrive -Name $prerequisiteDrive.Name
+        }
+    }
 }
 finally {
     Remove-Item -LiteralPath $temp -Recurse -Force -WhatIf:$false -Confirm:$false
