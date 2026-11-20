@@ -1400,10 +1400,71 @@ class ADAnalyzerAssessmentComparer {
                 $predicateChanged = $this.IsRecordedInteger($oldObserved) -and $this.IsRecordedInteger($newObserved)
             }
         }
-        if ($predicateChanged) {
+        if ($predicateChanged -or $this.RegistryTypePredicateChanged($oldEvidence, $newEvidence, $projector, $missing)) {
             $Observation.Change = 'Changed'
             $Observation.Reason = 'RulePredicateChanged'
         }
+    }
+
+    hidden [bool] RegistryTypePredicateChanged(
+        [object]$Before,
+        [object]$After,
+        [ADAnalyzerEvidenceProjector]$Projector,
+        [object]$Missing
+    ) {
+        $oldType = $this.NormalizeExpectedRegistryType($Projector.GetValue($Before, @('ExpectedRegistryType'), $Missing), $Missing)
+        $newType = $this.NormalizeExpectedRegistryType($Projector.GetValue($After, @('ExpectedRegistryType'), $Missing), $Missing)
+        if ([object]::ReferenceEquals($oldType, $Missing) -or
+            [object]::ReferenceEquals($newType, $Missing) -or
+            [object]::Equals($oldType, $newType)) {
+            return $false
+        }
+
+        foreach ($evidence in @($Before, $After)) {
+            if ($Projector.GetValue($evidence, @('Aggregate')) -eq $true -or
+                -not $this.IsRecordedRegistryType($Projector.GetValue($evidence, @('RegistryType')))) {
+                return $false
+            }
+
+            # A scalar Registry.pol observation identifies where the expected type was applied.
+            $path = $Projector.GetValue($evidence, @('Path'))
+            $scope = $Projector.GetValue($evidence, @('Scope'))
+            if ($path -isnot [string] -or $scope -isnot [string] -or
+                -not (($scope -eq 'Computer' -and $path -eq 'Machine/Registry.pol') -or
+                    ($scope -eq 'User' -and $path -eq 'User/Registry.pol'))) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    hidden [object] NormalizeExpectedRegistryType([object]$Value, [object]$Missing) {
+        if ($null -eq $Value) {
+            return $null
+        }
+
+        # The evaluator accepts invariant integer text and may preserve that spelling in evidence.
+        if ($Value -is [string]) {
+            $numericType = 0L
+            if (-not [long]::TryParse(
+                $Value,
+                [Globalization.NumberStyles]::Integer,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [ref]$numericType
+            )) {
+                return $Missing
+            }
+            $Value = $numericType
+        }
+        if ($this.IsRecordedRegistryType($Value)) {
+            return [uint32]$Value
+        }
+        return $Missing
+    }
+
+    hidden [bool] IsRecordedRegistryType([object]$Value) {
+        return $this.IsRecordedInteger($Value) -and
+            [decimal]$Value -ge 0 -and [decimal]$Value -le [uint32]::MaxValue
     }
 
     hidden [bool] IsRecordedInteger([object]$Value) {

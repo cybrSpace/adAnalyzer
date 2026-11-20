@@ -712,7 +712,7 @@ try {
         Assert-Equal 1 $gap.Observed
         Assert-True ($json -notmatch '<Groups') 'Raw XML escaped through the assessment'
     }
-    Test-Assessment 'custom GPO comparison distinguishes changed operators, bounds and scalar equality' {
+    Test-Assessment 'custom GPO comparison distinguishes changed operators, values and registry types' {
         $ruleId = 'GPO.Expected.FixtureLevel'
         $key = 'Software\Fixture'
         $gpo = [pscustomobject]@{
@@ -776,6 +776,58 @@ try {
                 Expected = [int]2
                 Status = 'Pass'
             }
+            TypeConstraintWrong = @{
+                Observed = 1
+                Expected = 1
+                RuleType = 'REG_SZ'
+                Status = 'Invalid'
+            }
+            TypeConstraintWrongText = @{
+                Observed = 1
+                Expected = 1
+                RuleType = ' +1 '
+                Status = 'Invalid'
+            }
+            TypeConstraintMatched = @{
+                Observed = 1
+                Expected = 1
+                RuleType = 'REG_DWORD'
+                Status = 'Pass'
+            }
+            TypeUnconstrained = @{
+                Observed = 1
+                Expected = 1
+                RuleType = $null
+                Status = 'Pass'
+            }
+            TypeObservationWrong = @{
+                Observed = 1
+                Expected = 1
+                RuleType = [long]4
+                ObservedType = [uint32]5
+                Status = 'Invalid'
+            }
+            TypeObservationWrongText = @{
+                Observed = 1
+                Expected = 1
+                RuleType = ' +4 '
+                ObservedType = [uint32]5
+                Status = 'Invalid'
+            }
+            UserTypeWrong = @{
+                Observed = 1
+                Expected = 1
+                RuleType = 1
+                UserPolicy = $true
+                Status = 'Invalid'
+            }
+            UserTypeMatched = @{
+                Observed = 1
+                Expected = 1
+                RuleType = 4
+                UserPolicy = $true
+                Status = 'Pass'
+            }
             AggregateLow = @{
                 Observed = 1
                 Operator = 'Equals'
@@ -794,6 +846,7 @@ try {
         $assessments = @{}
         $checks = @{}
         $paths = @{}
+        $pathHashes = @{}
         foreach ($name in $inputs.Keys) {
             $inputCase = $inputs[$name]
             $policy = New-PolicyFixture
@@ -807,9 +860,17 @@ try {
                     Source = 'Machine/Registry.pol'
                     KeyOnly = $false
                 })
+            if ($inputCase.ContainsKey('ObservedType')) {
+                $policy.RegistrySettings[0].Type = $inputCase.ObservedType
+            }
+            if ($inputCase.UserPolicy) {
+                $policy.RegistrySettings[0].Hive = 'HKCU'
+                $policy.RegistrySettings[0].Scope = 'User'
+                $policy.RegistrySettings[0].Source = 'User/Registry.pol'
+            }
             $rule = @{
                 Id = 'FixtureLevel'
-                Hive = 'HKLM'
+                Hive = $policy.RegistrySettings[0].Hive
                 Key = $key
                 ValueName = 'Level'
                 Expected = $inputCase.Expected
@@ -822,6 +883,14 @@ try {
             }
             if ($inputCase.ContainsKey('Aggregate')) {
                 $rule.Aggregate = $true
+            }
+            if ($inputCase.ContainsKey('RuleType')) {
+                if ($null -eq $inputCase.RuleType) {
+                    $rule.Remove('Type')
+                }
+                else {
+                    $rule.Type = $inputCase.RuleType
+                }
             }
             $arguments = @{
                 DirectoryData = $directory
@@ -848,10 +917,27 @@ try {
             'EqualImproved'
             'NotEqualStrict'
             'NotEqualRelaxed'
+            'TypeConstraintWrong'
+            'TypeConstraintWrongText'
+            'TypeConstraintMatched'
+            'TypeUnconstrained'
+            'TypeObservationWrong'
+            'TypeObservationWrongText'
         )) {
             Assert-Equal $checks.Strict.CheckId $checks[$name].CheckId
         }
         Assert-Equal $checks.AggregateLow.CheckId $checks.AggregateHigh.CheckId
+        Assert-Equal $checks.UserTypeWrong.CheckId $checks.UserTypeMatched.CheckId
+        Assert-Equal User $checks.UserTypeWrong.Evidence.Scope
+        Assert-Equal 'User/Registry.pol' $checks.UserTypeWrong.Evidence.Path
+        Assert-Equal 1 $checks.TypeConstraintWrong.Evidence.ExpectedRegistryType
+        Assert-True ($checks.TypeConstraintWrongText.Evidence.ExpectedRegistryType -is [string]) 'The evaluator did not retain the numeric type text'
+        Assert-Equal ' +1 ' $checks.TypeConstraintWrongText.Evidence.ExpectedRegistryType
+        Assert-Equal 4 $checks.TypeConstraintMatched.Evidence.ExpectedRegistryType
+        Assert-Equal 4 $checks.TypeConstraintWrong.Evidence.RegistryType
+        Assert-Equal 4 $checks.TypeConstraintMatched.Evidence.RegistryType
+        Assert-Equal 5 $checks.TypeObservationWrong.Evidence.RegistryType
+        Assert-Equal $null (Get-ADAnalyzerOperationValue $checks.TypeUnconstrained.Evidence @('ExpectedRegistryType') ([object]::new()))
 
         $assessments.Legacy = [pscustomobject]@{
             SchemaVersion = 1
@@ -871,6 +957,18 @@ try {
             Target = $assessments.Strict.Target
             Checks = @($legacyEqual)
         }
+        $legacyType = $checks.TypeConstraintMatched.PSObject.Copy()
+        $legacyType.Evidence = [pscustomobject]@{
+            Path = $checks.TypeConstraintMatched.Evidence.Path
+            Scope = $checks.TypeConstraintMatched.Evidence.Scope
+            Operator = $checks.TypeConstraintMatched.Evidence.Operator
+            RegistryType = $checks.TypeConstraintMatched.Evidence.RegistryType
+        }
+        $assessments.LegacyType = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $assessments.Strict.Target
+            Checks = @($legacyType)
+        }
         $unknown = $checks.Relaxed.PSObject.Copy()
         $unknown.Status = 'Unknown'
         $assessments.Unknown = [pscustomobject]@{
@@ -887,6 +985,7 @@ try {
         foreach ($name in $assessments.Keys) {
             $paths[$name] = Join-Path $temp ('gpo-compare-predicate-' + $name + '.json')
             $null = Export-ADAnalyzerAssessment -Assessment $assessments[$name] -Path $paths[$name] -Format Json -Confirm:$false
+            $pathHashes[$name] = (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
         }
         $comparer = [ADAnalyzerAssessmentComparer]::new()
         $cases = @(
@@ -900,6 +999,15 @@ try {
             @('NotEqualStrict', 'NotEqualRelaxed', 'Changed', 'RulePredicateChanged'),
             @('NotEqualRelaxed', 'NotEqualStrict', 'Changed', 'RulePredicateChanged'),
             @('EqualStrict', 'LegacyEqual', 'Resolved', $null),
+            @('TypeConstraintWrongText', 'TypeConstraintMatched', 'Changed', 'RulePredicateChanged'),
+            @('TypeConstraintWrong', 'TypeConstraintMatched', 'Changed', 'RulePredicateChanged'),
+            @('TypeConstraintMatched', 'TypeConstraintWrong', 'Changed', 'RulePredicateChanged'),
+            @('TypeConstraintWrong', 'TypeUnconstrained', 'Changed', 'RulePredicateChanged'),
+            @('TypeUnconstrained', 'TypeConstraintWrong', 'Changed', 'RulePredicateChanged'),
+            @('TypeObservationWrong', 'TypeConstraintMatched', 'Resolved', $null),
+            @('TypeObservationWrongText', 'TypeConstraintMatched', 'Resolved', $null),
+            @('TypeConstraintWrong', 'LegacyType', 'Resolved', $null),
+            @('UserTypeWrong', 'UserTypeMatched', 'Changed', 'RulePredicateChanged'),
             @('AggregateLow', 'AggregateHigh', 'Resolved', $null),
             @('Strict', 'Legacy', 'Resolved', $null),
             @('Strict', 'Unknown', 'Changed', $null),
@@ -936,6 +1044,9 @@ try {
                     }
                 }
             }
+        }
+        foreach ($name in $paths.Keys) {
+            Assert-Equal $pathHashes[$name] (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
         }
     }
     Test-Assessment 'SYSVOL version mismatch and policy read errors remain explicit' {
