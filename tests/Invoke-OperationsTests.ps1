@@ -3338,6 +3338,17 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
         }
     }
 
+    Invoke-Test 'ambiguous remediation errors identify the held account attempt' {
+        $engine = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'RemediationFailureContextFixture.ps1'
+        $output = @(& $engine -NoLogo -NoProfile -NonInteractive -File $fixture -RepositoryRoot $RepositoryRoot)
+        if ($LASTEXITCODE -ne 0) {
+            throw 'The remediation failure context fixture failed.'
+        }
+        $marker = 'PASS remediation failure context 8'
+        Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+    }
+
     Invoke-Test 'read-only reservation inspection reports local state' {
         $engine = (Get-Process -Id $PID).Path
         $fixture = Join-Path $PSScriptRoot 'ReservationInspectionFixture.ps1'

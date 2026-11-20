@@ -3627,6 +3627,12 @@ class ADAnalyzerRemediationExecutor {
                     $_.Exception.Message
                 throw [InvalidOperationException]::new($message, $Failure.Exception)
             }
+
+            # A previously loaded helper type can still preserve its original
+            # failure contract until the process is restarted.
+            if ($null -ne $Reservation.GetType().GetMethod('TryAttachFailureContext')) {
+                $Reservation.TryAttachFailureContext($Failure.Exception)
+            }
         }
     }
 

@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -164,22 +165,28 @@ namespace ADAnalyzer
     public sealed class AccountEffectReservation
     {
         private const int MaxRecordBytes = 1024;
+        private const string FailureContextKey = "ADAnalyzer.RemediationReservation";
         private static readonly Encoding RecordEncoding = new UTF8Encoding(false, true);
         private readonly string path;
         private readonly string record;
+        private readonly Guid account;
+        private readonly Guid attempt;
         private bool mayHaveDispatched;
 
-        private AccountEffectReservation(string path, string record)
+        private AccountEffectReservation(string path, string record, Guid account, Guid attempt)
         {
             this.path = path;
             this.record = record;
+            this.account = account;
+            this.attempt = attempt;
         }
 
         public static AccountEffectReservation Acquire(string directory, Guid account, bool undo)
         {
             string path = ReservationPath(directory, account);
+            Guid attempt = Guid.NewGuid();
             string record = "Status=Uncertain\n"
-                + "AttemptId=" + Guid.NewGuid().ToString("D") + "\n"
+                + "AttemptId=" + attempt.ToString("D") + "\n"
                 + "Account=" + account.ToString("D") + "\n"
                 + "Operation=" + (undo ? "Undo" : "Apply") + "\n"
                 + "CreatedUtc=" + DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture) + "\n"
@@ -218,7 +225,7 @@ namespace ADAnalyzer
                 stream.Write(bytes, 0, bytes.Length);
                 stream.Flush(true);
             }
-            return new AccountEffectReservation(path, record);
+            return new AccountEffectReservation(path, record, account, attempt);
         }
 
         public static Dictionary<string, object> Inspect(string directory, Guid account)
@@ -346,6 +353,42 @@ namespace ADAnalyzer
             if (!mayHaveDispatched)
             {
                 Release();
+            }
+        }
+
+        public void TryAttachFailureContext(Exception failure)
+        {
+            if (!mayHaveDispatched || failure == null)
+            {
+                return;
+            }
+
+            try
+            {
+                // Exception implementations can supply executable or read-only
+                // Data. Optional diagnostics must keep the original failure.
+                var property = failure.GetType().GetProperty("Data");
+                var getter = property == null ? null : property.GetGetMethod();
+                if (getter == null || getter.DeclaringType != typeof(Exception))
+                {
+                    return;
+                }
+
+                IDictionary data = failure.Data;
+                if (!data.IsReadOnly && !data.Contains(FailureContextKey))
+                {
+                    data.Add(FailureContextKey, new Dictionary<string, object>
+                    {
+                        { "ObjectGuid", account },
+                        { "AttemptId", attempt },
+                        { "Status", "Uncertain" },
+                        { "LastConfirmedStep", "AccountReserved" }
+                    });
+                }
+            }
+            catch (Exception)
+            {
+                // Preserve the original exception if its metadata is unavailable.
             }
         }
 

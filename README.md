@@ -369,6 +369,10 @@ Before enabling writes, a Windows administrator must provision a stable local `A
 
 The account GUID identifies the `.hold` file. Its text records the attempt ID, operation, creation time, and last confirmed step. Preserve that file and its journal when escalating a timeout or interruption. The application offers no automatic retry, Undo, or clear operation for an uncertain reservation. Require independent evidence of settlement and fresh approval before any later write. Synthetic tests qualify the control flow. Native provider settlement, distributed writers, and power-loss or host-restore recovery require separate qualification.
 
+When Apply or Undo rethrows a failure after dispatch might have started, the originating exception can carry local reservation context under `ADAnalyzer.RemediationReservation` in `Exception.Data`. Look there or in the inner exception chain for the account GUID, attempt GUID, and last confirmed step. Match both GUIDs against the retained hold before using the error details for reconciliation. Inspecting a hold still conveys no settlement or approval evidence.
+
+Enterprise-readiness development and pull-request checks use repository-owned synthetic directory records, simulated provider failures, disposable local storage, and the RSAT-free Windows matrix. They require no directory access or operator-supplied validation data. Native deployment qualification has a separate scope.
+
 To inspect the local authority by account object GUID through the class API, load the analyzer and call the inspector.
 
 ```powershell
