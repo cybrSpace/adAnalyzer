@@ -895,6 +895,97 @@ class ADAnalyzerAssessmentReport {
         $null = $Builder.Append('<h2>Collection errors</h2><pre>' + $EncodedErrors + '</pre>')
     }
 
+    hidden [void] AddComparison([Text.StringBuilder]$Builder, [object]$Assessment) {
+        $projector = [ADAnalyzerEvidenceProjector]::new()
+        $comparison = $projector.GetValue($Assessment, @('Comparison'))
+        $kind = $projector.GetValue($comparison, @('ComparisonType'))
+        $version = $projector.GetValue($comparison, @('SchemaVersion'))
+        if ($kind -isnot [string] -or $kind -cne 'ADAnalyzerAssessmentComparison' -or
+            ($version -isnot [int] -and $version -isnot [long]) -or $version -ne 1) {
+            return
+        }
+
+        $reference = $projector.GetValue($comparison, @('ReferenceRunId'))
+        $difference = $projector.GetValue($comparison, @('DifferenceRunId'))
+        $null = $Builder.Append(
+            '<section aria-labelledby="assessment-comparison"><h2 id="assessment-comparison">' +
+            'Assessment comparison</h2><dl><dt>Reference run</dt><dd>' +
+            $this.ComparisonText($reference, 'Unavailable') + '</dd><dt>Difference run</dt><dd>' +
+            $this.ComparisonText($difference, 'Unavailable') + '</dd></dl><dl>'
+        )
+
+        $summary = $projector.GetValue($comparison, @('Summary'))
+        foreach ($change in @('New', 'Resolved', 'Changed', 'Unchanged')) {
+            $count = $projector.GetValue($summary, @($change))
+            $display = 'Unavailable'
+            if (($count -is [int] -or $count -is [long]) -and $count -ge 0) {
+                $display = $count.ToString([Globalization.CultureInfo]::InvariantCulture)
+            }
+            $null = $Builder.Append('<dt>' + $change + '</dt><dd>' + $display + '</dd>')
+        }
+        $null = $Builder.Append('</dl>')
+
+        $changes = $projector.GetValue($comparison, @('Changes'))
+        if ($changes -is [array]) {
+            $this.AddComparisonRows($Builder, $changes, $projector)
+        }
+        else {
+            $null = $Builder.Append('<p>Recorded comparison rows are unavailable.</p>')
+        }
+        $null = $Builder.Append('</section>')
+    }
+
+    hidden [void] AddComparisonRows(
+        [Text.StringBuilder]$Builder,
+        [object[]]$Changes,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        $null = $Builder.Append(
+            '<div class="table"><table><thead><tr><th>Rule</th><th>Target</th>' +
+            '<th>Change</th><th>Reason</th></tr></thead><tbody>'
+        )
+        $hasRows = $false
+        foreach ($row in $Changes) {
+            $change = $Projector.GetValue($row, @('Change'))
+            if ($change -isnot [string] -or $change -cnotin 'New', 'Resolved', 'Changed') {
+                continue
+            }
+
+            $rule = $Projector.GetValue($row, @('RuleId'))
+            $target = $Projector.GetValue($row, @('Target'))
+            $reason = $Projector.GetValue($row, @('Reason'))
+            $explanation = ''
+            if ($reason -is [string]) {
+                switch -CaseSensitive ($reason) {
+                    'NotObservedInDifference' {
+                        $explanation = ' Check coverage and collect fresh evidence for this rule and target.'
+                    }
+                    'RulePredicateChanged' {
+                        $explanation = ' Review the recorded rule requirements before interpreting the status change.'
+                    }
+                }
+            }
+            $null = $Builder.Append(
+                '<tr><td>' + $this.ComparisonText($rule, 'Unavailable') +
+                '</td><td>' + $this.ComparisonText($target, 'Unavailable') +
+                '</td><td>' + $change +
+                '</td><td>' + $this.ComparisonText($reason, '') + $explanation + '</td></tr>'
+            )
+            $hasRows = $true
+        }
+        if (-not $hasRows) {
+            $null = $Builder.Append('<tr><td colspan="4" class="muted">No changed rows available.</td></tr>')
+        }
+        $null = $Builder.Append('</tbody></table></div>')
+    }
+
+    hidden [string] ComparisonText([object]$Value, [string]$Fallback) {
+        if (($Value -is [string] -and $Value.Length -gt 0) -or $Value -is [guid]) {
+            return [Net.WebUtility]::HtmlEncode([string]$Value)
+        }
+        return $Fallback
+    }
+
     hidden [string] FinishHtml([Text.StringBuilder]$Builder, [object]$EncodedSnapshot) {
         $null = $Builder.Append(
             '<details><summary>Full assessment snapshot (secret presence only)</summary><pre>' +
@@ -992,6 +1083,7 @@ class ADAnalyzerAssessmentReport {
                             $encodedErrors = [Net.WebUtility]::HtmlEncode((ConvertTo-Json -InputObject $errors -Depth 100))
                             $this.AddCollectionErrors($html, $encodedErrors)
                         }
+                        $this.AddComparison($html, $report.Safe)
                         $encodedSnapshot = [Net.WebUtility]::HtmlEncode((ConvertTo-Json -InputObject $report.Safe -Depth 100))
                         $this.FinishHtml($html, $encodedSnapshot)
                     }
@@ -1099,6 +1191,7 @@ function ConvertTo-ADAnalyzerAssessmentHtml {
         $encodedErrors = [Net.WebUtility]::HtmlEncode((ConvertTo-Json -InputObject $errors -Depth 100))
         $report.AddCollectionErrors($html, $encodedErrors)
     }
+    $report.AddComparison($html, $Assessment)
     $encodedSnapshot = [Net.WebUtility]::HtmlEncode((ConvertTo-Json -InputObject $Assessment -Depth 100))
     return $report.FinishHtml($html, $encodedSnapshot)
 }
