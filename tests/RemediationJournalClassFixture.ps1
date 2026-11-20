@@ -165,7 +165,10 @@ function ConvertTo-StableJournal([object]$Journal) {
 
 function New-NativeFixturePlan {
     $plan = [pscustomobject][ordered]@{
-        Remediation = [ordered]@{ AllowDisable = $false; MaximumActions = 2 }
+        Remediation = [ordered]@{
+            AllowDisable = $false
+            MaximumActions = 2
+        }
         PrivilegedSids = @('S-1-5-21-10-20-30-2100')
         AccountClassification = [ordered]@{ AttributeRules = @() }
     }

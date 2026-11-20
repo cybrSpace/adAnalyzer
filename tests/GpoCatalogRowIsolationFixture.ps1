@@ -265,7 +265,12 @@ function Invoke-CatalogScenario(
         }
     }
     if ($Preference -ne 'InheritedContinue') {
-        $arguments.ErrorAction = if ($Preference -eq 'CaughtStop') { 'Stop' } else { 'Continue' }
+        $arguments.ErrorAction = if ($Preference -eq 'CaughtStop') {
+            'Stop'
+        }
+        else {
+            'Continue'
+        }
     }
 
     # The ordinary modes must exercise Continue without an enclosing try.
@@ -366,7 +371,12 @@ function Get-ExpectedPolicyKeys(
 function Assert-CatalogRow([object]$Row, [string]$Key, [string]$Fault, [bool]$Strict) {
     $id = $script:Ids[$Key]
     $dn = "CN=$($id.ToString('B')),CN=Policies,CN=System,$script:DomainDn"
-    $requested = if ($Fault -in 'ExplicitConnection', 'EmptyCredential') { $script:RequestedServer } else { $script:DomainName }
+    $requested = if ($Fault -in 'ExplicitConnection', 'EmptyCredential') {
+        $script:RequestedServer
+    }
+    else {
+        $script:DomainName
+    }
     $status = @{
         First = @(0, 'AllSettingsEnabled')
         Subject = @(3, 'AllSettingsDisabled')
@@ -375,7 +385,12 @@ function Assert-CatalogRow([object]$Row, [string]$Key, [string]$Fault, [bool]$St
     if ($Fault -in 'NullFlags', 'MissingFlags') {
         $status.Subject = @(0, 'AllSettingsEnabled')
     }
-    $expectedDisplayName = if ($Key -eq 'Tail') { 'Tail' } else { 'Duplicate' }
+    $expectedDisplayName = if ($Key -eq 'Tail') {
+        'Tail'
+    }
+    else {
+        'Duplicate'
+    }
     Assert-Catalog (
         $Row.Id -is [guid] -and $Row.Id -eq $id -and
         $Row.DistinguishedName -ceq $dn -and
@@ -450,7 +465,12 @@ function Assert-Scenario([object]$Scenario, [object]$Actual) {
     $errorCount = 0
     $errorId = $null
     if ($fault -in 'BadGuid', 'BadFlags', 'BadLinkOptions' -or ($fault -eq 'MissingGuid' -and -not $strict)) {
-        $oracle = if ($fault -eq 'MissingGuid') { 'BadGuid' } else { $fault }
+        $oracle = if ($fault -eq 'MissingGuid') {
+            'BadGuid'
+        }
+        else {
+            $fault
+        }
         $errorId = $script:NativeErrorIds[$oracle]
         $errorCount = 1
     }
@@ -485,7 +505,12 @@ function Assert-Scenario([object]$Scenario, [object]$Actual) {
         ) 'A caught native failure lost its public command context.'
     }
     if ($errorCount -eq 1) {
-        $errorIndex = if ($Scenario.Position -eq 'Middle' -and $fault -ne 'MissingSites') { 1 } else { 0 }
+        $errorIndex = if ($Scenario.Position -eq 'Middle' -and $fault -ne 'MissingSites') {
+            1
+        }
+        else {
+            0
+        }
         if ($Scenario.Select -eq 'Guid') {
             $errorIndex = 0
         }

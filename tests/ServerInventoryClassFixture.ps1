@@ -132,18 +132,31 @@ function Invoke-ServerClassObservation($Bound) {
     })
     if ($identity -eq 'bad') {
         switch ($script:Failure) {
-            'Throw' { throw 'fixture stopping lookup failure' }
+            'Throw' {
+                throw 'fixture stopping lookup failure'
+            }
             'WriteError' {
                 Write-Error 'fixture nonterminating lookup failure' -ErrorAction Stop
             }
-            'Missing' { return }
+            'Missing' {
+                return
+            }
             'Duplicate' {
-                [pscustomobject]@{ Name = 'one'; IPv4Address = $null }
-                [pscustomobject]@{ Name = 'two'; IPv4Address = $null }
+                [pscustomobject]@{
+                    Name = 'one'
+                    IPv4Address = $null
+                }
+                [pscustomobject]@{
+                    Name = 'two'
+                    IPv4Address = $null
+                }
                 return
             }
             'Unnamed' {
-                return [pscustomobject]@{ Name = ' '; IPv4Address = $null }
+                return [pscustomobject]@{
+                    Name = ' '
+                    IPv4Address = $null
+                }
             }
             'MissingName' {
                 return [pscustomobject]@{ IPv4Address = '192.0.2.10' }
@@ -431,10 +444,18 @@ $script:Temporary = Join-Path ([IO.Path]::GetTempPath()) ('ad-server-inventory-'
 $null = [IO.Directory]::CreateDirectory($script:Temporary)
 try {
     switch ($Mode) {
-        'Construction' { Invoke-ServerConstructionCases }
-        'Collect' { Invoke-ServerCollectionCases }
-        'Export' { Invoke-ServerExportCases }
-        'Isolation' { Invoke-ServerIsolationCases }
+        'Construction' {
+            Invoke-ServerConstructionCases
+        }
+        'Collect' {
+            Invoke-ServerCollectionCases
+        }
+        'Export' {
+            Invoke-ServerExportCases
+        }
+        'Isolation' {
+            Invoke-ServerIsolationCases
+        }
     }
     Assert-ServerClass ($script:ForeignCalls -eq 0 -and (Get-Location).Path -ceq $originalLocation) 'The fixture crossed an external boundary or changed location.'
     if (-not $RunspaceWorker) {

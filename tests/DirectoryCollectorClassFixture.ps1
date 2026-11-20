@@ -166,7 +166,14 @@ function New-FixtureUser([string]$Name, [string]$PsoDn) {
         SamAccountName = $Name
         DistinguishedName = ('CN={0},{1}' -f $Name, $script:SearchBase)
         ObjectClass = 'user'
-        SID = 'S-1-5-21-1-2-3-' + $(if ($PsoDn) { '1001' } else { '1002' })
+        SID = 'S-1-5-21-1-2-3-' + $(
+            if ($PsoDn) {
+                '1001'
+            }
+            else {
+                '1002'
+            }
+        )
         PrimaryGroupID = 513
         MemberOf = @()
         UserAccountControl = $flag
@@ -194,7 +201,12 @@ function New-FixturePolicy([string]$Name, [int]$Length) {
 function Invoke-FixtureProvider([string]$Command, [Collections.IDictionary]$Bound) {
     $driveName = (Microsoft.PowerShell.Management\Get-Location).Drive.Name
     $owned = $script:Drives.ContainsKey($driveName)
-    $effective = if ($owned) { $script:Drives[$driveName] } else { $Bound['Credential'] }
+    $effective = if ($owned) {
+        $script:Drives[$driveName]
+    }
+    else {
+        $Bound['Credential']
+    }
     $script:Trace.Add([pscustomobject][ordered]@{
         Step = $Command
         Owned = $owned
@@ -468,7 +480,12 @@ if ($Case -eq 'Native') {
         Test-DirectoryCollector $scenario {
             Clear-FixtureObservations
             $context = New-FixtureContext
-            $transport = if ($scenario -in 'Direct', 'Denied', 'Invalid') { 'Direct' } else { 'PSDrive' }
+            $transport = if ($scenario -in 'Direct', 'Denied', 'Invalid') {
+                'Direct'
+            }
+            else {
+                'PSDrive'
+            }
             $profile = New-FixtureProfile $transport
             $script:Fault = $scenario
             if ($scenario -eq 'Invalid') {
@@ -612,7 +629,13 @@ if ($Case -eq 'Construction') {
     Test-DirectoryCollector 'reject missing target before imports' {
         $failure = $null
         try {
-            $null = $collector.Collect(@{ Server = ''; Domain = '' }, (New-FixtureProfile Direct))
+            $null = $collector.Collect(
+                @{
+                    Server = ''
+                    Domain = ''
+                },
+                (New-FixtureProfile Direct)
+            )
         }
         catch {
             $failure = $_
@@ -640,7 +663,12 @@ if ($Case -eq 'Direct') {
     foreach ($transport in 'PSDrive', 'Direct') {
         Test-DirectoryCollector ('match compatibility on ' + $transport) {
             Clear-FixtureObservations
-            $status = if ($transport -ceq 'Direct') { 'Direct' } else { 'Connected' }
+            $status = if ($transport -ceq 'Direct') {
+                'Direct'
+            }
+            else {
+                'Connected'
+            }
             $actual = @(Invoke-FixtureDirect $collector (New-FixtureContext) (New-FixtureProfile $transport))
             Assert-DirectoryCollector ($actual.Count -eq 1) 'Direct collection did not return exactly one snapshot.'
             Assert-FixtureSuccess $actual[0] $status
@@ -706,7 +734,12 @@ if ($Case -eq 'Direct') {
             catch {
                 $failure = $_
             }
-            $expectedMessage = if ($providerFault -ceq 'Import') { '*Fixture directory provider import failure*' } else { '*Get-ADOrganizationalUnit*' }
+            $expectedMessage = if ($providerFault -ceq 'Import') {
+                '*Fixture directory provider import failure*'
+            }
+            else {
+                '*Get-ADOrganizationalUnit*'
+            }
             Assert-DirectoryCollector ($null -ne $failure -and $failure.Exception.Message -like $expectedMessage -and
                 $script:Imports.Count -eq 1 -and $script:Trace.Count -eq 0 -and $script:Ambient.Count -eq 0) `
                 'Provider preflight did not fail with its useful cause before directory calls.'

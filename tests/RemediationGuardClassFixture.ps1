@@ -427,7 +427,10 @@ function Invoke-GuardNativeRoute {
         }
         'KindAliases' {
             Get-ADAnalyzerOperationKind @{ Class = @('User', 'Group', 'Computer') }
-            Get-ADAnalyzerOperationKind @{ ObjectClass = $null; Class = 'User' }
+            Get-ADAnalyzerOperationKind @{
+                ObjectClass = $null
+                Class = 'User'
+            }
         }
         'ExclusionPriority' {
             $record = New-GuardRecord

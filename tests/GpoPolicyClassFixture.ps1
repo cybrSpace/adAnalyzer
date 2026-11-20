@@ -22,7 +22,11 @@ function ConvertTo-Canonical($Value) {
         return $Value
     }
     if ($Value -is [Collections.IEnumerable] -and $Value -isnot [Collections.IDictionary] -and $Value -isnot [pscustomobject]) {
-        return , @(foreach ($item in $Value) { ConvertTo-Canonical $item })
+        return , @(
+            foreach ($item in $Value) {
+                ConvertTo-Canonical $item
+            }
+        )
     }
     [string[]]$names = if ($Value -is [Collections.IDictionary]) {
         @($Value.Keys)
@@ -167,7 +171,12 @@ function Invoke-CommandProbe($Context, [string]$Preference) {
     return [pscustomobject]@{
         Rows = $rows.ToArray()
         Terminated = $null -ne $caught
-        ErrorReason = $(if ($caught) { $caught.CategoryInfo.Reason } else { $null })
+        ErrorReason = $(if ($caught) {
+                $caught.CategoryInfo.Reason
+            }
+            else {
+                $null
+            })
         HadError = $savedErrors.Count -gt 0
     }
 }

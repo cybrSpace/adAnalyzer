@@ -160,7 +160,12 @@ function Assert-PasConnection($Bound) {
 
 function Import-Module {
     [CmdletBinding()]
-    param([string]$Name, [string]$Scope, [switch]$PassThru, [switch]$Global)
+    param(
+        [string]$Name,
+        [string]$Scope,
+        [switch]$PassThru,
+        [switch]$Global
+    )
 
     if (-not $script:AllowProvider) {
         Stop-PasClassExternal
@@ -191,16 +196,36 @@ function Import-Module {
     }
 }
 
-function Get-ADRootDSE { Stop-PasClassExternal }
-function Get-ADUser { Stop-PasClassExternal }
-function New-ADUser { Stop-PasClassExternal }
-function Enable-ADAccount { Stop-PasClassExternal }
-function Get-Credential { Stop-PasClassExternal }
-function Invoke-Command { Stop-PasClassExternal }
+function Get-ADRootDSE {
+    Stop-PasClassExternal
+}
+
+function Get-ADUser {
+    Stop-PasClassExternal
+}
+
+function New-ADUser {
+    Stop-PasClassExternal
+}
+
+function Enable-ADAccount {
+    Stop-PasClassExternal
+}
+
+function Get-Credential {
+    Stop-PasClassExternal
+}
+
+function Invoke-Command {
+    Stop-PasClassExternal
+}
 
 function Invoke-PasClassRoot {
     [CmdletBinding()]
-    param([string]$Server, [pscredential]$Credential)
+    param(
+        [string]$Server,
+        [pscredential]$Credential
+    )
 
     Assert-PasConnection $PSBoundParameters
     $script:Trace.Add('Root')
@@ -215,7 +240,13 @@ function Invoke-PasClassRoot {
 
 function Invoke-PasClassLookup {
     [CmdletBinding()]
-    param([string]$LDAPFilter, [string]$SearchBase, [string[]]$Properties, [string]$Server, [pscredential]$Credential)
+    param(
+        [string]$LDAPFilter,
+        [string]$SearchBase,
+        [string[]]$Properties,
+        [string]$Server,
+        [pscredential]$Credential
+    )
 
     Assert-PasConnection $PSBoundParameters
     $prefix = '(sAMAccountName='
@@ -481,7 +512,11 @@ function Invoke-PasGuardCases {
 
 function ConvertTo-SecureString {
     [CmdletBinding()]
-    param([string]$String, [switch]$AsPlainText, [switch]$Force)
+    param(
+        [string]$String,
+        [switch]$AsPlainText,
+        [switch]$Force
+    )
 
     if (-not $script:AllowCreate) {
         Stop-PasClassExternal
@@ -650,7 +685,10 @@ try {
     $startup = @(. (Join-Path $RepositoryRoot 'etc/New-ADPASUser.ps1'))
     $owner = [ADAnalyzerPasUserImporter]::new()
     Assert-PasClass ($startup.Count -eq 0 -and $script:Trace.Count -eq 0 -and $script:Unexpected -eq 0) 'Standalone entry or constructor entered a dependency seam'
-    function New-ADPASUser { Stop-PasClassExternal }
+    function New-ADPASUser {
+        Stop-PasClassExternal
+    }
+
     switch ($Mode) {
         'Construction' {
             Invoke-PasConstructionCases

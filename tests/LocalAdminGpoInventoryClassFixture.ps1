@@ -569,12 +569,32 @@ function Invoke-InventoryCollectionCases {
         foreach ($selection in @(
                 @{ Name = 'Unique fixture' }
                 @{ Domain = $script:DomainName }
-                @{ Domain = $script:DomainName; Name = 'Unique fixture'; All = $true }
-                @{ Domain = $script:DomainName; Name = ' ' }
-                @{ Domain = $script:DomainName; Guid = 'not-a-guid' }
-                @{ Domain = $script:DomainName; All = 'true' }
-                @{ Domain = $script:DomainName; All = $false }
-                @{ Domain = $script:DomainName; All = $true; Keys = @() }
+                @{
+                    Domain = $script:DomainName
+                    Name = 'Unique fixture'
+                    All = $true
+                }
+                @{
+                    Domain = $script:DomainName
+                    Name = ' '
+                }
+                @{
+                    Domain = $script:DomainName
+                    Guid = 'not-a-guid'
+                }
+                @{
+                    Domain = $script:DomainName
+                    All = 'true'
+                }
+                @{
+                    Domain = $script:DomainName
+                    All = $false
+                }
+                @{
+                    Domain = $script:DomainName
+                    All = $true
+                    Keys = @()
+                }
             )) {
             Assert-InventoryThrows { $owner.Collect($selection) }
         }
@@ -598,14 +618,20 @@ function Invoke-InventoryCollectionCases {
     }
     Test-InventoryFixture 'guid selection uses the domain default and ambient authentication' {
         $script:Trace.Clear()
-        $rows = $owner.Collect(@{ Domain = $script:DomainName; Guid = $script:Ids[2] })
+        $rows = $owner.Collect(@{
+                Domain = $script:DomainName
+                Guid = $script:Ids[2]
+            })
         Assert-InventoryTrace ($catalogTrace + ',ReadAmbient') $script:DomainName $false
         Assert-Inventory ($rows.Count -ge 3 -and $rows[0].GpoId -ceq $script:Ids[2].ToString('D') -and
             $script:Trace[5].Id -eq $script:Ids[2]) 'GUID selection returned the wrong policy.'
     }
     Test-InventoryFixture 'all retains ordinal healthy siblings and recovers a missing SYSVOL policy' {
         $script:Trace.Clear()
-        $rows = $owner.Collect(@{ Domain = $script:DomainName; All = $true }, $script:Credential)
+        $rows = $owner.Collect(@{
+                Domain = $script:DomainName
+                All = $true
+            }, $script:Credential)
         Assert-InventoryTrace ($catalogTrace + ',Mount,ReadOwned,Remove,Mount,ReadOwned,Remove,Mount,ReadOwned,Remove') $script:DomainName $true
         $issues = @($rows | Where-Object RuleId -eq 'GPO.READ')
         $gpos = @($rows | ForEach-Object GpoId | Select-Object -Unique)
@@ -618,7 +644,10 @@ function Invoke-InventoryCollectionCases {
         foreach ($name in 'No such fixture', 'Duplicate fixture') {
             $script:Trace.Clear()
             Assert-InventoryThrows {
-                $owner.Collect(@{ Domain = $script:DomainName; Name = $name }, $script:Credential)
+                $owner.Collect(@{
+                        Domain = $script:DomainName
+                        Name = $name
+                    }, $script:Credential)
             } '(?i)not found|ambiguous'
             Assert-InventoryTrace $catalogTrace $script:DomainName $true
         }
@@ -626,7 +655,10 @@ function Invoke-InventoryCollectionCases {
     Test-InventoryFixture 'profile validation follows scoped acquisition and successful cleanup' {
         $script:Trace.Clear()
         Write-InventoryText $profilePath '$'
-        $selection = @{ Domain = $script:DomainName; Name = 'Unique fixture' }
+        $selection = @{
+            Domain = $script:DomainName
+            Name = 'Unique fixture'
+        }
         Assert-InventoryThrows { $owner.Collect($selection, $script:Credential, $profilePath) }
         Assert-InventoryTrace ($catalogTrace + ',Mount,ReadOwned,Remove') $script:DomainName $true
         Write-InventoryText $profilePath '{"Analysis":{"AssumeGpoApplicable":true}}'
@@ -653,11 +685,21 @@ $script:Temporary = Join-Path ([IO.Path]::GetTempPath()) ('ad-local-inventory-' 
 $null = [IO.Directory]::CreateDirectory($script:Temporary)
 try {
     switch ($Mode) {
-        'Construction' { Invoke-InventoryConstructionCases }
-        'Analysis' { Invoke-InventoryAnalysisCases }
-        'Export' { Invoke-InventoryExportCases }
-        'Isolation' { Invoke-InventoryIsolationCases }
-        'Collection' { Invoke-InventoryCollectionCases }
+        'Construction' {
+            Invoke-InventoryConstructionCases
+        }
+        'Analysis' {
+            Invoke-InventoryAnalysisCases
+        }
+        'Export' {
+            Invoke-InventoryExportCases
+        }
+        'Isolation' {
+            Invoke-InventoryIsolationCases
+        }
+        'Collection' {
+            Invoke-InventoryCollectionCases
+        }
     }
     Assert-Inventory ($script:ForeignCalls -eq 0 -and $script:OwnedDrives.Count -eq 0 -and
         (Get-Location).Path -ceq $originalLocation) 'A fixture crossed an external boundary or leaked location or ownership.'

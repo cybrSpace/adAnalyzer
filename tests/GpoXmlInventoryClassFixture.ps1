@@ -208,7 +208,10 @@ function Invoke-XmlFixtureRoot {
     param([string]$Server, [pscredential]$Credential)
 
     Assert-XmlQuery Root $script:InitialServer $PSBoundParameters
-    [pscustomobject]@{ DnsHostName = $script:Pinned; ConfigurationNamingContext = $null }
+    [pscustomobject]@{
+        DnsHostName = $script:Pinned
+        ConfigurationNamingContext = $null
+    }
 }
 
 function Invoke-XmlFixtureDomain {
@@ -217,7 +220,10 @@ function Invoke-XmlFixtureDomain {
 
     Assert-XmlQuery Domain $script:Pinned $PSBoundParameters
     Assert-XmlInventory ($Identity -ceq $script:DomainName) 'Wrong catalog domain.'
-    [pscustomobject]@{ DNSRoot = $script:DomainName; DistinguishedName = $script:DomainDn }
+    [pscustomobject]@{
+        DNSRoot = $script:DomainName
+        DistinguishedName = $script:DomainDn
+    }
 }
 
 function Invoke-XmlFixtureObject {
@@ -382,7 +388,12 @@ function Invoke-XmlRenderCases {
     }
     Test-XmlInventory 'required report, identity, policy and flags validation stops locally' {
         Assert-XmlInventoryFailure { $owner.RenderProvided($null) }
-        Assert-XmlInventoryFailure { $owner.RenderProvided([pscustomobject]@{ Gpo = $packet.Gpo; Policy = $null }) } '(?i)Gpo and Policy'
+        Assert-XmlInventoryFailure {
+            $owner.RenderProvided([pscustomobject]@{
+                    Gpo = $packet.Gpo
+                    Policy = $null
+                })
+        } '(?i)Gpo and Policy'
         $bad = New-XmlPacket $policyPath
         foreach ($invalid in -1, 4, 'bad') {
             $bad.Gpo.Flags = $invalid
@@ -508,10 +519,24 @@ function Invoke-XmlCollectionCases {
                 $null
                 @{ Name = $script:FixtureDisplayName }
                 @{ Domain = $script:DomainName }
-                @{ Domain = $script:DomainName; Name = ' ' }
-                @{ Domain = $script:DomainName; Guid = 'invalid' }
-                @{ Domain = $script:DomainName; Name = $script:FixtureDisplayName; Guid = $script:Ids[0] }
-                @{ Domain = $script:DomainName; Name = $script:FixtureDisplayName; Keys = @() }
+                @{
+                    Domain = $script:DomainName
+                    Name = ' '
+                }
+                @{
+                    Domain = $script:DomainName
+                    Guid = 'invalid'
+                }
+                @{
+                    Domain = $script:DomainName
+                    Name = $script:FixtureDisplayName
+                    Guid = $script:Ids[0]
+                }
+                @{
+                    Domain = $script:DomainName
+                    Name = $script:FixtureDisplayName
+                    Keys = @()
+                }
             )) {
             Assert-XmlInventoryFailure { $owner.Collect($invalid) }
         }
@@ -536,7 +561,10 @@ function Invoke-XmlCollectionCases {
         $script:Events.Clear()
         $script:ExplicitCredential = $false
         $script:InitialServer = $script:DomainName
-        $text = $owner.Collect(@{ Domain = $script:DomainName; Guid = $script:Ids[0] })
+        $text = $owner.Collect(@{
+                Domain = $script:DomainName
+                Guid = $script:Ids[0]
+            })
         Assert-XmlEvents $ambient
         Assert-XmlPresence $text
         Assert-XmlInventory ((([xml]$text).SelectSingleNode('/GPO/Id').InnerText) -ceq $script:Ids[0].ToString('D')) 'GUID returned a different policy.'
@@ -546,7 +574,12 @@ function Invoke-XmlCollectionCases {
         $script:InitialServer = $script:DomainName
         foreach ($name in 'Missing fixture', 'Duplicate fixture') {
             $script:Events.Clear()
-            Assert-XmlInventoryFailure { $owner.Collect(@{ Domain = $script:DomainName; Name = $name }) } '(?i)not found|ambiguous'
+            Assert-XmlInventoryFailure {
+                $owner.Collect(@{
+                        Domain = $script:DomainName
+                        Name = $name
+                    })
+            } '(?i)not found|ambiguous'
             Assert-XmlEvents $catalog
         }
     }
@@ -571,7 +604,10 @@ function Invoke-XmlCollectionCases {
         $script:ExplicitCredential = $false
         $script:InitialServer = $script:DomainName
         $path = Join-Path $script:Temporary 'selected [saved].xml'
-        $text = $owner.ExportSelected(@{ Domain = $script:DomainName; Guid = $script:Ids[0] }, $path)
+        $text = $owner.ExportSelected(@{
+                Domain = $script:DomainName
+                Guid = $script:Ids[0]
+            }, $path)
         Assert-XmlEvents $ambient
         Assert-XmlPresence $text
         $null = Get-XmlFingerprint $text
@@ -602,12 +638,24 @@ try {
         New-XmlPolicy $policyPath
     }
     switch ($Mode) {
-        'Construction' { Invoke-XmlConstructionCases }
-        'OtherFirst' { Invoke-XmlConstructionCases }
-        'Render' { Invoke-XmlRenderCases }
-        'Export' { Invoke-XmlExportCases }
-        'Isolation' { Invoke-XmlIsolationCases }
-        'Collection' { Invoke-XmlCollectionCases }
+        'Construction' {
+            Invoke-XmlConstructionCases
+        }
+        'OtherFirst' {
+            Invoke-XmlConstructionCases
+        }
+        'Render' {
+            Invoke-XmlRenderCases
+        }
+        'Export' {
+            Invoke-XmlExportCases
+        }
+        'Isolation' {
+            Invoke-XmlIsolationCases
+        }
+        'Collection' {
+            Invoke-XmlCollectionCases
+        }
     }
     Assert-XmlInventory ($script:Unexpected -eq 0 -and $null -eq $script:Mount -and
         (Get-Location).Path -ceq $location) 'The fixture crossed an external boundary or leaked scope.'

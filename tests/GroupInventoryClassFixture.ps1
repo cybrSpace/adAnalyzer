@@ -133,9 +133,15 @@ function Import-Module {
     }
     $exports = $commands.Clone()
     switch ($script:ProviderShape) {
-        'MissingGroup' { $exports.Remove('Get-ADGroup') }
-        'MissingObject' { $exports.Remove('Get-ADObject') }
-        'StringObject' { $exports['Get-ADObject'] = 'Invoke-GroupInventoryFakeObject' }
+        'MissingGroup' {
+            $exports.Remove('Get-ADGroup')
+        }
+        'MissingObject' {
+            $exports.Remove('Get-ADObject')
+        }
+        'StringObject' {
+            $exports['Get-ADObject'] = 'Invoke-GroupInventoryFakeObject'
+        }
     }
     [pscustomobject]@{
         Path = $Name
@@ -212,16 +218,24 @@ function Invoke-GroupInventoryMatch($Bound) {
             continue
         }
         switch ($name) {
-            'RootA' { return $script:SelectedA }
-            'RootB' { return $script:SelectedB }
-            'Empty' { return $script:EmptyRow }
+            'RootA' {
+                return $script:SelectedA
+            }
+            'RootB' {
+                return $script:SelectedB
+            }
+            'Empty' {
+                return $script:EmptyRow
+            }
             'Both' {
                 $script:SelectedA
                 $script:EmptyRow
                 $script:SelectedA
                 return
             }
-            'Missing' { return }
+            'Missing' {
+                return
+            }
             'BadRoot' {
                 return New-GroupInventoryRecord '' fixture group
             }
@@ -238,9 +252,15 @@ function Invoke-GroupInventoryMember($Bound) {
     Add-GroupInventoryTrace Object $dn 'SamAccountName,ObjectClass,CN,Member' $Bound
     if ($dn -ieq $script:After) {
         switch ($script:Fault) {
-            'Throw' { throw 'Fixture member lookup failed.' }
-            'WriteError' { Write-Error 'Fixture member observation failed.' -ErrorAction Stop }
-            'Missing' { return }
+            'Throw' {
+                throw 'Fixture member lookup failed.'
+            }
+            'WriteError' {
+                Write-Error 'Fixture member observation failed.' -ErrorAction Stop
+            }
+            'Missing' {
+                return
+            }
             'Duplicate' {
                 $script:AfterRow
                 $script:AfterRow
@@ -256,12 +276,24 @@ function Invoke-GroupInventoryMember($Bound) {
         return $script:AfterRow
     }
     switch ($dn) {
-        $script:ChildAlias { return $script:ChildRow }
-        $script:Child { return $script:ChildRow }
-        $script:RootA { return $script:ResolvedA }
-        $script:Empty { return $script:EmptyRow }
-        $script:Leaf { return $script:LeafRow }
-        default { throw 'Unexpected fixture object lookup.' }
+        $script:ChildAlias {
+            return $script:ChildRow
+        }
+        $script:Child {
+            return $script:ChildRow
+        }
+        $script:RootA {
+            return $script:ResolvedA
+        }
+        $script:Empty {
+            return $script:EmptyRow
+        }
+        $script:Leaf {
+            return $script:LeafRow
+        }
+        default {
+            throw 'Unexpected fixture object lookup.'
+        }
     }
 }
 
@@ -580,11 +612,21 @@ $script:Temp = Join-Path ([IO.Path]::GetTempPath()) ('ad-group-inventory-' + [gu
 $null = [IO.Directory]::CreateDirectory($script:Temp)
 try {
     switch ($Mode) {
-        'Construction' { Invoke-GroupInventoryConstructionCases }
-        'Traversal' { Invoke-GroupInventoryTraversalCases }
-        'Failures' { Invoke-GroupInventoryFailureCases }
-        'Export' { Invoke-GroupInventoryExportCases }
-        'Isolation' { Invoke-GroupInventoryIsolationCases }
+        'Construction' {
+            Invoke-GroupInventoryConstructionCases
+        }
+        'Traversal' {
+            Invoke-GroupInventoryTraversalCases
+        }
+        'Failures' {
+            Invoke-GroupInventoryFailureCases
+        }
+        'Export' {
+            Invoke-GroupInventoryExportCases
+        }
+        'Isolation' {
+            Invoke-GroupInventoryIsolationCases
+        }
     }
     Assert-GroupInventory ($script:ForeignCalls -eq 0 -and (Get-Location).Path -ceq $initialLocation) 'Fixture crossed its external boundary or changed location.'
     if (-not $RunspaceWorker) {

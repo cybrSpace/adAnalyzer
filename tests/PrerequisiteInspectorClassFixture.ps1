@@ -482,9 +482,15 @@ $ErrorActionPreference = 'Stop'
                 $observed = Invoke-InspectorPathFault $fixture.Root $action
                 $prefix = 'Row:PACKAGE.WINDOWS,Row:PACKAGE.POWERSHELL'
                 $expected = switch ($action) {
-                    Continue { $prefix + ',Error:FixturePrerequisitePathDenied,Test-Path,Row:PACKAGE.BUNDLED_AD' }
-                    Stop { $prefix + ',Caught:FixturePrerequisitePathDenied,Test-Path' }
-                    default { $prefix + ',Row:PACKAGE.BUNDLED_AD' }
+                    Continue {
+                        $prefix + ',Error:FixturePrerequisitePathDenied,Test-Path,Row:PACKAGE.BUNDLED_AD'
+                    }
+                    Stop {
+                        $prefix + ',Caught:FixturePrerequisitePathDenied,Test-Path'
+                    }
+                    default {
+                        $prefix + ',Row:PACKAGE.BUNDLED_AD'
+                    }
                 }
                 Assert-InspectorEqual $expected ($observed.Sequence -join ',')
                 Assert-InspectorEqual 'Path' ($observed.Reads -join ',')

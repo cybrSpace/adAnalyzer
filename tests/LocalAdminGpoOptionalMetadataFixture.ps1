@@ -363,7 +363,10 @@ function Invoke-MetadataCase([string]$Strict, [string]$Route) {
                         $null = [IO.Directory]::CreateDirectory($parent)
                         [IO.File]::WriteAllBytes($destination, $sentinel)
                     }
-                    $result = Invoke-Entry $reports $Route @{ OutputPath = $destination; WhatIf = $whatIf }
+                    $result = Invoke-Entry $reports $Route @{
+                            OutputPath = $destination
+                            WhatIf = $whatIf
+                        }
                     Assert-True ($null -ne $result.Failure) 'Unreadable inventory was exported.'
                     Assert-Equal 'GPO inventory is incomplete; the previous report was preserved.' $result.Failure.Exception.GetBaseException().Message
                     Assert-Equal 0 $result.Rows.Count
@@ -388,7 +391,10 @@ function Invoke-MetadataCase([string]$Strict, [string]$Route) {
                     }
                     $report = New-Packet $shape
                     $before = Get-Json $report
-                    Assert-Healthy (Invoke-Entry @($report) $Route @{ OutputPath = $destination; WhatIf = $whatIf })
+                    Assert-Healthy (Invoke-Entry @($report) $Route @{
+                            OutputPath = $destination
+                            WhatIf = $whatIf
+                        })
                     if ($whatIf) {
                         Assert-Equal $false ([IO.Directory]::Exists($parent))
                     }

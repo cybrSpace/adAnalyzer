@@ -26,7 +26,10 @@ function ConvertTo-ErrorObservation([object]$Value) {
         $Value.ErrorRecord
     }
     if ($null -eq $record) {
-        return [pscustomobject]@{ StoredType = $Value.GetType().FullName; IsTyped = $false }
+        return [pscustomobject]@{
+            StoredType = $Value.GetType().FullName
+            IsTyped = $false
+        }
     }
     $cause = $record.Exception.GetBaseException()
     [pscustomobject]@{
@@ -208,15 +211,25 @@ public static class FixtureNativeReportRead
 
     function ConvertTo-Emission([object]$Value) {
         if ($Value -is [Management.Automation.ErrorRecord]) {
-            return [pscustomobject]@{ Kind = 'Error'; Diagnostic = ConvertTo-ErrorObservation $Value }
+            return [pscustomobject]@{
+                Kind = 'Error'
+                Diagnostic = ConvertTo-ErrorObservation $Value
+            }
         }
         if ($Value -is [Management.Automation.WarningRecord]) {
-            return [pscustomobject]@{ Kind = 'Warning'; Message = $Value.Message }
+            return [pscustomobject]@{
+                Kind = 'Warning'
+                Message = $Value.Message
+            }
         }
         if ($Value -is [string]) {
             $doc = [xml]$Value
             $resolutions = @($doc.SelectNodes('//Member/Resolution') | ForEach-Object { $_.PSBase.InnerText })
-            return [pscustomobject]@{ Kind = 'Xml'; Resolutions = $resolutions; Mismatch = $doc.GPO.VersionMismatch }
+            return [pscustomobject]@{
+                Kind = 'Xml'
+                Resolutions = $resolutions
+                Mismatch = $doc.GPO.VersionMismatch
+            }
         }
         return [pscustomobject]@{
             Kind = 'Object'
@@ -637,11 +650,31 @@ if ($Case -eq 'Regression') {
     $failures = [Collections.Generic.List[string]]::new()
     $count = 0
     foreach ($entry in @(
-            [pscustomobject]@{ Fault = 'ReadAndCleanupFailure'; Only = 'ReadFailure'; Cleanup = '*UnauthorizedAccessException' }
-            [pscustomobject]@{ Fault = 'NativeReadAndCleanupFailure'; Only = 'NativeReadFailure'; Cleanup = '*UnauthorizedAccessException' }
-            [pscustomobject]@{ Fault = 'BadVersionAndCleanupFailure'; Only = 'BadVersion'; Cleanup = '*UnauthorizedAccessException' }
-            [pscustomobject]@{ Fault = 'WarningsStopAndCleanupFailure'; Only = 'WarningsStop'; Cleanup = '*UnauthorizedAccessException' }
-            [pscustomobject]@{ Fault = 'ReadAndNativeDriveNotFound'; Only = 'ReadFailure'; Cleanup = '*DriveNotFoundException' }
+            [pscustomobject]@{
+                Fault = 'ReadAndCleanupFailure'
+                Only = 'ReadFailure'
+                Cleanup = '*UnauthorizedAccessException'
+            }
+            [pscustomobject]@{
+                Fault = 'NativeReadAndCleanupFailure'
+                Only = 'NativeReadFailure'
+                Cleanup = '*UnauthorizedAccessException'
+            }
+            [pscustomobject]@{
+                Fault = 'BadVersionAndCleanupFailure'
+                Only = 'BadVersion'
+                Cleanup = '*UnauthorizedAccessException'
+            }
+            [pscustomobject]@{
+                Fault = 'WarningsStopAndCleanupFailure'
+                Only = 'WarningsStop'
+                Cleanup = '*UnauthorizedAccessException'
+            }
+            [pscustomobject]@{
+                Fault = 'ReadAndNativeDriveNotFound'
+                Only = 'ReadFailure'
+                Cleanup = '*DriveNotFoundException'
+            }
         )) {
         foreach ($mode in @('Caught', 'Uncaught')) {
             $count++

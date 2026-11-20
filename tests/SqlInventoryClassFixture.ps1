@@ -86,7 +86,12 @@ function Assert-SqlClassCredential($Bound, [bool]$Expected) {
 
 function Import-Module {
     [CmdletBinding()]
-    param([string]$Name, [string]$Scope, [switch]$PassThru, [switch]$Global)
+    param(
+        [string]$Name,
+        [string]$Scope,
+        [switch]$PassThru,
+        [switch]$Global
+    )
 
     if (-not $script:Enabled) {
         Stop-SqlClassExternal
@@ -117,15 +122,32 @@ function Import-Module {
     }
 }
 
-function Get-ADRootDSE { Stop-SqlClassExternal }
-function Get-ADComputer { Stop-SqlClassExternal }
-function Get-Service { Stop-SqlClassExternal }
-function Get-ADMSSQLServers { Stop-SqlClassExternal }
-function Invoke-Command { Stop-SqlClassExternal }
+function Get-ADRootDSE {
+    Stop-SqlClassExternal
+}
+
+function Get-ADComputer {
+    Stop-SqlClassExternal
+}
+
+function Get-Service {
+    Stop-SqlClassExternal
+}
+
+function Get-ADMSSQLServers {
+    Stop-SqlClassExternal
+}
+
+function Invoke-Command {
+    Stop-SqlClassExternal
+}
 
 function Invoke-SqlClassRoot {
     [CmdletBinding()]
-    param([string]$Server, [pscredential]$Credential)
+    param(
+        [string]$Server,
+        [pscredential]$Credential
+    )
 
     if (-not $script:Enabled) {
         Stop-SqlClassExternal
@@ -146,8 +168,16 @@ function Invoke-SqlClassRoot {
 
 function New-PSDrive {
     [CmdletBinding()]
-    param([string]$Name, [string]$PSProvider, [string]$Root, [string]$Server, [string]$Scope,
-        [pscredential]$Credential, [switch]$WhatIf, [switch]$Confirm)
+    param(
+        [string]$Name,
+        [string]$PSProvider,
+        [string]$Root,
+        [string]$Server,
+        [string]$Scope,
+        [pscredential]$Credential,
+        [switch]$WhatIf,
+        [switch]$Confirm
+    )
 
     if (-not $script:Enabled -or $script:Route -ne 'PSDrive') {
         Stop-SqlClassExternal
@@ -173,7 +203,9 @@ function New-PSDrive {
     $script:Trace.Add('Drive')
     [pscustomobject]@{
         Name = $actual.Name
-        Provider = [pscustomobject]@{ Name = 'ActiveDirectory' }
+        Provider = [pscustomobject]@{
+            Name = 'ActiveDirectory'
+        }
     }
 }
 
@@ -187,7 +219,9 @@ function Get-Location {
         return [pscustomobject]@{
             Path = $location.Path
             Drive = $location.Drive
-            Provider = [pscustomobject]@{ Name = 'ActiveDirectory' }
+            Provider = [pscustomobject]@{
+                Name = 'ActiveDirectory'
+            }
         }
     }
     return $location
@@ -217,7 +251,13 @@ function Set-Location {
 
 function Remove-PSDrive {
     [CmdletBinding()]
-    param([string]$Name, [string]$Scope, [switch]$Force, [switch]$WhatIf, [switch]$Confirm)
+    param(
+        [string]$Name,
+        [string]$Scope,
+        [switch]$Force,
+        [switch]$WhatIf,
+        [switch]$Confirm
+    )
 
     if (-not $script:Enabled -or $script:Route -ne 'PSDrive') {
         Stop-SqlClassExternal
@@ -236,7 +276,13 @@ function Remove-PSDrive {
 
 function Invoke-SqlClassComputer {
     [CmdletBinding()]
-    param([string]$Filter, [string[]]$Properties, [string]$SearchBase, [string]$Server, [pscredential]$Credential)
+    param(
+        [string]$Filter,
+        [string[]]$Properties,
+        [string]$SearchBase,
+        [string]$Server,
+        [pscredential]$Credential
+    )
 
     $script:Trace.Add('Computer')
     Assert-SqlClass ($PSBoundParameters['ErrorAction'] -eq 'Stop' -and $Filter -ceq 'Enabled -eq $true' -and
@@ -280,7 +326,11 @@ function Invoke-SqlClassComputer {
 
 function New-CimSession {
     [CmdletBinding()]
-    param([string]$ComputerName, [int]$OperationTimeoutSec, [pscredential]$Credential)
+    param(
+        [string]$ComputerName,
+        [int]$OperationTimeoutSec,
+        [pscredential]$Credential
+    )
 
     if (-not $script:Enabled) {
         Stop-SqlClassExternal
@@ -323,7 +373,12 @@ function New-SqlClassService([string]$State) {
 
 function Get-CimInstance {
     [CmdletBinding()]
-    param([object]$CimSession, [string]$ClassName, [string[]]$Property, [int]$OperationTimeoutSec)
+    param(
+        [object]$CimSession,
+        [string]$ClassName,
+        [string[]]$Property,
+        [int]$OperationTimeoutSec
+    )
 
     Assert-SqlClass ($null -ne $script:Session -and [object]::ReferenceEquals($CimSession, $script:Session) -and
         $ClassName -ceq 'Win32_Service' -and ($Property -join ',') -ceq 'Name,DisplayName,State' -and
@@ -636,13 +691,26 @@ try {
     $startup = @(. (Join-Path $RepositoryRoot 'etc/Get-MSSQLServers.ps1'))
     $owner = [ADAnalyzerSqlServiceInventory]::new()
     Assert-SqlClass ($startup.Count -eq 0 -and $script:Trace.Count -eq 0 -and $script:Unexpected -eq 0) 'Standalone entry or constructor entered a dependency seam'
-    function Get-ADMSSQLServers { Stop-SqlClassExternal }
+    function Get-ADMSSQLServers {
+        Stop-SqlClassExternal
+    }
+
     switch ($Mode) {
-        'Construction' { Invoke-SqlClassConstructionCases }
-        'Validation' { Invoke-SqlClassValidationCases }
-        'Discovery' { Invoke-SqlClassDiscoveryCases }
-        'Inventory' { Invoke-SqlClassInventoryCases }
-        'Failures' { Invoke-SqlClassFailureCases }
+        'Construction' {
+            Invoke-SqlClassConstructionCases
+        }
+        'Validation' {
+            Invoke-SqlClassValidationCases
+        }
+        'Discovery' {
+            Invoke-SqlClassDiscoveryCases
+        }
+        'Inventory' {
+            Invoke-SqlClassInventoryCases
+        }
+        'Failures' {
+            Invoke-SqlClassFailureCases
+        }
     }
     Assert-SqlClass ($script:Unexpected -eq 0) 'An error report concealed an out-of-scope effect'
     'PASS SQL inventory class {0} {1}' -f $Mode, $script:Passed

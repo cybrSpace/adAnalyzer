@@ -155,7 +155,12 @@ function Invoke-CimMethod {
             sValue = $null
         }
     }
-    $type = if ($computer -clike 'b.*') { 1 } else { 4 }
+    $type = if ($computer -clike 'b.*') {
+        1
+    }
+    else {
+        4
+    }
     if ($MethodName -eq 'EnumValues') {
         return [pscustomobject]@{
             ReturnValue = 0
@@ -364,7 +369,12 @@ if ($Case -eq 'Native') {
             Assert-HostCollector (($classes -join '|') -ceq 'Win32_Service|Win32_OperatingSystem|Win32_QuickFixEngineering|Win32_NetworkAdapterConfiguration|MSFT_SmbServerConfiguration') 'CIM class query order changed.'
             $registry = @($hostRow.Registry | Where-Object Path -ieq 'SYSTEM\Fixture')
             $types = @($registry | ForEach-Object Type)
-            $expected = if ($hostRow.ComputerName -clike 'b.*') { '1|7' } else { '4|7' }
+            $expected = if ($hostRow.ComputerName -clike 'b.*') {
+                '1|7'
+            }
+            else {
+                '4|7'
+            }
             Assert-HostCollector (($types -join '|') -ceq $expected -and ($registry.Name -join '|') -ceq 'One|Two' -and
                 ($registry[1].Value -join '|') -ceq 'first|second') 'Per-host type lookup, deduplication or array values changed.'
             Assert-HostCollector (@($events | Where-Object Detail -like 'EnumValues|SYSTEM\Fixture|').Count -eq 1) 'Registry path type enumeration was repeated or shared across hosts.'
