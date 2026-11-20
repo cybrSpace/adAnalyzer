@@ -702,6 +702,77 @@ Test-Policy 'malformed XML produces Unreadable and unknown credential coverage' 
     Assert-Policy (($checks | Where-Object RuleId `
                 -eq GPO.Preferences.CPassword).Status -eq 'Unknown') 'Unreadable XML was called credential-clean'
 }
+Test-Policy 'inventoried XML requires matching evidence before reporting credential absence' {
+    $policy = New-PolicyFixture
+    $path = 'Machine/Preferences/Groups/Groups.xml'
+    $inventory = [pscustomobject]@{
+        Scope = 'Computer'
+        Kind = 'Xml'
+        Path = $path
+    }
+    $file = [pscustomobject]@{
+        Scope = 'Computer'
+        Kind = 'Preferences'
+        Path = $path
+        Xml = '<Groups><User cpasswordPresent="false" /></Groups>'
+    }
+    $policy.Files = @($inventory)
+    $policy.XmlFiles = @($file)
+
+    $complete = @(Get-PolicyChecks $policy)
+    $original = $complete | Where-Object RuleId -eq 'GPO.Preferences.CPassword'
+    Assert-Policy ($original.Status -eq 'Pass' -and
+        $original.Observed -is [bool] -and -not $original.Observed) 'Complete negative evidence was lost'
+    Assert-Policy (-not ($complete | Where-Object RuleId -eq 'GPO.Coverage.MissingXml')) 'Matched XML was reported missing'
+
+    $evaluator = [ADAnalyzerGpoPolicyEvaluator]::new()
+    foreach ($scenario in @('Omitted', 'WrongScope', 'WrongPath', 'DuplicateInventory')) {
+        $policy.Files = @($inventory)
+        $policy.XmlFiles = @($file)
+        $file.Scope = 'Computer'
+        $file.Path = $path
+        switch ($scenario) {
+            'Omitted' {
+                $policy.XmlFiles = @()
+            }
+            'WrongScope' {
+                $file.Scope = 'User'
+            }
+            'WrongPath' {
+                $file.Path = $path.ToLowerInvariant()
+            }
+            'DuplicateInventory' {
+                $policy.Files = @($inventory, $inventory)
+            }
+        }
+
+        $commandChecks = @(Get-PolicyChecks $policy)
+        $classChecks = $evaluator.Evaluate($script:Gpo, $policy, $script:Profile)
+        foreach ($checks in @(@{ Values = $commandChecks }, @{ Values = $classChecks })) {
+            $credential = $checks.Values | Where-Object RuleId -eq 'GPO.Preferences.CPassword'
+            $gap = @($checks.Values | Where-Object RuleId -eq 'GPO.Coverage.MissingXml')
+            Assert-Policy ($credential.CheckId -ceq $original.CheckId -and
+                $credential.Status -eq 'Unknown' -and
+                $null -eq $credential.Observed -and
+                $null -eq $credential.Evidence.SecretPresent) "$scenario was treated as confirmed absence"
+            Assert-Policy ($gap.Count -eq 1 -and
+                $gap[0].Status -eq 'Unknown' -and
+                $gap[0].Observed -is [int] -and $gap[0].Observed -eq 1) "$scenario did not report one missing payload"
+        }
+    }
+
+    $policy.Files = @($inventory)
+    $file.Xml = '<invalid'
+    $unreadable = @(Get-PolicyChecks $policy)
+    Assert-Policy (($unreadable | Where-Object RuleId -eq 'GPO.Xml.Readable').Status -eq 'Unreadable') 'Parse failure was hidden'
+    Assert-Policy (-not ($unreadable | Where-Object RuleId -eq 'GPO.Coverage.MissingXml')) 'Present unreadable XML was counted as missing'
+
+    $policy.PSObject.Properties.Remove('Files')
+    $file.Xml = '<Groups />'
+    $legacy = (Get-PolicyChecks $policy) | Where-Object RuleId -eq 'GPO.Preferences.CPassword'
+    Assert-Policy ($legacy.CheckId -ceq $original.CheckId -and $legacy.Status -eq 'Pass' -and
+        $legacy.Observed -is [bool] -and -not $legacy.Observed) 'Legacy XML without an inventory changed'
+}
 Test-Policy 'named XML secret detection keeps booleans locations and stable raw versus projected identity' {
     $policy = New-PolicyFixture
     $policy.XmlFiles = @([pscustomobject]@{

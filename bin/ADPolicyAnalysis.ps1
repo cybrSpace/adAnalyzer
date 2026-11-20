@@ -1520,6 +1520,53 @@ class ADAnalyzerGpoPolicyEvaluator {
         }
     }
 
+    hidden [int] CountMissingXml([object]$Policy, [object[]]$XmlRecords) {
+        $expected = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::Ordinal)
+        $missing = 0
+        foreach ($file in @(Get-ADAnalyzerPolicyValue $Policy Files)) {
+            $kind = Get-ADAnalyzerPolicyValue $file Kind
+            if ($kind -isnot [string] -or $kind -ine 'Xml') {
+                continue
+            }
+
+            $missing++
+            $scope = Get-ADAnalyzerPolicyValue $file Scope
+            $path = Get-ADAnalyzerPolicyValue $file Path
+            if ($scope -isnot [string] -or [string]::IsNullOrEmpty($scope) -or
+                $path -isnot [string] -or [string]::IsNullOrEmpty($path)) {
+                continue
+            }
+
+            # The reader puts the same logical scope and relative path in both lists.
+            $identity = Join-ADAnalyzerPolicyIdentity @($scope, $path)
+            $expected[$identity] = 1 + $expected[$identity]
+        }
+        if (-not $expected.Count) {
+            return $missing
+        }
+
+        foreach ($record in $XmlRecords) {
+            $scope = Get-ADAnalyzerPolicyValue $record.File Scope
+            $path = Get-ADAnalyzerPolicyValue $record.File Path
+            if ($scope -isnot [string] -or $path -isnot [string]) {
+                continue
+            }
+
+            $identity = Join-ADAnalyzerPolicyIdentity @($scope, $path)
+            if ($expected.ContainsKey($identity)) {
+                $missing--
+                $expected[$identity]--
+                if (-not $expected[$identity]) {
+                    $null = $expected.Remove($identity)
+                    if (-not $expected.Count) {
+                        break
+                    }
+                }
+            }
+        }
+        return $missing
+    }
+
     hidden [void] EvaluateCredentials([hashtable]$state) {
         $Gpo = $state.Gpo
         $Policy = $state.Policy
@@ -1623,36 +1670,47 @@ class ADAnalyzerGpoPolicyEvaluator {
                 $this.Emit($state, $arguments)
             }
         }
+        $missingXml = $this.CountMissingXml($Policy, $xmlRecords)
         if (-not $secretCount) {
+            $status = 'Pass'
+            $present = $false
+            if ($xmlErrors -or $missingXml) {
+                $status = 'Unknown'
+                $present = $null
+            }
+            $message = 'Assessed XML contains no nonempty cpassword attribute; unreadable files prevent a complete conclusion.'
+            if ($missingXml) {
+                $message = 'Credential presence cannot be determined because inventoried XML content is missing.'
+            }
+
             $this.Emit($state, @{
                 RuleId = 'GPO.Preferences.CPassword'
-                Status = $(if ($xmlErrors) {
-                        'Unknown'
-                    }
-                    else {
-                        'Pass'
-                    })
+                Status = $status
                 Severity = 'Critical'
                 Category = 'CredentialExposure'
                 Target = ($target + '/cpassword')
-                Observed = $(if ($xmlErrors) {
-                        $null
-                    }
-                    else {
-                        $false
-                    })
+                Observed = $present
                 Expected = $false
                 Evidence = @{
-                    SecretPresent = $(if ($xmlErrors) {
-                            $null
-                        }
-                        else {
-                            $false
-                        })
+                    SecretPresent = $present
                     UnreadableXmlFiles = $xmlErrors
                 }
-                Message = 'Assessed XML contains no nonempty cpassword attribute; unreadable files prevent a complete conclusion.'
+                Message = $message
                 Applicability = 'Configured'
+            })
+        }
+        if ($missingXml) {
+            $this.Emit($state, @{
+                RuleId = 'GPO.Coverage.MissingXml'
+                Status = 'Unknown'
+                Severity = 'Medium'
+                Category = 'PolicyCoverage'
+                Target = ($target + '/MissingXml')
+                Observed = $missingXml
+                Expected = 0
+                Evidence = $null
+                Message = 'The GPO inventory lists XML files without matching content for assessment.'
+                Applicability = 'Unknown'
             })
         }
 

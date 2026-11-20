@@ -639,6 +639,79 @@ try {
         Assert-True ($json -notmatch 'fixture-secret|fixture-password') 'Secret crossed assessment boundary'
         Assert-Equal Fail ($result.Checks | Where-Object RuleId -eq GPO.Preferences.CPassword).Status
     }
+    Test-Assessment 'omitted inventoried GPO XML limits credential evidence through both assessment APIs' {
+        $data = New-AssessmentFixture
+        $policy = New-PolicyFixture
+        $xml = [pscustomobject]@{
+            Scope = 'Computer'
+            Path = 'Machine/Preferences/Groups/Groups.xml'
+            Kind = 'Preferences'
+            Xml = '<Groups><User cpasswordPresent="false" /></Groups>'
+        }
+        $policy.XmlFiles = @($xml)
+        $policy.Files = @([pscustomobject]@{
+                Scope = $xml.Scope
+                Path = $xml.Path
+                Kind = 'Xml'
+                Length = 52
+            })
+        $gpoData = @([pscustomobject]@{
+                Gpo = [pscustomobject]@{
+                    Id = [guid]'11111111-1111-1111-1111-111111111111'
+                    Flags = 0
+                    Version = 1
+                    Links = @()
+                }
+                Policy = $policy
+                Error = $null
+            })
+        $target = $data.Domain.DNSRoot
+        $engine = [ADAnalyzerAssessmentEngine]::new()
+        $clean = $engine.Evaluate($data, $gpoData, $target)
+        $original = $clean.Checks | Where-Object RuleId -eq GPO.Preferences.CPassword
+        Assert-Equal Pass $original.Status
+        Assert-True ($original.Observed -is [bool] -and -not $original.Observed) 'Readable clean XML lost Boolean absence'
+        Assert-Equal 0 @($clean.Checks | Where-Object RuleId -eq GPO.Coverage.MissingXml).Count
+
+        $policy.Files += [pscustomobject]@{
+            Scope = 'User'
+            Path = 'User/Preferences/Groups/Groups.xml'
+            Kind = 'Xml'
+            Length = 51
+        }
+        $arguments = @{
+            DirectoryData = $data
+            GpoData = $gpoData
+            Target = $target
+        }
+        foreach ($result in @((Invoke-ADAnalyzerAssessment @arguments), $engine.Evaluate($data, $gpoData, $target))) {
+            Assert-Equal Partial $result.State
+            $credential = $result.Findings | Where-Object RuleId -eq GPO.Preferences.CPassword
+            Assert-Equal Unknown $credential.Status
+            Assert-Equal $original.CheckId $credential.CheckId
+            Assert-True ($null -eq $credential.Observed -and $null -eq $credential.Evidence.SecretPresent) 'Incomplete evidence established absence'
+            $coverage = @($result.Findings | Where-Object RuleId -eq GPO.Coverage.MissingXml)
+            Assert-Equal 1 $coverage.Count
+            Assert-Equal Unknown $coverage[0].Status
+            Assert-True ($coverage[0].Observed -is [int] -and $coverage[0].Observed -eq 1) 'Missing XML lost its integer count'
+            Assert-Equal 0 $coverage[0].Expected
+            Assert-Equal 0 @($result.Checks | Where-Object RuleId -eq GPO.Xml.Readable).Count
+        }
+
+        $xml.Xml = '<Groups><User cpasswordPresent="true" /></Groups>'
+        $result = Invoke-ADAnalyzerAssessment @arguments
+        $json = ConvertTo-Json -InputObject $result -Depth 100
+        $decoded = ConvertFrom-Json -InputObject $json
+        Assert-Equal Partial $decoded.State
+        $positive = $decoded.Findings | Where-Object RuleId -eq GPO.Preferences.CPassword
+        Assert-Equal Fail $positive.Status
+        Assert-True ($positive.Observed -is [bool] -and $positive.Observed -and
+            $positive.Evidence.SecretPresent -is [bool] -and $positive.Evidence.SecretPresent) 'Incomplete coverage erased confirmed presence'
+        $gap = $decoded.Findings | Where-Object RuleId -eq GPO.Coverage.MissingXml
+        Assert-Equal Unknown $gap.Status
+        Assert-Equal 1 $gap.Observed
+        Assert-True ($json -notmatch '<Groups') 'Raw XML escaped through the assessment'
+    }
     Test-Assessment 'SYSVOL version mismatch and policy read errors remain explicit' {
         $policy = New-PolicyFixture
         $policy.SysvolVersion = 2
