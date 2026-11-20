@@ -1,0 +1,560 @@
+﻿{
+  "Source": "c137a3a54ac1882ed83e5883ed47c30700293938",
+  "Results": [
+    {
+      "Name": "Document",
+      "Result": {
+        "NodeType": "Document",
+        "Name": "#document",
+        "LocalName": "#document",
+        "Prefix": "",
+        "NamespaceURI": "",
+        "Value": null,
+        "IsEmpty": null,
+        "OuterXml": "<Root cpasswordPresent=\"true\"><Item id=\"one\">café</Item><PasswordPresent>true</PasswordPresent></Root>",
+        "InnerText": null,
+        "Attributes": [],
+        "Children": [
+          {
+            "NodeType": "Element",
+            "Name": "Root",
+            "LocalName": "Root",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": null,
+            "IsEmpty": false,
+            "OuterXml": "<Root cpasswordPresent=\"true\"><Item id=\"one\">café</Item><PasswordPresent>true</PasswordPresent></Root>",
+            "InnerText": "cafétrue",
+            "Attributes": [
+              {
+                "Name": "cpasswordPresent",
+                "LocalName": "cpasswordPresent",
+                "Prefix": "",
+                "NamespaceURI": "",
+                "Value": "true",
+                "Specified": true
+              }
+            ],
+            "Children": [
+              {
+                "NodeType": "Element",
+                "Name": "Item",
+                "LocalName": "Item",
+                "Prefix": "",
+                "NamespaceURI": "",
+                "Value": null,
+                "IsEmpty": false,
+                "OuterXml": "<Item id=\"one\">café</Item>",
+                "InnerText": "café",
+                "Attributes": [
+                  {
+                    "Name": "id",
+                    "LocalName": "id",
+                    "Prefix": "",
+                    "NamespaceURI": "",
+                    "Value": "one",
+                    "Specified": true
+                  }
+                ],
+                "Children": [
+                  {
+                    "NodeType": "Text",
+                    "Name": "#text",
+                    "LocalName": "#text",
+                    "Prefix": "",
+                    "NamespaceURI": "",
+                    "Value": "café",
+                    "IsEmpty": null,
+                    "OuterXml": "café",
+                    "InnerText": "café",
+                    "Attributes": [],
+                    "Children": []
+                  }
+                ]
+              },
+              {
+                "NodeType": "Element",
+                "Name": "PasswordPresent",
+                "LocalName": "PasswordPresent",
+                "Prefix": "",
+                "NamespaceURI": "",
+                "Value": null,
+                "IsEmpty": false,
+                "OuterXml": "<PasswordPresent>true</PasswordPresent>",
+                "InnerText": "true",
+                "Attributes": [],
+                "Children": [
+                  {
+                    "NodeType": "Text",
+                    "Name": "#text",
+                    "LocalName": "#text",
+                    "Prefix": "",
+                    "NamespaceURI": "",
+                    "Value": "true",
+                    "IsEmpty": null,
+                    "OuterXml": "true",
+                    "InnerText": "true",
+                    "Attributes": [],
+                    "Children": []
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "Name": "Element",
+      "Result": {
+        "NodeType": "Element",
+        "Name": "Root",
+        "LocalName": "Root",
+        "Prefix": "",
+        "NamespaceURI": "",
+        "Value": null,
+        "IsEmpty": false,
+        "OuterXml": "<Root cpasswordPresent=\"true\"><Item id=\"one\">café</Item><PasswordPresent>true</PasswordPresent></Root>",
+        "InnerText": "cafétrue",
+        "Attributes": [
+          {
+            "Name": "cpasswordPresent",
+            "LocalName": "cpasswordPresent",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": "true",
+            "Specified": true
+          }
+        ],
+        "Children": [
+          {
+            "NodeType": "Element",
+            "Name": "Item",
+            "LocalName": "Item",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": null,
+            "IsEmpty": false,
+            "OuterXml": "<Item id=\"one\">café</Item>",
+            "InnerText": "café",
+            "Attributes": [
+              {
+                "Name": "id",
+                "LocalName": "id",
+                "Prefix": "",
+                "NamespaceURI": "",
+                "Value": "one",
+                "Specified": true
+              }
+            ],
+            "Children": [
+              {
+                "NodeType": "Text",
+                "Name": "#text",
+                "LocalName": "#text",
+                "Prefix": "",
+                "NamespaceURI": "",
+                "Value": "café",
+                "IsEmpty": null,
+                "OuterXml": "café",
+                "InnerText": "café",
+                "Attributes": [],
+                "Children": []
+              }
+            ]
+          },
+          {
+            "NodeType": "Element",
+            "Name": "PasswordPresent",
+            "LocalName": "PasswordPresent",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": null,
+            "IsEmpty": false,
+            "OuterXml": "<PasswordPresent>true</PasswordPresent>",
+            "InnerText": "true",
+            "Attributes": [],
+            "Children": [
+              {
+                "NodeType": "Text",
+                "Name": "#text",
+                "LocalName": "#text",
+                "Prefix": "",
+                "NamespaceURI": "",
+                "Value": "true",
+                "IsEmpty": null,
+                "OuterXml": "true",
+                "InnerText": "true",
+                "Attributes": [],
+                "Children": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "Name": "Namespace",
+      "Result": {
+        "NodeType": "Element",
+        "Name": "p:Item",
+        "LocalName": "Item",
+        "Prefix": "p",
+        "NamespaceURI": "urn:fixture",
+        "Value": null,
+        "IsEmpty": false,
+        "OuterXml": "<p:Item id=\"one\" xmlns:p=\"urn:fixture\">\r\n café \r\n<![CDATA[keep raw]]><?fixture value?><!-- keep --><Empty /><Full></Full></p:Item>",
+        "InnerText": "\r\n café \r\nkeep raw",
+        "Attributes": [
+          {
+            "Name": "id",
+            "LocalName": "id",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": "one",
+            "Specified": true
+          }
+        ],
+        "Children": [
+          {
+            "NodeType": "Text",
+            "Name": "#text",
+            "LocalName": "#text",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": "\r\n café \r\n",
+            "IsEmpty": null,
+            "OuterXml": "\r\n café \r\n",
+            "InnerText": "\r\n café \r\n",
+            "Attributes": [],
+            "Children": []
+          },
+          {
+            "NodeType": "CDATA",
+            "Name": "#cdata-section",
+            "LocalName": "#cdata-section",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": "keep raw",
+            "IsEmpty": null,
+            "OuterXml": "<![CDATA[keep raw]]>",
+            "InnerText": "keep raw",
+            "Attributes": [],
+            "Children": []
+          },
+          {
+            "NodeType": "ProcessingInstruction",
+            "Name": "fixture",
+            "LocalName": "fixture",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": "value",
+            "IsEmpty": null,
+            "OuterXml": "<?fixture value?>",
+            "InnerText": "value",
+            "Attributes": [],
+            "Children": []
+          },
+          {
+            "NodeType": "Comment",
+            "Name": "#comment",
+            "LocalName": "#comment",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": " keep ",
+            "IsEmpty": null,
+            "OuterXml": "<!-- keep -->",
+            "InnerText": " keep ",
+            "Attributes": [],
+            "Children": []
+          },
+          {
+            "NodeType": "Element",
+            "Name": "Empty",
+            "LocalName": "Empty",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": null,
+            "IsEmpty": true,
+            "OuterXml": "<Empty />",
+            "InnerText": "",
+            "Attributes": [],
+            "Children": []
+          },
+          {
+            "NodeType": "Element",
+            "Name": "Full",
+            "LocalName": "Full",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": null,
+            "IsEmpty": false,
+            "OuterXml": "<Full></Full>",
+            "InnerText": "",
+            "Attributes": [],
+            "Children": []
+          }
+        ]
+      }
+    },
+    {
+      "Name": "DefaultNamespace",
+      "Result": {
+        "NodeType": "Element",
+        "Name": "Item",
+        "LocalName": "Item",
+        "Prefix": "",
+        "NamespaceURI": "urn:default",
+        "Value": null,
+        "IsEmpty": false,
+        "OuterXml": "<Item xmlns=\"urn:default\"><Inner /><Full></Full></Item>",
+        "InnerText": "",
+        "Attributes": [],
+        "Children": [
+          {
+            "NodeType": "Element",
+            "Name": "Inner",
+            "LocalName": "Inner",
+            "Prefix": "",
+            "NamespaceURI": "urn:default",
+            "Value": null,
+            "IsEmpty": true,
+            "OuterXml": "<Inner xmlns=\"urn:default\" />",
+            "InnerText": "",
+            "Attributes": [],
+            "Children": []
+          },
+          {
+            "NodeType": "Element",
+            "Name": "Full",
+            "LocalName": "Full",
+            "Prefix": "",
+            "NamespaceURI": "urn:default",
+            "Value": null,
+            "IsEmpty": false,
+            "OuterXml": "<Full xmlns=\"urn:default\"></Full>",
+            "InnerText": "",
+            "Attributes": [],
+            "Children": []
+          }
+        ]
+      }
+    },
+    {
+      "Name": "RootSecret",
+      "Result": {
+        "NodeType": "Element",
+        "Name": "PasswordPresent",
+        "LocalName": "PasswordPresent",
+        "Prefix": "",
+        "NamespaceURI": "",
+        "Value": null,
+        "IsEmpty": false,
+        "OuterXml": "<PasswordPresent>true</PasswordPresent>",
+        "InnerText": "true",
+        "Attributes": [],
+        "Children": [
+          {
+            "NodeType": "Text",
+            "Name": "#text",
+            "LocalName": "#text",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": "true",
+            "IsEmpty": null,
+            "OuterXml": "true",
+            "InnerText": "true",
+            "Attributes": [],
+            "Children": []
+          }
+        ]
+      }
+    },
+    {
+      "Name": "EmptyForms",
+      "Result": {
+        "NodeType": "Element",
+        "Name": "Outer",
+        "LocalName": "Outer",
+        "Prefix": "",
+        "NamespaceURI": "",
+        "Value": null,
+        "IsEmpty": false,
+        "OuterXml": "<Outer><Empty /><Full></Full><Item cpasswordPresent=\"false\" /></Outer>",
+        "InnerText": "",
+        "Attributes": [],
+        "Children": [
+          {
+            "NodeType": "Element",
+            "Name": "Empty",
+            "LocalName": "Empty",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": null,
+            "IsEmpty": true,
+            "OuterXml": "<Empty />",
+            "InnerText": "",
+            "Attributes": [],
+            "Children": []
+          },
+          {
+            "NodeType": "Element",
+            "Name": "Full",
+            "LocalName": "Full",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": null,
+            "IsEmpty": false,
+            "OuterXml": "<Full></Full>",
+            "InnerText": "",
+            "Attributes": [],
+            "Children": []
+          },
+          {
+            "NodeType": "Element",
+            "Name": "Item",
+            "LocalName": "Item",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": null,
+            "IsEmpty": true,
+            "OuterXml": "<Item cpasswordPresent=\"false\" />",
+            "InnerText": "",
+            "Attributes": [
+              {
+                "Name": "cpasswordPresent",
+                "LocalName": "cpasswordPresent",
+                "Prefix": "",
+                "NamespaceURI": "",
+                "Value": "false",
+                "Specified": true
+              }
+            ],
+            "Children": []
+          }
+        ]
+      }
+    },
+    {
+      "Name": "Defaults",
+      "Result": {
+        "NodeType": "Element",
+        "Name": "Root",
+        "LocalName": "Root",
+        "Prefix": "",
+        "NamespaceURI": "",
+        "Value": null,
+        "IsEmpty": false,
+        "OuterXml": "<Root Id=\"one\" PasswordPresent=\"true\"><Child /></Root>",
+        "InnerText": "",
+        "Attributes": [
+          {
+            "Name": "Id",
+            "LocalName": "Id",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": "one",
+            "Specified": true
+          },
+          {
+            "Name": "Mode",
+            "LocalName": "Mode",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": "root-default",
+            "Specified": false
+          },
+          {
+            "Name": "PasswordPresent",
+            "LocalName": "PasswordPresent",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": "true",
+            "Specified": true
+          }
+        ],
+        "Children": [
+          {
+            "NodeType": "Element",
+            "Name": "Child",
+            "LocalName": "Child",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": null,
+            "IsEmpty": true,
+            "OuterXml": "<Child />",
+            "InnerText": "",
+            "Attributes": [
+              {
+                "Name": "ChildMode",
+                "LocalName": "ChildMode",
+                "Prefix": "",
+                "NamespaceURI": "",
+                "Value": "child-default",
+                "Specified": false
+              }
+            ],
+            "Children": []
+          }
+        ]
+      }
+    },
+    {
+      "Name": "Declaration",
+      "Result": {
+        "NodeType": "Document",
+        "Name": "#document",
+        "LocalName": "#document",
+        "Prefix": "",
+        "NamespaceURI": "",
+        "Value": null,
+        "IsEmpty": null,
+        "OuterXml": "<?xml version=\"1.0\" encoding=\"utf-16\" standalone=\"yes\"?><Root>text</Root>",
+        "InnerText": null,
+        "Attributes": [],
+        "Children": [
+          {
+            "NodeType": "XmlDeclaration",
+            "Name": "xml",
+            "LocalName": "xml",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": "version=\"1.0\" encoding=\"utf-16\" standalone=\"yes\"",
+            "IsEmpty": null,
+            "OuterXml": "<?xml version=\"1.0\" encoding=\"utf-16\" standalone=\"yes\"?>",
+            "InnerText": "version=\"1.0\" encoding=\"utf-16\" standalone=\"yes\"",
+            "Attributes": [],
+            "Children": []
+          },
+          {
+            "NodeType": "Element",
+            "Name": "Root",
+            "LocalName": "Root",
+            "Prefix": "",
+            "NamespaceURI": "",
+            "Value": null,
+            "IsEmpty": false,
+            "OuterXml": "<Root>text</Root>",
+            "InnerText": "text",
+            "Attributes": [],
+            "Children": [
+              {
+                "NodeType": "Text",
+                "Name": "#text",
+                "LocalName": "#text",
+                "Prefix": "",
+                "NamespaceURI": "",
+                "Value": "text",
+                "IsEmpty": null,
+                "OuterXml": "text",
+                "InnerText": "text",
+                "Attributes": [],
+                "Children": []
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

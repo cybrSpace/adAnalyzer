@@ -1,484 +1,473 @@
+[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+    [Alias('Domain', 'FQDN')][string]$CliDomain,
+    [Alias('Server')][string]$CliServer,
+    [Alias('Name')][string]$CliName,
+    [Alias('Guid')][guid]$CliGuid,
+    [Alias('All')][switch]$CliAll,
+    [Alias('Credential')][pscredential]$CliCredential = [pscredential]::Empty,
+    [Alias('InputObject')][object[]]$CliInputObject,
+    [Alias('ProfilePath')][string]$CliProfilePath,
+    [Alias('OutputPath')][string]$CliOutputPath,
+    [Alias('Format')][ValidateSet('Json', 'Html', 'Csv', 'All')][string]$CliFormat = 'Csv'
+)
 
-using namespace System.Collections
-using namespace System.Collections.Specialized
-
-$var = @{
-
-    'table'  = [ArrayList]::New()
-
-    'gpo'    = @{
-
-        'target'    = 'all'
-        #'target' = 'TEST ADMIN GPO
-        'config'    = @('computer', 'user')
-        'filter'    = @('FilterBattery', 'FilterCollection', 'FilterComputer', 'FilterFile', 'FilterGroup', 'FilterOrgUnit', 'FilterRunOnce', 'FilterUser', 'FilterWMI')
-        'extension' = @('Local Users and Groups', 'Security', 'Registry') # , 'Scripts', 'Software Installation', 'Folder Redirection', 'Internet Explorer Maintenance'
-
+class ADAnalyzerLocalAdminPolicyInventory {
+    ADAnalyzerLocalAdminPolicyInventory() {
     }
 
-    'export' = [String]('{0}\{1}.{2}.csv' -f '\\srv1.ad.cybr.pro\users$\allen\dev\repos\adeAnalyzer\etc\LocalAdminGPO', (Get-WmiObject -Class Win32_ComputerSystem).Domain, (Get-Date -f 'yyyy.MM.dd.HHmm'))
-
-}
-
-if ($var['gpo']['target'] -eq 'all') {
-
-    $var['objects'] = Get-GPO -All
-
-}
-else {
-
-    $var['objects'] = Get-GPO -Name $var['gpo']['target']
-
-}
-function Get-GPOConfig () {
-    param ( $gpo, $xml, $config)
-
-    function Get-GPOLink () {
-        param ( $link, $domain )
-
-        $r = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
-
-        if (-not [String]::IsNullOrEmpty($link)) {
-
-            foreach ($i in $link) {
-
-                $r[($i.SOMPath.Replace($domain, ''))] = $i.Enabled
-
-            }
-            else {
-
-                $r['nolink'] = $true
-
-            }
-
-        }
-
+    [object[]] AnalyzeProvided([object[]]$Reports) {
+        return $this.AnalyzeProvided($Reports, '')
     }
-    function Get-GPOLocalUsersAndGroupsConfig () {
-        param ( [Alias('data')]$p )
 
-        function Get-LocalUsersandGroupsFilter () {
-            param ( $filter, $type )
-            
-            if ($type -eq 'FilterCollection') {
-
-                $collection = [ArrayList]::New()
-
-                switch ($filter.($type).PSObject.Properties.Name | Where-Object { $_ -in $var['gpo']['filter'] }) {
-
-                    default {
-
-                        $fCollection = Get-LocalUsersandGroupsFilter -filter $filter.($type) -type $_
-                        $collection.Add($fCollection) > $null
-
-                    }
-
-                }
-
-                $r = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
-
-                return $r[$type] = $collection
-
-            }
-            elseif ($filter.($type).Count -gt 1) {
-
-                $collection = [ArrayList]::New()
-
-                foreach ($f in $filter.($type).GetEnumerator()) {
-
-                    $fObject = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
-
-                    $f.Attributes.GetEnumerator() | Where-Object { -not [String]::IsNullOrEmpty($_.Value) -and $_.Name -notin ('userContext', 'directMember', 'primaryGroup', 'localGroup', 'sid') } | ForEach-Object { $fObject[$_.Name] = $_.Value }
-
-                    $collection.Add($fObject) > $null
-
-                }
-
-                $r = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
-
-                $r[$type] = $collection
-
-            }
-            else {
-
-                $fObject = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
-
-                $f = $filter.($type)
-
-                $f.Attributes.GetEnumerator() | Where-Object { -not [String]::IsNullOrEmpty($_.Value) -and $_.Name -notin ('userContext', 'directMember', 'primaryGroup', 'localGroup', 'sid') } | ForEach-Object { $fObject[$_.Name] = $_.Value }
-
-                $r = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
-
-                return $r[$type] = $fObject
-
-            }
-
+    [object[]] AnalyzeProvided([object[]]$Reports, [string]$ProfilePath) {
+        if ($null -eq $Reports) {
+            throw 'InputObject requires package Gpo and Policy reports.'
         }
-        function Get-GPOLocalGroupsConfig () {
+        return $this.ReadInventory($Reports, $null, $ProfilePath)
+    }
 
-            $obj = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
+    [object[]] Collect([hashtable]$Selection) {
+        return $this.Collect($Selection, [pscredential]::Empty, '')
+    }
 
-            $object.GetEnumerator() | ForEach-Object { $obj[$_.Name] = $_.Value }
+    [object[]] Collect([hashtable]$Selection, [pscredential]$Credential) {
+        return $this.Collect($Selection, $Credential, '')
+    }
 
-            $obj['ext.property.class'] = $pClass
-            $obj['ext.property.type'] = ('Order: {0}' -f $o.GPOSettingOrder)
-
-            if (-not [String]::IsNullOrEmpty($o.Disabled)) {
-
-                switch ($o.Disabled) {
-
-                    0 { $obj['ext.property.enabled'] = $true }
-                    1 { $obj['ext.property.enabled'] = $false }
-                    Default { $obj['ext.property.enabled'] = $true }
-
-                }
-
-            }
-            else {
-
-                $obj['ext.property.enabled'] = $true
-
-            }
-
-            $pArgs = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
-            
-            $o.Properties.Attributes.GetEnumerator() | Where-Object { -not [String]::IsNullOrEmpty($_.Value) -and $_.Name -notin ('groupsid') } | ForEach-Object { $pArgs[$_.Name] = $_.Value }
-
-            $obj['ext.property.arg'] = $pArgs | ConvertTo-Json
-
-            $obj['ext.parameter.name'] = $o.Name
-            $obj['ext.parameter.value'] = $null
-            $obj['ext.parameter.arg'] = $null
-
-            if (-not [String]::IsNullOrEmpty($o.Filters)) {
-
-                $filters = [ArrayList]::New()
-
-                switch ($o.Filters.PSObject.Properties.Name | Where-Object { $_ -in $var['gpo']['filter'] }) {
-
-                    default {
-
-                        $fCollection = Get-LocalUsersandGroupsFilter -filter $o.Filters -type $_
-                        $filters.Add($fCollection) > $null
-
-                    }
-
-                } 
-
-                $obj['ext.property.filter'] = $filters | ConvertTo-Json -Depth 25
-
-            }
-
-            if ([String]::IsNullOrEmpty($o.Properties.Members)) {
-
-                $r = New-Object -TypeName PSCustomObject -Property $obj
-
-                $var['table'].Add($r) > $null
-
-            }
-            else {
-
-                foreach ($v in $o.Properties.Members.GetEnumerator()) {
-
-                    $r = New-Object -TypeName PSCustomObject -Property $obj
-
-                    $r.'ext.parameter.value' = $v.Name
-
-                    $vArgs = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
-
-                    $v.Attributes.GetEnumerator() | Where-Object { -not [String]::IsNullOrEmpty($_.Value) -and $_.Name -notin ('name', 'sid') } | ForEach-Object { $vArgs[$_.Name] = $_.Value }
-
-                    $r.'ext.parameter.arg' = $vArgs | ConvertTo-Json
-
-                    $var['table'].Add($r) > $null
-
-                }
-
-            }
-
+    [object[]] Collect([hashtable]$Selection, [pscredential]$Credential, [string]$ProfilePath) {
+        if ($null -eq $Selection) {
+            throw 'An explicit Domain is required.'
         }
-        function get-GPOLocalUserConfig () {
+        foreach ($key in $Selection.PSBase.Keys) {
+            if ($key -notin 'Domain', 'Server', 'Name', 'Guid', 'All') {
+                throw 'Unsupported GPO selection field.'
+            }
+        }
+        $domain = [string]$Selection['Domain']
+        $server = [string]$Selection['Server']
+        $name = [string]$Selection['Name']
+        $hasName = $Selection.ContainsKey('Name')
+        $hasGuid = $Selection.ContainsKey('Guid')
+        $allSelection = $Selection['All']
+        if ($null -ne $allSelection -and $allSelection -isnot [bool] -and $allSelection -isnot [switch]) {
+            throw 'All must be a Boolean or switch.'
+        }
+        $all = [bool]$allSelection
+        if ($this.MissingDomain($domain)) {
+            throw 'An explicit Domain is required.'
+        }
+        if (-not $this.SelectsOneTarget($hasName, $hasGuid, $all)) {
+            throw 'Select exactly one Name, Guid or All.'
+        }
+        if ($hasName -and $this.MissingName($name)) {
+            throw 'Name cannot be empty.'
+        }
+        $id = [guid]::Empty
+        if ($hasGuid -and -not $this.ReadGpoId([string]$Selection['Guid'], [ref]$id)) {
+            throw 'GPO GUID must be supplied.'
+        }
+        $arguments = $this.CollectionArguments($domain, $server, $name, $id, $hasGuid, $all, $Credential)
+        return $this.ReadInventory($null, $arguments, $ProfilePath)
+    }
 
-            $obj = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
+    [string[]] Export([object[]]$Rows, [string]$Target, [string]$Path, [string]$Format) {
+        return $this.Export($Rows, $Target, $Path, $Format, $false)
+    }
 
-            $object.GetEnumerator() | ForEach-Object { $obj[$_.Name] = $_.Value }
+    [string[]] Export([object[]]$Rows, [string]$Target, [string]$Path, [string]$Format, [bool]$DryRun) {
+        $ErrorActionPreference = 'Stop'
+        if ($null -eq $Rows) {
+            throw 'Supply inventory rows to export.'
+        }
+        if ($this.HasUnreadable($Rows)) {
+            throw 'GPO inventory is incomplete; the previous report was preserved.'
+        }
+        $repository = Split-Path -Parent $PSScriptRoot
+        . (Join-Path $repository 'bin/ADOperations.ps1')
+        $writerType = [type]'ADAnalyzerAssessmentReport'
+        return $writerType::new().Write($this.Assessment($Rows, $Target), $Path, $Format, $DryRun)
+    }
 
-            $obj['ext.property.class'] = $pClass
-            $obj['ext.property.type'] = ('Order: {0}' -f $o.GPOSettingOrder)
-
-            if (-not [String]::IsNullOrEmpty($o.Disabled)) {
-
-                switch ($o.Disabled) {
-
-                    0 { $obj['ext.property.enabled'] = $true }
-                    1 { $obj['ext.property.enabled'] = $false }
-                    Default { $obj['ext.property.enabled'] = $true }
-
-                }
-
+    hidden [object[]] ReadInventory([object[]]$Reports, [hashtable]$Arguments, [string]$ProfilePath) {
+        $ErrorActionPreference = 'Stop'
+        $repository = Split-Path -Parent $PSScriptRoot
+        . (Join-Path $repository 'bin/ADGpo.ps1')
+        $offline = $null -eq $Arguments
+        if (-not $offline) {
+            $catalogType = [type]'ADAnalyzerGpoCatalog'
+            $readerType = [type]'ADAnalyzerGpoReportService'
+            $catalog = $catalogType::new()
+            $reader = $readerType::new()
+            $domain = $Arguments.Domain
+            $server = $Arguments['Server']
+            if (-not $server) {
+                $server = $domain
+            }
+            $credential = $Arguments.Credential
+            $all = [bool]$Arguments['All']
+            if ($all) {
+                $selected = $catalog.GetAll($domain, $server, $credential)
+            }
+            elseif ($Arguments.ContainsKey('Guid')) {
+                $selected = $catalog.FindById($Arguments.Guid, $domain, $server, $credential)
             }
             else {
-
-                $obj['ext.property.enabled'] = $true
-
+                $selected = $catalog.FindByName($Arguments.Name, $domain, $server, $credential)
             }
-
-            $obj.'ext.parameter.name' = 'LocalUser'
-            $obj.'ext.parameter.value' = $o.Properties.UserName
-
-            $pArgs = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
-
-            $o.Properties.Attributes.GetEnumerator() | Where-Object { -not [String]::IsNullOrEmpty($_.Value) } | ForEach-Object { $pArgs[$_.Name] = $_.Value }
-            $obj['ext.property.arg'] = $pArgs | ConvertTo-Json
-
-            if (-not [String]::IsNullOrEmpty($o.Filters)) {
-
-                $filters = [ArrayList]::New()
-
-                switch ($o.Filters.PSObject.Properties.Name | Where-Object { $_ -in $var['gpo']['filter'] }) {
-
-                    default {
-
-                        $fCollection = Get-LocalUsersandGroupsFilter -filter $o.Filters -type $_
-                        $filters.Add($fCollection) > $null
-
+            if ($this.IsAmbiguousSelection($all, $selected.Count)) {
+                throw 'GPO was not found or the selector was ambiguous.'
+            }
+            $Reports = @(foreach ($gpo in $selected) {
+                    try {
+                        $reader.Read($gpo, $credential)
                     }
-
-                }
-
-                $obj['ext.property.filter'] = $filters | ConvertTo-Json -Depth 25
-
-            }
-
-            $r = New-Object -TypeName PSCustomObject -Property $obj
-            $var['table'].Add($r) > $null
-
+                    catch {
+                        $this.ReadFailure($gpo, $_.Exception.GetType().FullName)
+                    }
+                })
         }
 
-        switch ($p.PSObject.Properties.Name | Where-Object { $_ -in @('User', 'Group') }) {
+        foreach ($file in 'ADPolicyAnalysis', 'ADProfile', 'ADOperations') {
+            . (Join-Path $repository ('bin/' + $file + '.ps1'))
+        }
+        $profileType = [type]'ADAnalyzerProfile'
+        $profile = if ($ProfilePath) {
+            $profileType::Load($ProfilePath).ToHashtable()
+        }
+        else {
+            $profileType::new().ToHashtable()
+        }
+        $normalizerType = [type]'ADAnalyzerGpoSourceNormalizer'
+        $evaluatorType = [type]'ADAnalyzerGpoPolicyEvaluator'
+        $checkType = [type]'ADAnalyzerCheckFactory'
+        $projectorType = [type]'ADAnalyzerEvidenceProjector'
+        $normalizer = $normalizerType::new()
+        $evaluator = $evaluatorType::new()
+        $factory = $checkType::new()
+        $projector = $projectorType::new()
+        $rows = [Collections.Generic.List[object]]::new()
 
-            Default {
-
-                $pClass = $_
-
-                if ($p.($_).Count -gt 1) {
-
-                    foreach ($o in $p.($_).GetEnumerator()) {
-
-                        switch ($pClass) {
-
-                            'User' { Get-GPOLocalUserConfig }
-                            'Group' { Get-GPOLocalGroupsConfig }
-
-                        }
-
-                    }
-
+        foreach ($report in $Reports) {
+            $id = [guid]::Empty
+            if ($null -eq $report.Gpo -or -not $this.ReadGpoId([string]$report.Gpo.Id, [ref]$id)) {
+                throw 'Each report requires a valid GPO identity.'
+            }
+            if ($offline -and -not $this.HasValidFlags([string]$report.Gpo.Flags)) {
+                throw 'Offline inventory requires supplied GPO Flags (0..3).'
+            }
+            $metadata = [ordered]@{}
+            foreach ($field in $this.MetadataFields()) {
+                $metadata[$field] = $report.Gpo.$field
+            }
+            $reportFrame = @{
+                Record = $report
+            }
+            if (((Test-ADAnalyzerOptionalSecretRecordMember $reportFrame 'ReadError') -and $report.ReadError) -or
+                $null -eq $report.Policy) {
+                $errorType = $null
+                if (Test-ADAnalyzerOptionalSecretRecordMember $reportFrame 'ErrorType') {
+                    $errorType = $report.ErrorType
+                }
+                $checks = @($factory.Create($this.UnreadableCheck($id, $errorType)))
+            }
+            else {
+                $policy = if ($offline) {
+                    $normalizer.Normalize($report.Policy)
                 }
                 else {
-
-                    $o = $p.($_)
-
-                    switch ($pClass) {
-
-                        'User' { Get-GPOLocalUserConfig }
-                        'Group' { Get-GPOLocalGroupsConfig }
-
-                    }
-
+                    $report.Policy
                 }
-
+                $checks = $evaluator.Evaluate($report.Gpo, $policy, $profile)
             }
-
-        }
-    }
-    function Get-GPORestrictedGroupsConfig () {
-        param ( [Alias('data')]$p )
-
-        function Get-GPORestrictedGroupMember () {
-            param ($type)
-
-            $obj = [OrderedDictionary]::New([StringComparer]::OrdinalIgnoreCase)
-
-            $object.GetEnumerator() | ForEach-Object { $obj[$_.Name] = $_.Value }
-
-            $obj['ext.property.name'] = $pValue.LocalName
-            $obj['ext.property.class'] = $m.LocalName
-            $obj['ext.parameter.name'] = $pValue.GroupName.name.'#text'
-            $obj['ext.parameter.value'] = $m.Name.'#text'
-
-            $r = New-Object -TypeName PSCustomObject -Property $obj
-
-            $var['table'].Add($r) > $null
-
-        }
-
-        foreach ($pValue in $p.GetEnumerator()) {
-
-            switch ($pValue.PSObject.Properties.Name | Where-Object { $_ -in @('Member', 'MemberOf') }) {
-
-                Default {
-
-                    if ($pValue.($_).Count -gt 1) {
-
-                        foreach ($m in $pValue.($_).GetEnumerator()) {
-
-                            Get-GPORestrictedGroupMember -type $_
-
-                        }
-
-                    }
-                    else {
-
-                        $m = $pValue.($_)
-
-                        Get-GPORestrictedGroupMember -type $_
-
-
-                    }
-
+            foreach ($check in $checks) {
+                if ($this.IncludesRule($check.RuleId) -or $this.IncludesCategory($check.Category)) {
+                    $this.PopulateRow($check, $metadata, $id, ([string]$report.Gpo.DisplayName), $offline)
+                    $rows.Add($projector.Project($check))
                 }
-
             }
-
         }
-
+        return $rows.ToArray()
     }
-    
-    function Get-GPOLoopBackConfig () {
-        param ( [Alias('config')]$v )
 
-        $return = $null 
+    hidden [string[]] LiveInputFields() {
+        return @('Domain', 'Server', 'Name', 'Guid', 'All', 'Credential')
+    }
 
-        if ($xml.GPO.($v).ExtensionData.Name -contains 'Registry' -and $xml.GPO.($v).ExtensionData.Extension.Policy.Name -contains 'Configure user Group Policy Loopback processing mode') {
+    hidden [bool] MissingDomain([string]$Domain) {
+        return [string]::IsNullOrWhiteSpace($Domain)
+    }
 
-            $lbPolicy = $xml.GPO.($v).ExtensionData.Extension.Policy | Where-Object { $_.Name -eq 'Configure user Group Policy Loopback processing mode' }
+    hidden [bool] MissingName([string]$Name) {
+        return [string]::IsNullOrWhiteSpace($Name)
+    }
 
-            $return = ('{0} ({1})' - $lbPolicy.DropDownList.State, $lbPolicy.DrownDownList.Value.Name)
+    hidden [bool] SelectsOneTarget([bool]$HasName, [bool]$HasGuid, [bool]$All) {
+        return ([int]$HasName + [int]$HasGuid + [int]$All) -eq 1
+    }
 
+    hidden [hashtable] CollectionArguments(
+        [string]$Domain, [string]$Server, [string]$Name, [object]$Id,
+        [bool]$HasGuid, [bool]$All, [pscredential]$Credential
+    ) {
+        $arguments = @{
+            Domain = $Domain
+            Credential = $Credential
         }
-
-        return $return
-
+        if ($Server) {
+            $arguments.Server = $Server
+        }
+        if ($All) {
+            $arguments.All = $true
+        }
+        elseif ($HasGuid) {
+            $arguments.Guid = $Id
+        }
+        else {
+            $arguments.Name = $Name
+        }
+        return $arguments
     }
-    function Get-GPORegistryPolicyConfig () {
-        param ( [Alias('data')]$p)
 
-        foreach ($pValue in $p.GetEnumerator()) {
+    hidden [bool] IsAmbiguousSelection([bool]$All, [int]$Count) {
+        return -not $All -and $Count -ne 1
+    }
 
-            if ($pValue.Name -eq '') {
+    hidden [object] ReadFailure([object]$Gpo, [string]$ErrorType) {
+        return [pscustomobject]@{
+            Gpo = $Gpo
+            Policy = $null
+            ReadError = $true
+            ErrorType = $ErrorType
+        }
+    }
 
+    hidden [bool] ReadGpoId([string]$Value, [ref]$Id) {
+        return [guid]::TryParse($Value, $Id)
+    }
 
+    hidden [bool] HasValidFlags([string]$Value) {
+        $flags = 0
+        return [int]::TryParse($Value, [ref]$flags) -and $flags -ge 0 -and $flags -le 3
+    }
+
+    hidden [string[]] MetadataFields() {
+        return @('Id', 'DisplayName', 'Domain', 'Server', 'Flags', 'Version', 'Links', 'WmiFilter')
+    }
+
+    hidden [hashtable] UnreadableCheck([guid]$Id, [object]$ErrorType) {
+        return @{
+            RuleId = 'GPO.READ'
+            Status = 'Unreadable'
+            Severity = 'High'
+            Category = 'PolicyCoverage'
+            Target = $Id.ToString('D')
+            Message = 'The selected GPO could not be read; configuration was not assessed.'
+            Evidence = @{
+                ErrorType = $ErrorType
             }
-
         }
-
     }
 
-    $object = [ordered]@{
-
-        'gpo.name'             = $gpo.DisplayName
-        'gpo.created'          = (Get-Date $gpo.CreationTime -f 'yyyy/MM/dd HH:mm')
-        'gpo.modified'         = (Get-Date $gpo.ModificationTime -f 'yyyy/MM/dd HH:mm')
-        'gpo.read'             = (Get-Date $xml.GPO.ReadTime -f 'yyyy/MM/dd HH:mm')
-        'gpo.status'           = $gpo.Gpostatus
-        'gpo.linked'           = $null
-        'gpo.linked.ou'        = $null
-
-        'cfg.class'            = $null
-        'cfg.enabeld'          = $null
-        'cfg.loopback'         = $null
-        'cfg.extension'        = $null
-
-        'ext.property.name'    = $null
-        'ext.property.enabled' = $null
-        'ext.property.class'   = $null
-
-        'ext.parameter.name'   = $null
-        'ext.parameter.value'  = $null
-        'ext.parameter.arg'    = $null
-
-        'ext.property.arg'     = $null
-        'ext.property.filter'  = $null
-
+    hidden [bool] IncludesRule([object]$RuleId) {
+        return $RuleId -in 'GPO.RestrictedGroups.LocalAdministrators', 'GPO.Preferences.LocalUsersGroups'
     }
 
-    $linkData = Get-GPOLink -link $xml.GPO.LinksTo -domain $gpo.DomainNamingMaster
+    hidden [bool] IncludesCategory([object]$Category) {
+        return $Category -in 'CredentialExposure', 'PolicyCoverage'
+    }
 
-    if ($linkData.nolink) {
+    hidden [void] PopulateRow(
+        [object]$Check, [Collections.Specialized.OrderedDictionary]$Metadata,
+        [guid]$Id, [string]$Name, [bool]$Offline
+    ) {
+        $Check.Evidence = [pscustomobject]@{
+            Gpo = [pscustomobject]$Metadata
+            ConfiguredSetting = $Check.Observed
+            RuleEvidence = $Check.Evidence
+        }
+        $Check | Add-Member -NotePropertyName GpoId -NotePropertyValue $Id.ToString('D')
+        $Check | Add-Member -NotePropertyName GpoName -NotePropertyValue $Name
+        $metadataStatus = if ($Offline) {
+            'Provided'
+        }
+        else {
+            'Collected'
+        }
+        $Check | Add-Member -NotePropertyName MetadataStatus -NotePropertyValue $metadataStatus
+    }
 
-        $object.'gpo.linked' = $false
+    hidden [bool] HasUnreadable([object[]]$Rows) {
+        return @($Rows | Where-Object Status -eq Unreadable).Count -ne 0
+    }
 
+    hidden [object] Assessment([object[]]$Rows, [string]$Target) {
+        $state = if (@($Rows | Where-Object Status -in 'Unknown', 'Invalid').Count) {
+            'Partial'
+        }
+        else {
+            'Complete'
+        }
+        return [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $Target
+            State = $state
+            Checks = $Rows
+            Findings = $Rows
+            Errors = @()
+            Coverage = @{
+                Total = $Rows.Count
+            }
+        }
+    }
+}
+
+function Get-ADAnalyzerLocalAdminGpo {
+    <# Inventory stored local-group configuration and exposure; effective membership is not calculated. #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Alias('FQDN')][string]$Domain,
+        [string]$Server,
+        [string]$Name,
+        [guid]$Guid,
+        [switch]$All,
+        [pscredential]$Credential = [pscredential]::Empty,
+        [object[]]$InputObject,
+        [string]$ProfilePath,
+        [string]$OutputPath,
+        [ValidateSet('Json', 'Html', 'Csv', 'All')][string]$Format = 'Csv'
+
+    )
+    $inventory = [ADAnalyzerLocalAdminPolicyInventory]::new()
+    $repository = Split-Path -Parent $PSScriptRoot
+    $offline = $PSBoundParameters.ContainsKey('InputObject')
+    if ($offline) {
+        foreach ($field in $inventory.LiveInputFields()) {
+            if ($PSBoundParameters.ContainsKey($field)) {
+                throw 'Choose InputObject or explicit live target inputs.'
+            }
+        }
+        if ($null -eq $InputObject) {
+            throw 'InputObject requires package Gpo and Policy reports.'
+        }
+        foreach ($file in @('ADGpo', 'ADPolicyAnalysis')) {
+            . (Join-Path $repository ('bin/' + $file + '.ps1'))
+        }
+        $reports = @($InputObject)
     }
     else {
-
-        $object.'gpo.linked' = $true
-        $object.'gpo.linked.ou' = $linkData | ConvertTo-Json
-
-    }
-
-    $object['cfg.loopback'] = Get-GPOLoopBackConfig -config $config
-
-    foreach ($eData in $xml.GPO.($config).ExtensionData) {
-
-        $object['cfg.class'] = $config
-        $object['cfg.enabled'] = $xml.GPO.($config).Enabled
-        $object['cfg.extension'] = $eData.Name
-
-        switch ($object['cfg.extension'] | Where-Object { $_ -in $var['gpo']['extension'] }) {
-
-            'Local Users and Groups' { Get-GPOLocalUsersAndGroupsConfig -data $eData.Extension.LocalUsersAndGroups }
-            'Registry' { 
-                
-                switch ($eData.Extension.PSObject.Properties.Name) {
-
-                    'Policy' { Get-GPORegistryPolicyConfig -data $eData.Extension.Policy }
-
-                }
-            
-            }
-            'Security' { 
-                
-                switch ($eData.Extension.PSObject.Properties.Name) {
-
-                    'RestrictedGroups' { Get-GPORestrictedGroupsConfig -data $eData.Extension.RestrictedGroups }
-
-                }
-            
-            }
-
+        if ($inventory.MissingDomain($Domain)) {
+            throw 'An explicit Domain is required.'
         }
-
+        $hasName = $PSBoundParameters.ContainsKey('Name')
+        $hasGuid = $PSBoundParameters.ContainsKey('Guid')
+        if (-not $inventory.SelectsOneTarget($hasName, $hasGuid, [bool]$All)) {
+            throw 'Select exactly one Name, Guid or All.'
+        }
+        if ($hasName -and $inventory.MissingName($Name)) {
+            throw 'Name cannot be empty.'
+        }
+        Import-Module (Join-Path $repository 'ADEnvironment.psd1') -ErrorAction Stop
+        $arguments = $inventory.CollectionArguments(
+            $Domain, $Server, $Name, $Guid, $hasGuid, [bool]$All, $Credential
+        )
+        $selected = @(Get-ADAnalyzerGpo @arguments)
+        if ($inventory.IsAmbiguousSelection([bool]$All, $selected.Count)) {
+            throw 'GPO was not found or the selector was ambiguous.'
+        }
+        $reports = @(foreach ($gpo in $selected) {
+                try {
+                    Get-ADAnalyzerGpoReport -Gpo $gpo -Credential $Credential -AsObject
+                }
+                catch {
+                    $inventory.ReadFailure($gpo, $_.Exception.GetType().FullName)
+                }
+            })
     }
-
-}
-
-foreach ($gpObject in $var['objects']) {
-
-    [xml]$xGPObj = Get-GPOReport -Name $gpObject.Id -ReportType Xml
-
-    foreach ($cfg in $var['gpo']['config']) {
-
-        Get-GPOConfig -gpo $gpObject -xml $xGPObj -config $cfg
-
+    # The manifest intentionally exports public APIs only. These transport-free
+    # helpers stay local to the adapter, including when a live module is loaded.
+    foreach ($file in @('ADProfile', 'ADOperations')) {
+        . (Join-Path $repository ('bin/' + $file + '.ps1'))
     }
-
+    $profile = if ($ProfilePath) {
+        Import-ADAnalyzerProfile -Path $ProfilePath
+    }
+    else {
+        Import-ADAnalyzerProfile
+    }
+    $rows = @(foreach ($report in $reports) {
+            $id = [guid]::Empty
+            if ($null -eq $report.Gpo -or -not $inventory.ReadGpoId([string]$report.Gpo.Id, [ref]$id)) {
+                throw 'Each report requires a valid GPO identity.'
+            }
+            if ($offline -and -not $inventory.HasValidFlags([string]$report.Gpo.Flags)) {
+                throw 'Offline inventory requires supplied GPO Flags (0..3).'
+            }
+            $metadata = [ordered]@{}
+            foreach ($field in $inventory.MetadataFields()) {
+                $metadata[$field] = $report.Gpo.$field
+            }
+            $reportFrame = @{
+                Record = $report
+            }
+            if (((Test-ADAnalyzerOptionalSecretRecordMember $reportFrame 'ReadError') -and $report.ReadError) -or
+                $null -eq $report.Policy) {
+                $errorType = $null
+                if (Test-ADAnalyzerOptionalSecretRecordMember $reportFrame 'ErrorType') {
+                    $errorType = $report.ErrorType
+                }
+                $unreadableCheck = $inventory.UnreadableCheck($id, $errorType)
+                $checks = @(New-ADAnalyzerCheck @unreadableCheck)
+            }
+            else {
+                $policy = if ($offline) {
+                    ConvertTo-ADAnalyzerProvidedGpoPolicy -Policy $report.Policy
+                }
+                else {
+                    $report.Policy
+                }
+                $checks = @(Test-ADAnalyzerGpoPolicy -Gpo $report.Gpo -Policy $policy -Profile $profile | Where-Object {
+                        $inventory.IncludesRule($_.RuleId) -or $inventory.IncludesCategory($_.Category)
+                    })
+            }
+            foreach ($check in $checks) {
+                $inventory.PopulateRow($check, $metadata, $id, ([string]$report.Gpo.DisplayName), $offline)
+                ConvertTo-ADAnalyzerSafeData $check
+            }
+        })
+    $unreadable = $inventory.HasUnreadable($rows)
+    if ($OutputPath) {
+        if ($unreadable) {
+            throw 'GPO inventory is incomplete; the previous report was preserved.'
+        }
+        $target = if ($offline) {
+            'provided GPO reports'
+        }
+        else {
+            $Domain
+        }
+        $assessment = $inventory.Assessment($rows, $target)
+        $null = Export-ADAnalyzerAssessment `
+            -Assessment $assessment `
+            -Path $OutputPath `
+            -Format $Format `
+            -WhatIf:$WhatIfPreference `
+            -Confirm:$false
+    }
+    return $rows
 }
-
-$var['table'] | Format-Table -Property * -AutoSize
-
-if (Test-Path -Path $var['export']) {
-
-    $var['export'] = $var['export'].Replace('.csv', ('.{0}.csv' -f (Get-Date -f 'ss')))
-
-}
-
-try {
-
-    $var['table'] | Export-Csv -Path $var['export'] -NoTypeInformation -ErrorAction Stop
-}
-catch {
-
-    throw ('{0}({1})' -f 'export', $_.Exception.Message)
-
+if ($MyInvocation.InvocationName -ne '.') {
+    $arguments = @{
+        Format = $CliFormat
+    }
+    foreach ($name in @('Domain', 'Server', 'Name', 'Guid', 'All', 'Credential', 'InputObject', 'ProfilePath', 'OutputPath')) {
+        if ($PSBoundParameters.ContainsKey('Cli' + $name)) {
+            $arguments[$name] = Get-Variable -Name ('Cli' + $name) -ValueOnly
+        }
+    }
+    $arguments.WhatIf = [bool]$WhatIfPreference
+    if ($PSBoundParameters.ContainsKey('Confirm')) {
+        $arguments.Confirm = $PSBoundParameters.Confirm
+    }
+    Get-ADAnalyzerLocalAdminGpo @arguments
 }

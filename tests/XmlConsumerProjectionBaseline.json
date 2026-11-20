@@ -1,0 +1,246 @@
+﻿{
+  "Source": "516a12dfd4b64e7e3bf5f63cab8a37e1512ec275",
+  "OriginalSafeDataBodySha256": "b606dc5a07444961f46ebecb15028779ccee98cec2da067877321cf5eb2d38d4",
+  "Results": [
+    {
+      "Name": "UnicodeDocument",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root id=\"one\"><Item>café</Item><Note>ordinary</Note></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "UnicodeElement",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root id=\"one\"><Item>café</Item><Note>ordinary</Note></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "EmptyFormsDocument",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root><Empty /><Full></Full><Item enabled=\"false\" count=\"0\" /></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "EmptyFormsElement",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root><Empty /><Full></Full><Item enabled=\"false\" count=\"0\" /></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "DirectAttributesDocument",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root passwordPresent=\"true\"><Item cpasswordPresent=\"false\" /></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "DirectAttributesElement",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root passwordPresent=\"true\"><Item cpasswordPresent=\"false\" /></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "DirectElementsDocument",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root><PasswordPresent>true</PasswordPresent><CredentialPresent>true</CredentialPresent></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "DirectElementsElement",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root><PasswordPresent>true</PasswordPresent><CredentialPresent>true</CredentialPresent></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "NamedAttributesDocument",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root><Properties name=\"DefaultPassword\" note=\"keep\" SecretPresent=\"true\" /></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "NamedAttributesElement",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root><Properties name=\"DefaultPassword\" note=\"keep\" SecretPresent=\"true\" /></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "NamedChildrenDocument",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root><Setting SecretPresent=\"true\"><Name>Password</Name></Setting></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "NamedChildrenElement",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root><Setting SecretPresent=\"true\"><Name>Password</Name></Setting></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "OrdinaryRecordDocument",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root><Setting><Name>Enabled</Name><Value>false</Value><Data>keep</Data></Setting></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "OrdinaryRecordElement",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root><Setting><Name>Enabled</Name><Value>false</Value><Data>keep</Data></Setting></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "PresenceFlagsDocument",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root cpasswordPresent=\"true\"><PasswordPresent>false</PasswordPresent><Setting name=\"Password\" SecretPresent=\"true\" /></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "PresenceFlagsElement",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root cpasswordPresent=\"true\"><PasswordPresent>false</PasswordPresent><Setting name=\"Password\" SecretPresent=\"true\" /></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "NamespacesDocument",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<p:Root xmlns:p=\"urn:fixture\"><PasswordPresent>true</PasswordPresent><Item xmlns=\"urn:default\">café</Item></p:Root>"
+        }
+      ]
+    },
+    {
+      "Name": "NamespacesElement",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<p:Root xmlns:p=\"urn:fixture\"><PasswordPresent>true</PasswordPresent><Item xmlns=\"urn:default\">café</Item></p:Root>"
+        }
+      ]
+    },
+    {
+      "Name": "ExteriorDocument",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<?xml version=\"1.0\" encoding=\"utf-16\" standalone=\"yes\"?><!-- before --><?fixture data?><Root><![CDATA[keep raw]]><!-- inside --></Root><!-- after -->"
+        }
+      ]
+    },
+    {
+      "Name": "ExteriorElement",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root><![CDATA[keep raw]]><!-- inside --></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "NewlinesDocument",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root xml:space=\"preserve\">\r\n café \r\n<Empty /></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "NewlinesElement",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<Root xml:space=\"preserve\">\r\n café \r\n<Empty /></Root>"
+        }
+      ]
+    },
+    {
+      "Name": "SecretRootDocument",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<PasswordPresent>true</PasswordPresent>"
+        }
+      ]
+    },
+    {
+      "Name": "SecretRootElement",
+      "Count": 1,
+      "Results": [
+        {
+          "Type": "System.String",
+          "Text": "<PasswordPresent>true</PasswordPresent>"
+        }
+      ]
+    }
+  ]
+}

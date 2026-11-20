@@ -1,0 +1,282 @@
+﻿{
+  "Source": "3a8e8aa3bc0bb5c9e050bc22114554ecc9b75ca1",
+  "Results": [
+    {
+      "Name": "Null",
+      "Result": {
+        "Type": "Unknown",
+        "Evidence": [],
+        "Conflicting": false,
+        "InvalidRules": []
+      }
+    },
+    {
+      "Name": "Empty",
+      "Result": {
+        "Type": "Unknown",
+        "Evidence": [],
+        "Conflicting": false,
+        "InvalidRules": []
+      }
+    },
+    {
+      "Name": "msDS-GroupManagedServiceAccount",
+      "Result": {
+        "Type": "Service",
+        "Evidence": [
+          {
+            "Type": "Service",
+            "Source": "DirectoryObjectClass",
+            "Value": "msDS-GroupManagedServiceAccount"
+          }
+        ],
+        "Conflicting": false,
+        "InvalidRules": []
+      }
+    },
+    {
+      "Name": "msDS-ManagedServiceAccount",
+      "Result": {
+        "Type": "Service",
+        "Evidence": [
+          {
+            "Type": "Service",
+            "Source": "DirectoryObjectClass",
+            "Value": "msDS-ManagedServiceAccount"
+          }
+        ],
+        "Conflicting": false,
+        "InvalidRules": []
+      }
+    },
+    {
+      "Name": "OrdinaryObjectClass",
+      "Result": {
+        "Type": "Unknown",
+        "Evidence": [],
+        "Conflicting": false,
+        "InvalidRules": []
+      }
+    },
+    {
+      "Name": "OU:OU=People,DC=example",
+      "Result": {
+        "Type": "User",
+        "Evidence": [
+          {
+            "Type": "User",
+            "Source": "OU",
+            "Value": "OU=People,DC=example"
+          }
+        ],
+        "Conflicting": false,
+        "InvalidRules": []
+      }
+    },
+    {
+      "Name": "OU:CN=Alice,ou=people,dc=example",
+      "Result": {
+        "Type": "User",
+        "Evidence": [
+          {
+            "Type": "User",
+            "Source": "OU",
+            "Value": "OU=People,DC=example"
+          }
+        ],
+        "Conflicting": false,
+        "InvalidRules": []
+      }
+    },
+    {
+      "Name": "OU:CN=Alice,OU=NotPeople,DC=example",
+      "Result": {
+        "Type": "Unknown",
+        "Evidence": [],
+        "Conflicting": false,
+        "InvalidRules": []
+      }
+    },
+    {
+      "Name": "Groups",
+      "Result": {
+        "Type": "Unknown",
+        "Evidence": [
+          {
+            "Type": "User",
+            "Source": "Group",
+            "Value": "CN=Tag"
+          },
+          {
+            "Type": "User",
+            "Source": "Group",
+            "Value": "CN=Tag"
+          },
+          {
+            "Type": "Service",
+            "Source": "Group",
+            "Value": "S-1-5-21-1-2-3-512"
+          }
+        ],
+        "Conflicting": true,
+        "InvalidRules": []
+      }
+    },
+    {
+      "Name": "AbsentGroups",
+      "Result": {
+        "Type": "Unknown",
+        "Evidence": [],
+        "Conflicting": false,
+        "InvalidRules": []
+      }
+    },
+    {
+      "Name": "Coercion",
+      "Result": {
+        "Type": "Unknown",
+        "Evidence": [
+          {
+            "Type": "service",
+            "Source": "Attribute:Zero",
+            "Value": 0
+          },
+          {
+            "Type": "Service",
+            "Source": "Attribute:False",
+            "Value": false
+          },
+          {
+            "Type": "Service",
+            "Source": "Attribute:Values",
+            "Value": [
+              "a",
+              "b"
+            ]
+          }
+        ],
+        "Conflicting": true,
+        "InvalidRules": []
+      }
+    },
+    {
+      "Name": "Regex",
+      "Result": {
+        "Type": "Unknown",
+        "Evidence": [
+          {
+            "Type": "Service",
+            "Source": "Attribute:Role",
+            "Value": "ops"
+          }
+        ],
+        "Conflicting": false,
+        "InvalidRules": [
+          "Role:Regex"
+        ]
+      }
+    },
+    {
+      "Name": "NullRegex",
+      "Result": {
+        "Type": "Service",
+        "Evidence": [
+          {
+            "Type": "Service",
+            "Source": "Attribute:Role",
+            "Value": null
+          }
+        ],
+        "Conflicting": false,
+        "InvalidRules": []
+      }
+    },
+    {
+      "Name": "SkippedAndForbidden",
+      "Result": {
+        "Type": "Unknown",
+        "Evidence": [],
+        "Conflicting": false,
+        "InvalidRules": [
+          "Password",
+          "Invalid.Name"
+        ]
+      }
+    },
+    {
+      "Name": "OrderedConflict",
+      "Result": {
+        "Type": "Unknown",
+        "Evidence": [
+          {
+            "Type": "Service",
+            "Source": "DirectoryObjectClass",
+            "Value": "msDS-GroupManagedServiceAccount"
+          },
+          {
+            "Type": "User",
+            "Source": "Group",
+            "Value": "CN=Tag"
+          },
+          {
+            "Type": "Service",
+            "Source": "OU",
+            "Value": "OU=Svc,DC=example"
+          },
+          {
+            "Type": "Service",
+            "Source": "Group",
+            "Value": "S-1-5-21-1-2-3-512"
+          },
+          {
+            "Type": "Service",
+            "Source": "Attribute:Role",
+            "Value": "ops"
+          }
+        ],
+        "Conflicting": true,
+        "InvalidRules": [
+          "Role:Regex",
+          "Password"
+        ]
+      }
+    },
+    {
+      "Name": "RawObjectExpected",
+      "Result": {
+        "Type": "Service",
+        "Evidence": [
+          {
+            "Type": "Service",
+            "Source": "Attribute:Label",
+            "Value": {
+              "Code": "svc"
+            }
+          }
+        ],
+        "Conflicting": false,
+        "InvalidRules": []
+      }
+    }
+  ],
+  "Errors": [
+    {
+      "Preference": "Continue",
+      "Terminated": true,
+      "Rows": 0,
+      "Diagnostics": 1,
+      "Category": "InvalidArgument",
+      "Reason": "RuntimeException",
+      "MessageIdentifiesString": true
+    },
+    {
+      "Preference": "Stop",
+      "Terminated": true,
+      "Rows": 0,
+      "Diagnostics": 1,
+      "Category": "InvalidArgument",
+      "Reason": "RuntimeException",
+      "MessageIdentifiesString": true
+    }
+  ]
+}
