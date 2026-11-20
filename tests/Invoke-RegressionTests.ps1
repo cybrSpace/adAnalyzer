@@ -273,13 +273,16 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
         & {
             . (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')
             $reference = Join-Path $temporary 'comparison-reference.json'
+            $referenceRunId = 'reference & <run>'
+            $findingTarget = 'fixture-object & <finding>'
+            $comparisonHeading = '<h2 id="assessment-comparison">Assessment comparison</h2>'
             @{
                 SchemaVersion = 1
                 Target = 'actual.example.invalid'
-                RunId = 'reference'
+                RunId = $referenceRunId
                 Checks = @(@{
-                        RuleId = 'FIXTURE.CHECK'
-                        Target = 'fixture-object'
+                        RuleId = 'GPO.FIXTURE.CHECK'
+                        Target = $findingTarget
                         Status = 'Fail'
                         Evidence = @{
                             Value = 0
@@ -287,6 +290,8 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
                     })
                 Findings = @()
             } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reference
+            $originalReference = [Convert]::ToBase64String([IO.File]::ReadAllBytes($reference))
+            $report = [ADAnalyzerAssessmentReport]::new()
             foreach ($operation in @('assess', 'report')) {
                 $path = Join-Path $temporary ('comparison-' + $operation)
                 $result = Start-ADAnalyzer -Operation $operation -OutputPath $path -ReferencePath $reference
@@ -311,17 +316,76 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
                         -Depth 100 `
                         -Compress)
                 Assert-Equal ([datetimeoffset]$result.Comparison.Timestamp).UtcDateTime.Ticks ([datetimeoffset]$saved.Comparison.Timestamp).UtcDateTime.Ticks
-                Assert-Equal 'reference' $saved.Comparison.ReferenceRunId
-                Assert-True ((Get-Content `
-                            -LiteralPath ($path + '.html') `
-                            -Raw) -match 'ADAnalyzerAssessmentComparison') 'HTML snapshot lost comparison'
+                Assert-Equal $referenceRunId $saved.Comparison.ReferenceRunId
+                Assert-Equal 'fixture' $saved.Comparison.DifferenceRunId
+
+                $html = Get-Content -LiteralPath ($path + '.html') -Raw
+                Assert-True ($html.Contains('ADAnalyzerAssessmentComparison')) 'HTML snapshot lost comparison'
+                $sectionStart = $html.IndexOf($comparisonHeading, [StringComparison]::Ordinal)
+                $snapshotStart = $html.IndexOf('<details><summary>Full assessment snapshot', [StringComparison]::Ordinal)
+                Assert-True ($sectionStart -ge 0 -and $snapshotStart -gt $sectionStart) 'Saved comparison is missing from the visible HTML report'
+                $section = $html.Substring($sectionStart, $snapshotStart - $sectionStart)
+                foreach ($expected in @(
+                        'Reference run'
+                        'Difference run'
+                        [Net.WebUtility]::HtmlEncode($referenceRunId)
+                        '<dd>fixture</dd>'
+                        '<dt>New</dt><dd>0</dd>'
+                        '<dt>Resolved</dt><dd>0</dd>'
+                        '<dt>Changed</dt><dd>1</dd>'
+                        '<dt>Unchanged</dt><dd>0</dd>'
+                        'GPO.FIXTURE.CHECK'
+                        [Net.WebUtility]::HtmlEncode($findingTarget)
+                        'NotObservedInDifference'
+                        'Check coverage and collect fresh evidence for this rule and target.'
+                    )) {
+                    Assert-True ($section.Contains($expected)) "Visible HTML comparison lost $expected"
+                }
+                Assert-True (-not $section.Contains($referenceRunId) -and
+                    -not $section.Contains($findingTarget)) 'Visible HTML comparison contains unescaped values'
+                Assert-True ([string]::Equals($html,
+                        $report.Render($result, 'Html'),
+                        [StringComparison]::Ordinal)) 'Direct render and native HTML export disagree'
             }
+
+            $unattached = $result.PSObject.Copy()
+            $unattached.PSObject.Properties.Remove('Comparison')
+            Assert-True (-not $report.Render($unattached, 'Html').Contains($comparisonHeading)) 'HTML invented an absent comparison'
+            $unsupported = $unattached.PSObject.Copy()
+            $unsupported | Add-Member -NotePropertyName Comparison -NotePropertyValue ([pscustomobject]@{
+                    ComparisonType = 'UnsupportedComparison'
+                    SchemaVersion = 1
+                    Summary = @{ Changed = 1 }
+                })
+            Assert-True (-not $report.Render($unsupported, 'Html').Contains($comparisonHeading)) 'HTML interpreted an unsupported comparison'
+
+            $partial = $unattached.PSObject.Copy()
+            $partial | Add-Member -NotePropertyName Comparison -NotePropertyValue ([pscustomobject]@{
+                    ComparisonType = 'ADAnalyzerAssessmentComparison'
+                    SchemaVersion = 1
+                })
+            $partialHtml = $report.Render($partial, 'Html')
+            Assert-True ($partialHtml.Contains('<dt>Changed</dt><dd>Unavailable</dd>')) 'HTML invented a missing comparison count'
+            Assert-True ($partialHtml.Contains('Recorded comparison rows are unavailable.')) 'HTML hid missing comparison rows'
+
+            $saved.Comparison.Changes[0].Reason = 'RulePredicateChanged'
+            $predicateHtml = $report.Render($saved, 'Html')
+            $predicateSection = $predicateHtml.Substring(
+                $predicateHtml.IndexOf($comparisonHeading, [StringComparison]::Ordinal)
+            ).Split([string[]]@('</section>'), [StringSplitOptions]::None)[0]
+            Assert-True ($predicateSection.Contains(
+                    'RulePredicateChanged Review the recorded rule requirements before interpreting the status change.'
+                )) 'HTML hid why the recorded predicate change needs review'
+
             $result = Start-ADAnalyzer -ReferencePath $reference
-            Assert-Equal 'reference' $result.Comparison.ReferenceRunId
+            Assert-Equal $referenceRunId $result.Comparison.ReferenceRunId
             $path = Join-Path $temporary 'comparison-whatif'
             $result = Start-ADAnalyzer -OutputPath $path -ReferencePath $reference -WhatIf
-            Assert-Equal 'reference' $result.Comparison.ReferenceRunId
+            Assert-Equal $referenceRunId $result.Comparison.ReferenceRunId
             Assert-Equal 0 @(Get-ChildItem -LiteralPath $temporary -Filter 'comparison-whatif*').Count
+            Assert-True ([string]::Equals($originalReference,
+                    [Convert]::ToBase64String([IO.File]::ReadAllBytes($reference)),
+                    [StringComparison]::Ordinal)) 'Saved comparison input was modified'
         }
     }
     Invoke-Test 'invalid comparison references preserve existing reports and create no fresh reports' {
@@ -661,6 +725,84 @@ if($null -eq $caught -or $caught.Exception.Message -ne 'Value baselines for secr
         Assert-Equal $a.CheckId $b.CheckId
         Assert-True ($a.CheckId -ne $c.CheckId) 'Different targets collided'
     }
+    Invoke-Test 'cold offline prerequisites only look for an already loaded command' {
+        $fixture = Join-Path $temporary 'offline-prerequisite-discovery.ps1'
+        $body = @'
+param([Parameter(Mandatory)][string]$RepositoryRoot)
+
+$ErrorActionPreference = 'Stop'
+$entryPoint = Join-Path $RepositoryRoot 'bin/Start-ADAnalyzer.ps1'
+. $entryPoint
+
+$loaded = Microsoft.PowerShell.Core\Get-Command -Name Get-ADAnalyzerPrerequisite -ListImported -ErrorAction SilentlyContinue
+if ($loaded) {
+    throw 'The cold fixture started with a prerequisite command already loaded.'
+}
+
+$script:prerequisiteLookups = [Collections.Generic.List[bool]]::new()
+$script:explicitImportAttempts = 0
+function script:Get-Command {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, Position = 0)][string]$Name,
+        [switch]$ListImported
+    )
+
+    if ($Name -cne 'Get-ADAnalyzerPrerequisite') {
+        throw 'The offline prerequisite path tried to discover an unexpected command.'
+    }
+    $script:prerequisiteLookups.Add($ListImported.IsPresent)
+    # Simulate no loaded match. Never run native discovery or load a module here.
+}
+
+function script:Import-Module {
+    $script:explicitImportAttempts++
+    throw 'The offline prerequisite path tried to import a module explicitly.'
+}
+
+# Calibrate the mock with an unrestricted request that cannot reach discovery.
+$null = Get-Command Get-ADAnalyzerPrerequisite -ErrorAction SilentlyContinue
+if ($script:prerequisiteLookups.Count -ne 1 -or $script:prerequisiteLookups[0]) {
+    throw 'The fixture failed to distinguish unrestricted discovery.'
+}
+$script:prerequisiteLookups.Clear()
+
+$checks = @(Start-ADAnalyzer -Operation prerequisites)
+if ($script:prerequisiteLookups.Count -ne 1 -or -not $script:prerequisiteLookups[0]) {
+    throw 'Cold offline prerequisites did not restrict discovery to loaded commands.'
+}
+if ($script:explicitImportAttempts) {
+    throw 'Cold offline prerequisites attempted an explicit module import.'
+}
+
+$powershell = @($checks | Where-Object RuleId -EQ 'PACKAGE.POWERSHELL')
+$assembly = @($checks | Where-Object RuleId -EQ 'PACKAGE.BUNDLED_AD')
+if ($powershell.Count -ne 1 -or $powershell[0].Target -ne $RepositoryRoot -or
+    $assembly.Count -ne 1 -or $assembly[0].Status -ne 'Pass') {
+    throw 'Cold offline prerequisites did not run the package-owned fallback.'
+}
+if (@($checks | Where-Object RuleId -NotLike 'PACKAGE.*').Count) {
+    throw 'The offline check emitted a non-package result.'
+}
+
+'PASS offline prerequisite fetched package checks using loaded-only discovery'
+'@
+        Set-Content -LiteralPath $fixture -Value $body -Encoding UTF8
+
+        $engine = (Get-Process -Id $PID).Path
+        $arguments = @(
+            '-NoLogo'
+            '-NoProfile'
+            '-NonInteractive'
+            '-File'
+            $fixture
+            '-RepositoryRoot'
+            $RepositoryRoot
+        )
+        $output = @(& $engine @arguments)
+        Assert-Equal 0 $LASTEXITCODE
+        Assert-True (($output -join ' ') -match 'PASS offline prerequisite fetched package checks using loaded-only discovery') ($output -join [Environment]::NewLine)
+    }
     Invoke-Test 'prerequisite CLI honors the same domain target argument' {
 
         function Get-ADAnalyzerPrerequisite {
@@ -674,10 +816,12 @@ if($null -eq $caught -or $caught.Exception.Message -ne 'Value baselines for secr
             ) [pscustomobject]@{
                 Observed = $Server
                 Status = 'Pass'
+                Online = $Online.IsPresent
             }
         }
         $result = Start-ADAnalyzer -Operation prerequisites -FQDN target.example.invalid -Online
         Assert-Equal target.example.invalid $result.Observed
+        Assert-Equal $true $result.Online
     }
     $harness = Join-Path $temporary 'cli-harness.ps1'
     $harnessSource = @'

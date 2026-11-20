@@ -54,7 +54,7 @@ function Start-ADAnalyzer {
     )
     $repository = Split-Path -Parent $PSScriptRoot
     if ($Operation -eq 'prerequisites') {
-        if (-not (Get-Command Get-ADAnalyzerPrerequisite -ErrorAction SilentlyContinue)) {
+        if (-not (Get-Command -Name Get-ADAnalyzerPrerequisite -ListImported -ErrorAction SilentlyContinue)) {
             . (Join-Path $PSScriptRoot 'ADProfile.ps1')
         }
         $configuration = if ($ProfilePath) {

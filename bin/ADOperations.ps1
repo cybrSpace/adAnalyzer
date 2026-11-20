@@ -895,6 +895,97 @@ class ADAnalyzerAssessmentReport {
         $null = $Builder.Append('<h2>Collection errors</h2><pre>' + $EncodedErrors + '</pre>')
     }
 
+    hidden [void] AddComparison([Text.StringBuilder]$Builder, [object]$Assessment) {
+        $projector = [ADAnalyzerEvidenceProjector]::new()
+        $comparison = $projector.GetValue($Assessment, @('Comparison'))
+        $kind = $projector.GetValue($comparison, @('ComparisonType'))
+        $version = $projector.GetValue($comparison, @('SchemaVersion'))
+        if ($kind -isnot [string] -or $kind -cne 'ADAnalyzerAssessmentComparison' -or
+            ($version -isnot [int] -and $version -isnot [long]) -or $version -ne 1) {
+            return
+        }
+
+        $reference = $projector.GetValue($comparison, @('ReferenceRunId'))
+        $difference = $projector.GetValue($comparison, @('DifferenceRunId'))
+        $null = $Builder.Append(
+            '<section aria-labelledby="assessment-comparison"><h2 id="assessment-comparison">' +
+            'Assessment comparison</h2><dl><dt>Reference run</dt><dd>' +
+            $this.ComparisonText($reference, 'Unavailable') + '</dd><dt>Difference run</dt><dd>' +
+            $this.ComparisonText($difference, 'Unavailable') + '</dd></dl><dl>'
+        )
+
+        $summary = $projector.GetValue($comparison, @('Summary'))
+        foreach ($change in @('New', 'Resolved', 'Changed', 'Unchanged')) {
+            $count = $projector.GetValue($summary, @($change))
+            $display = 'Unavailable'
+            if (($count -is [int] -or $count -is [long]) -and $count -ge 0) {
+                $display = $count.ToString([Globalization.CultureInfo]::InvariantCulture)
+            }
+            $null = $Builder.Append('<dt>' + $change + '</dt><dd>' + $display + '</dd>')
+        }
+        $null = $Builder.Append('</dl>')
+
+        $changes = $projector.GetValue($comparison, @('Changes'))
+        if ($changes -is [array]) {
+            $this.AddComparisonRows($Builder, $changes, $projector)
+        }
+        else {
+            $null = $Builder.Append('<p>Recorded comparison rows are unavailable.</p>')
+        }
+        $null = $Builder.Append('</section>')
+    }
+
+    hidden [void] AddComparisonRows(
+        [Text.StringBuilder]$Builder,
+        [object[]]$Changes,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        $null = $Builder.Append(
+            '<div class="table"><table><thead><tr><th>Rule</th><th>Target</th>' +
+            '<th>Change</th><th>Reason</th></tr></thead><tbody>'
+        )
+        $hasRows = $false
+        foreach ($row in $Changes) {
+            $change = $Projector.GetValue($row, @('Change'))
+            if ($change -isnot [string] -or $change -cnotin 'New', 'Resolved', 'Changed') {
+                continue
+            }
+
+            $rule = $Projector.GetValue($row, @('RuleId'))
+            $target = $Projector.GetValue($row, @('Target'))
+            $reason = $Projector.GetValue($row, @('Reason'))
+            $explanation = ''
+            if ($reason -is [string]) {
+                switch -CaseSensitive ($reason) {
+                    'NotObservedInDifference' {
+                        $explanation = ' Check coverage and collect fresh evidence for this rule and target.'
+                    }
+                    'RulePredicateChanged' {
+                        $explanation = ' Review the recorded rule requirements before interpreting the status change.'
+                    }
+                }
+            }
+            $null = $Builder.Append(
+                '<tr><td>' + $this.ComparisonText($rule, 'Unavailable') +
+                '</td><td>' + $this.ComparisonText($target, 'Unavailable') +
+                '</td><td>' + $change +
+                '</td><td>' + $this.ComparisonText($reason, '') + $explanation + '</td></tr>'
+            )
+            $hasRows = $true
+        }
+        if (-not $hasRows) {
+            $null = $Builder.Append('<tr><td colspan="4" class="muted">No changed rows available.</td></tr>')
+        }
+        $null = $Builder.Append('</tbody></table></div>')
+    }
+
+    hidden [string] ComparisonText([object]$Value, [string]$Fallback) {
+        if (($Value -is [string] -and $Value.Length -gt 0) -or $Value -is [guid]) {
+            return [Net.WebUtility]::HtmlEncode([string]$Value)
+        }
+        return $Fallback
+    }
+
     hidden [string] FinishHtml([Text.StringBuilder]$Builder, [object]$EncodedSnapshot) {
         $null = $Builder.Append(
             '<details><summary>Full assessment snapshot (secret presence only)</summary><pre>' +
@@ -992,6 +1083,7 @@ class ADAnalyzerAssessmentReport {
                             $encodedErrors = [Net.WebUtility]::HtmlEncode((ConvertTo-Json -InputObject $errors -Depth 100))
                             $this.AddCollectionErrors($html, $encodedErrors)
                         }
+                        $this.AddComparison($html, $report.Safe)
                         $encodedSnapshot = [Net.WebUtility]::HtmlEncode((ConvertTo-Json -InputObject $report.Safe -Depth 100))
                         $this.FinishHtml($html, $encodedSnapshot)
                     }
@@ -1099,6 +1191,7 @@ function ConvertTo-ADAnalyzerAssessmentHtml {
         $encodedErrors = [Net.WebUtility]::HtmlEncode((ConvertTo-Json -InputObject $errors -Depth 100))
         $report.AddCollectionErrors($html, $encodedErrors)
     }
+    $report.AddComparison($html, $Assessment)
     $encodedSnapshot = [Net.WebUtility]::HtmlEncode((ConvertTo-Json -InputObject $Assessment -Depth 100))
     return $report.FinishHtml($html, $encodedSnapshot)
 }
@@ -1196,13 +1289,16 @@ class ADAnalyzerAssessmentComparer {
                 )
                 $observation = $this.ClassifyPresence($hasOld, $hasNew)
                 if ($observation.CompareContents) {
-                    $oldJson = ConvertTo-Json -InputObject ($this.NormalizeValue($old, '')) -Depth 100 -Compress
-                    $newJson = ConvertTo-Json -InputObject ($this.NormalizeValue($new, '')) -Depth 100 -Compress
+                    $oldComparable = $this.GetComparableChecks($key, $old, $projector)
+                    $newComparable = $this.GetComparableChecks($key, $new, $projector)
+                    $oldJson = ConvertTo-Json -InputObject ($this.NormalizeValue($oldComparable, '')) -Depth 100 -Compress
+                    $newJson = ConvertTo-Json -InputObject ($this.NormalizeValue($newComparable, '')) -Depth 100 -Compress
                     $oldFail = @($old | Where-Object Status -in 'Fail', 'Invalid').Count -gt 0
                     $newFail = @($new | Where-Object Status -in 'Fail', 'Invalid').Count -gt 0
                     $oldGood = @($old | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                     $newGood = @($new | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                     $observation.Change = $this.ClassifyStatus(($oldJson -cne $newJson), $oldFail, $newFail, $oldGood, $newGood)
+                    $this.QualifyGpoRuleTransition($key, $old, $new, $observation)
                 }
 
                 $sample = $this.SelectSample($old, $new)
@@ -1349,6 +1445,210 @@ class ADAnalyzerAssessmentComparer {
             return 'Changed'
         }
         return 'Unchanged'
+    }
+
+    hidden [void] QualifyGpoRuleTransition(
+        [string]$Key,
+        [object[]]$Before,
+        [object[]]$After,
+        [hashtable]$Observation
+    ) {
+        if ($Observation.Change -notin 'Resolved', 'New' -or
+            -not $Key.StartsWith('GPO.EXPECTED.', [StringComparison]::Ordinal) -or
+            $Before.Count -ne 1 -or $After.Count -ne 1) {
+            return
+        }
+
+        $projector = [ADAnalyzerEvidenceProjector]::new()
+        $oldEvidence = $projector.GetValue($Before[0], @('Evidence'))
+        $newEvidence = $projector.GetValue($After[0], @('Evidence'))
+        $oldOperator = $projector.GetValue($oldEvidence, @('Operator'))
+        $newOperator = $projector.GetValue($newEvidence, @('Operator'))
+        $operators = @('Equals', 'NotEquals', 'In', 'NotIn', 'Minimum', 'Maximum')
+        if ($oldOperator -isnot [string] -or $newOperator -isnot [string] -or
+            $oldOperator -notin $operators -or $newOperator -notin $operators) {
+            return
+        }
+
+        # Read projected fields without flattening arrays or conflating null with absence.
+        $missing = [object]::new()
+        $oldExpected = $projector.GetValue($Before[0], @('Expected'), $missing)
+        $newExpected = $projector.GetValue($After[0], @('Expected'), $missing)
+        if ([object]::ReferenceEquals($oldExpected, $missing) -or
+            [object]::ReferenceEquals($newExpected, $missing)) {
+            return
+        }
+
+        $predicateChanged = $oldOperator -ine $newOperator
+        if (-not $predicateChanged -and
+            $oldOperator -in 'Minimum', 'Maximum', 'Equals', 'NotEquals' -and
+            $this.IsRecordedInteger($oldExpected) -and
+            $this.IsRecordedInteger($newExpected) -and
+            [decimal]$oldExpected -ne [decimal]$newExpected) {
+            $predicateChanged = $oldOperator -in 'Minimum', 'Maximum'
+            if ($oldOperator -in 'Equals', 'NotEquals' -and
+                $projector.GetValue($oldEvidence, @('Aggregate')) -ne $true -and
+                $projector.GetValue($newEvidence, @('Aggregate')) -ne $true) {
+                # Numeric equality is comparable here only for recorded scalar observations.
+                $oldObserved = $projector.GetValue($Before[0], @('Observed'))
+                $newObserved = $projector.GetValue($After[0], @('Observed'))
+                $predicateChanged = $this.IsRecordedInteger($oldObserved) -and $this.IsRecordedInteger($newObserved)
+            }
+        }
+        if ($predicateChanged -or
+            $this.RegistryTypePredicateChanged($oldEvidence, $newEvidence, $projector, $missing) -or
+            $this.RegistrySelectorPredicateChanged($oldEvidence, $newEvidence, $projector)) {
+            $Observation.Change = 'Changed'
+            $Observation.Reason = 'RulePredicateChanged'
+        }
+    }
+
+    hidden [object[]] GetComparableChecks(
+        [string]$Key,
+        [object[]]$Rows,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        if (-not $Key.StartsWith('GPO.EXPECTED.', [StringComparison]::Ordinal)) {
+            return $Rows
+        }
+
+        return @(
+            foreach ($row in $Rows) {
+                $evidence = $Projector.GetValue($row, @('Evidence'))
+                if ($null -eq $this.GetRecordedRegistrySelector($evidence, $Projector)) {
+                    $row
+                    continue
+                }
+
+                # Compare selectors separately so new metadata alone does not change legacy comparisons.
+                $comparableEvidence = $evidence.PSObject.Copy()
+                $comparableEvidence.PSObject.Properties.Remove('RegistrySelector')
+                $comparableRow = $row.PSObject.Copy()
+                $comparableRow.PSObject.Properties['Evidence'].Value = $comparableEvidence
+                $comparableRow
+            }
+        )
+    }
+
+    hidden [object] GetRecordedRegistrySelector([object]$Evidence, [ADAnalyzerEvidenceProjector]$Projector) {
+        $selector = $Projector.GetValue($Evidence, @('RegistrySelector'))
+        if ($null -eq $selector) {
+            return $null
+        }
+
+        $aggregate = $Projector.GetValue($Evidence, @('Aggregate'))
+        $scope = $Projector.GetValue($Evidence, @('Scope'))
+        $path = $Projector.GetValue($Evidence, @('Path'))
+        $hive = $Projector.GetValue($selector, @('Hive'))
+        $key = $Projector.GetValue($selector, @('Key'))
+        $valueName = $Projector.GetValue($selector, @('ValueName'))
+        if ($aggregate -isnot [bool] -or -not $aggregate -or $scope -isnot [string] -or
+            $path -isnot [string] -or $hive -isnot [string] -or $key -isnot [string] -or
+            $key.Length -lt 2 -or $valueName -isnot [string] -or
+            -not $key.StartsWith(':', [StringComparison]::Ordinal) -or
+            -not $valueName.StartsWith(':', [StringComparison]::Ordinal) -or
+            -not (($scope -eq 'Computer' -and $path -eq 'Machine/Registry.pol' -and $hive -eq 'HKLM') -or
+                ($scope -eq 'User' -and $path -eq 'User/Registry.pol' -and $hive -eq 'HKCU'))) {
+            return $null
+        }
+
+        return $selector
+    }
+
+    hidden [bool] RegistrySelectorPredicateChanged(
+        [object]$Before,
+        [object]$After,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        $oldSelector = $this.GetRecordedRegistrySelector($Before, $Projector)
+        $newSelector = $this.GetRecordedRegistrySelector($After, $Projector)
+        if ($null -eq $oldSelector -or $null -eq $newSelector) {
+            return $false
+        }
+        return $oldSelector.Hive -ine $newSelector.Hive -or
+            $oldSelector.Key.Substring(1) -ine $newSelector.Key.Substring(1) -or
+            $oldSelector.ValueName.Substring(1) -ine $newSelector.ValueName.Substring(1)
+    }
+
+    hidden [bool] RegistryTypePredicateChanged(
+        [object]$Before,
+        [object]$After,
+        [ADAnalyzerEvidenceProjector]$Projector,
+        [object]$Missing
+    ) {
+        $oldType = $this.NormalizeExpectedRegistryType($Projector.GetValue($Before, @('ExpectedRegistryType'), $Missing), $Missing)
+        $newType = $this.NormalizeExpectedRegistryType($Projector.GetValue($After, @('ExpectedRegistryType'), $Missing), $Missing)
+        if ([object]::ReferenceEquals($oldType, $Missing) -or
+            [object]::ReferenceEquals($newType, $Missing) -or
+            [object]::Equals($oldType, $newType)) {
+            return $false
+        }
+
+        foreach ($evidence in @($Before, $After)) {
+            if ($Projector.GetValue($evidence, @('Aggregate')) -eq $true -or
+                -not $this.IsRecordedRegistryType($Projector.GetValue($evidence, @('RegistryType')))) {
+                return $false
+            }
+
+            # A scalar Registry.pol observation identifies where the expected type was applied.
+            $path = $Projector.GetValue($evidence, @('Path'))
+            $scope = $Projector.GetValue($evidence, @('Scope'))
+            if ($path -isnot [string] -or $scope -isnot [string] -or
+                -not (($scope -eq 'Computer' -and $path -eq 'Machine/Registry.pol') -or
+                    ($scope -eq 'User' -and $path -eq 'User/Registry.pol'))) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    hidden [object] NormalizeExpectedRegistryType([object]$Value, [object]$Missing) {
+        if ($null -eq $Value) {
+            return $null
+        }
+
+        # The evaluator accepts invariant integer text and may preserve that spelling in evidence.
+        if ($Value -is [string]) {
+            $numericType = 0L
+            if (-not [long]::TryParse(
+                $Value,
+                [Globalization.NumberStyles]::Integer,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [ref]$numericType
+            )) {
+                return $Missing
+            }
+            $Value = $numericType
+        }
+        if ($this.IsRecordedRegistryType($Value)) {
+            return [uint32]$Value
+        }
+        return $Missing
+    }
+
+    hidden [bool] IsRecordedRegistryType([object]$Value) {
+        return $this.IsRecordedInteger($Value) -and
+            [decimal]$Value -ge 0 -and [decimal]$Value -le [uint32]::MaxValue
+    }
+
+    hidden [bool] IsRecordedInteger([object]$Value) {
+        if ($null -eq $Value -or $Value -is [Enum]) {
+            return $false
+        }
+        $code = [Type]::GetTypeCode($Value.GetType())
+        if ($code -notin @(
+                [TypeCode]::SByte,
+                [TypeCode]::Byte,
+                [TypeCode]::Int16,
+                [TypeCode]::UInt16,
+                [TypeCode]::Int32,
+                [TypeCode]::UInt32,
+                [TypeCode]::Int64,
+                [TypeCode]::UInt64
+            )) {
+            return $false
+        }
+        return [decimal]$Value -le [long]::MaxValue
     }
 
     hidden [object] SelectSample([object[]]$Before, [object[]]$After) {
@@ -1622,6 +1922,7 @@ function Compare-ADAnalyzerAssessment {
         }
     }
 
+    $projector = [ADAnalyzerEvidenceProjector]::new()
     $changes = @(
         foreach ($key in @(@($maps[0].Keys) + @($maps[1].Keys) | Sort-Object -Unique)) {
             $old = @(
@@ -1636,13 +1937,16 @@ function Compare-ADAnalyzerAssessment {
             )
             $observation = $comparer.ClassifyPresence($maps[0].ContainsKey($key), $maps[1].ContainsKey($key))
             if ($observation.CompareContents) {
-                $oldJson = ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerComparableValue $old) -Depth 100 -Compress
-                $newJson = ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerComparableValue $new) -Depth 100 -Compress
+                $oldComparable = $comparer.GetComparableChecks($key, $old, $projector)
+                $newComparable = $comparer.GetComparableChecks($key, $new, $projector)
+                $oldJson = ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerComparableValue $oldComparable) -Depth 100 -Compress
+                $newJson = ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerComparableValue $newComparable) -Depth 100 -Compress
                 $oldFail = @($old | Where-Object Status -in 'Fail', 'Invalid').Count -gt 0
                 $newFail = @($new | Where-Object Status -in 'Fail', 'Invalid').Count -gt 0
                 $oldGood = @($old | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                 $newGood = @($new | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                 $observation.Change = $comparer.ClassifyStatus(($oldJson -cne $newJson), $oldFail, $newFail, $oldGood, $newGood)
+                $comparer.QualifyGpoRuleTransition($key, $old, $new, $observation)
             }
 
             $sample = $comparer.SelectSample($old, $new)
@@ -1653,7 +1957,6 @@ function Compare-ADAnalyzerAssessment {
 
     $referenceRunId = Get-ADAnalyzerOperationValue $before @('RunId')
     $differenceRunId = Get-ADAnalyzerOperationValue $after @('RunId')
-    $projector = [ADAnalyzerEvidenceProjector]::new()
     $referenceRunId = $projector.ProjectIdentityMetadata($referenceRunId)
     $differenceRunId = $projector.ProjectIdentityMetadata($differenceRunId)
     $timestamp = $comparer.CreateTimestamp()
@@ -3083,6 +3386,22 @@ function Assert-ADAnalyzerOperationInactivity {
     # it is not an authoritative all-DC lastLogon sweep.
 }
 
+function Initialize-ADAnalyzerJournalTypes {
+    if ('ADAnalyzer.JournalLease' -as [type]) {
+        return
+    }
+    try {
+        Add-Type -Path (Join-Path $PSScriptRoot 'ADJournalLease.cs') -ErrorAction Stop
+    }
+    catch {
+        # A concurrent runspace may have loaded the same package types.
+        if (-not ('ADAnalyzer.JournalLease' -as [type]) -or
+            -not ('ADAnalyzer.AccountEffectReservation' -as [type])) {
+            throw
+        }
+    }
+}
+
 class ADAnalyzerRemediationJournal : System.IDisposable {
     hidden [object] $Lease
     hidden [object] $OwnershipGate
@@ -3281,11 +3600,8 @@ class ADAnalyzerRemediationJournal : System.IDisposable {
     }
 
     hidden [object] AcquireLease([string]$Path, [string]$PlanId, [string]$Server) {
-        $leaseType = 'ADAnalyzer.JournalLease' -as [type]
-        if ($null -eq $leaseType) {
-            Add-Type -Path (Join-Path $PSScriptRoot 'ADJournalLease.cs') -ErrorAction Stop
-            $leaseType = [type]'ADAnalyzer.JournalLease'
-        }
+        Initialize-ADAnalyzerJournalTypes
+        $leaseType = [type]'ADAnalyzer.JournalLease'
         try {
             return $leaseType::Open($Path, $PlanId, $Server, $this)
         }
@@ -3519,8 +3835,125 @@ function Assert-ADAnalyzerOperationPlan {
     }
 }
 
+function Get-ADAnalyzerRemediationAuthorityDirectory {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        throw 'The remediation account reservation requires a designated Windows host.'
+    }
+
+    $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    if ($programData -notmatch '^[A-Za-z]:\\') {
+        throw 'The remediation account reservation requires a local ProgramData directory.'
+    }
+    $path = [IO.Path]::Combine($programData, 'ADAnalyzer.Remediation')
+    $directory = [IO.DirectoryInfo]::new($path)
+    if (-not $directory.Exists -or
+        [IO.DriveInfo]::new($directory.Root.FullName).DriveType -ne [IO.DriveType]::Fixed) {
+        throw 'The protected ADAnalyzer.Remediation directory must be provisioned on the designated Windows host.'
+    }
+
+    $component = $directory
+    while ($null -ne $component) {
+        if (($component.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The remediation account reservation directory cannot use a reparse point.'
+        }
+        $component = $component.Parent
+    }
+    return $directory.FullName
+}
+
+class ADAnalyzerRemediationReservationInspector {
+    ADAnalyzerRemediationReservationInspector() {
+    }
+
+    [pscustomobject] Inspect([guid]$ObjectGuid) {
+        if ($ObjectGuid -eq [guid]::Empty) {
+            throw 'A canonical account GUID is required.'
+        }
+
+        $directory = Get-ADAnalyzerRemediationAuthorityDirectory
+        Initialize-ADAnalyzerJournalTypes
+        $reservationType = 'ADAnalyzer.AccountEffectReservation' -as [type]
+        if ($null -eq $reservationType -or $null -eq $reservationType.GetMethod('Inspect')) {
+            throw 'Start a fresh PowerShell process to load the remediation account inspection support.'
+        }
+        $observation = $reservationType::Inspect($directory, $ObjectGuid)
+
+        return [pscustomobject][ordered]@{
+            ObjectGuid = $ObjectGuid
+            Status = $observation['Status']
+            AttemptId = $observation['AttemptId']
+            Operation = $observation['Operation']
+            CreatedUtc = $observation['CreatedUtc']
+            LastConfirmedStep = $observation['LastConfirmedStep']
+        }
+    }
+}
+
+function Get-ADAnalyzerRemediationReservation {
+    <#
+    .SYNOPSIS
+    Reads one account reservation from the local remediation authority.
+    .DESCRIPTION
+    Reports a point-in-time observation for the specified account GUID.
+    Use the result to locate evidence for manual reconciliation.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][guid]$ObjectGuid
+    )
+
+    $inspector = [ADAnalyzerRemediationReservationInspector]::new()
+    $inspector.Inspect($ObjectGuid)
+}
+
 class ADAnalyzerRemediationExecutor {
     ADAnalyzerRemediationExecutor() {
+    }
+
+    hidden [object] ReserveAccount([guid]$ObjectGuid, [bool]$Undo) {
+        $directory = Get-ADAnalyzerRemediationAuthorityDirectory
+        Initialize-ADAnalyzerJournalTypes
+        $reservationType = 'ADAnalyzer.AccountEffectReservation' -as [type]
+        if ($null -eq $reservationType) {
+            throw 'Start a fresh PowerShell process to load the remediation account reservation support.'
+        }
+        return $reservationType::Acquire($directory, $ObjectGuid, $Undo)
+    }
+
+    hidden [void] ReleaseIfNotDispatched([object]$Reservation, [Management.Automation.ErrorRecord]$Failure) {
+        if ($null -ne $Reservation) {
+            try {
+                $Reservation.ReleaseBeforeDispatch()
+            }
+            catch {
+                $message = 'The account reservation could not be released after the remediation failure. ' +
+                    $_.Exception.Message
+                throw [InvalidOperationException]::new($message, $Failure.Exception)
+            }
+
+            $this.AddReservationFailureContext($Reservation, $Failure.Exception)
+        }
+    }
+
+    hidden [void] AddReservationFailureContext([object]$Reservation, [Exception]$Failure) {
+        # A previously loaded helper type can still preserve its original
+        # failure contract until the process is restarted.
+        if ($null -ne $Reservation -and $null -ne $Reservation.GetType().GetMethod('TryAttachFailureContext')) {
+            $Reservation.TryAttachFailureContext($Failure)
+        }
+    }
+
+    hidden [object] NewReservationPersistenceFailure([object]$Reservation, [string]$Message) {
+        $failure = [Management.Automation.RuntimeException]::new($Message, $null)
+        $this.AddReservationFailureContext($Reservation, $failure)
+        if ($failure.Data.Count -eq 0) {
+            return $Message
+        }
+
+        # Match the original string throw's message, error ID, category and target.
+        return [Management.Automation.ErrorRecord]::new(
+            $failure, $Message, [Management.Automation.ErrorCategory]::OperationStopped, $Message
+        )
     }
 
     [object[]] PreviewUndo([string]$JournalPath, [string]$Server) {
@@ -3590,6 +4023,8 @@ class ADAnalyzerRemediationExecutor {
                         throw 'Journal entry identity changed after undo review'
                     }
                 }
+                $reservation = $null
+                $admitting = $false
                 try {
                     if ($entry.Before.Enabled -isnot [bool] -or $entry.After.Enabled -isnot [bool] -or
                         -not $this.IsReversibleDisable($entry)) {
@@ -3601,23 +4036,28 @@ class ADAnalyzerRemediationExecutor {
                     if (-not $this.IsApprovedUndoEntry($entry, $approved)) {
                         throw 'Journal entry identity is not bound to an approved reversible action'
                     }
+                    $account = [guid]$entry.ObjectGuid
+                    $admitting = $true
+                    $reservation = $this.ReserveAccount($account, $true)
+                    $admitting = $false
                     if ($null -eq $commands) {
                         $commands = $this.GetUndoDirectoryCommands()
                     }
-                    $current = Get-ADAnalyzerOperationCurrentObject $entry.ObjectGuid $connection $plan $commands.Read
+                    $current = Get-ADAnalyzerOperationCurrentObject $account $connection $plan $commands.Read
                     $state = $guard.AssertPreconditions($entry.After, $current, $false)
                     $guard.AssertPrivilege($current, $entry, $plan, $Server, $Credential)
                     $this.PrepareUndoEntry($entry, $state)
                     $owner.WriteExisting($journal)
 
                     $mutation = @{
-                        Identity = [guid]$entry.ObjectGuid
+                        Identity = $account
                         WhatIf = $false
                         Confirm = $false
                     }
                     $enable = $commands.Enable
+                    $reservation.BeginDispatch()
                     $null = & $enable @mutation @connection
-                    $after = Get-ADAnalyzerOperationCurrentObject $entry.ObjectGuid $connection $plan $commands.Read
+                    $after = Get-ADAnalyzerOperationCurrentObject $account $connection $plan $commands.Read
                     $entry.Undo.After = $guard.ReadState($after)
                     if (-not $this.IsVerifiedEnabled($entry.Before, $entry.Undo.After)) {
                         throw 'Unable to verify the account enable result'
@@ -3626,16 +4066,22 @@ class ADAnalyzerRemediationExecutor {
                     $owner.WriteExisting($journal)
                 }
                 catch {
+                    if ($admitting) {
+                        throw
+                    }
                     $failure = $_
                     $this.RecordUndoFailure($entry, $failure.Exception.Message)
                     try {
                         $owner.WriteExisting($journal)
                     }
                     catch {
-                        throw $this.UndoPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                        $message = $this.UndoPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                        throw $this.NewReservationPersistenceFailure($reservation, $message)
                     }
+                    $this.ReleaseIfNotDispatched($reservation, $failure)
                     throw $failure
                 }
+                $reservation.ReleaseAfterRecordedCompletion()
                 $rows.Add([ADAnalyzerEvidenceProjector]::new().Project($entry))
             }
         }
@@ -3881,13 +4327,23 @@ class ADAnalyzerRemediationExecutor {
                         }).Count) {
                     throw 'This plan action has already been applied; create a fresh assessment and plan'
                 }
-                if ($null -eq $commands) {
-                    $commands = $this.GetApplyDirectoryCommands()
+                $objectGuid = $action.ObjectGuid
+                $account = [guid]$objectGuid
+                $reservation = $this.ReserveAccount($account, $false)
+                try {
+                    if ($null -eq $commands) {
+                        $commands = $this.GetApplyDirectoryCommands()
+                    }
                 }
+                catch {
+                    $this.ReleaseIfNotDispatched($reservation, $_)
+                    throw
+                }
+
                 $header = $this.NewEntryHeader()
                 $fields = @{
                     ActionId = $action.ActionId
-                    ObjectGuid = $action.ObjectGuid
+                    ObjectGuid = $objectGuid
                     SID = $action.SID
                     DistinguishedName = $action.DistinguishedName
                     ObjectClass = $action.ObjectClass
@@ -3899,7 +4355,7 @@ class ADAnalyzerRemediationExecutor {
                 $connection = $target.Connection
                 $added = $false
                 try {
-                    $current = Get-ADAnalyzerOperationCurrentObject $action.ObjectGuid $connection $target.Plan $commands.Read
+                    $current = Get-ADAnalyzerOperationCurrentObject $account $connection $target.Plan $commands.Read
                     $entry.Before = $guard.AssertPreconditions($action.Preconditions, $current, $true)
                     $guard.AssertPrivilege($current, $action, $target.Plan, $target.Server, $target.Credential)
                     $guard.AssertInactivity($current, $action)
@@ -3908,13 +4364,14 @@ class ADAnalyzerRemediationExecutor {
                     $owner.Write($journal)
 
                     $mutation = @{
-                        Identity = [guid]$action.ObjectGuid
+                        Identity = $account
                         WhatIf = $false
                         Confirm = $false
                     }
                     $disable = $commands.Disable
+                    $reservation.BeginDispatch()
                     $null = & $disable @mutation @connection
-                    $after = Get-ADAnalyzerOperationCurrentObject $action.ObjectGuid $connection $target.Plan $commands.Read
+                    $after = Get-ADAnalyzerOperationCurrentObject $account $connection $target.Plan $commands.Read
                     $entry.After = $guard.ReadState($after)
                     if (-not $this.IsVerifiedDisabled($entry.Before, $entry.After)) {
                         throw 'Unable to verify the account disable result'
@@ -3929,10 +4386,13 @@ class ADAnalyzerRemediationExecutor {
                         $owner.Write($journal)
                     }
                     catch {
-                        throw $this.ApplyPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                        $message = $this.ApplyPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                        throw $this.NewReservationPersistenceFailure($reservation, $message)
                     }
+                    $this.ReleaseIfNotDispatched($reservation, $failure)
                     throw $failure
                 }
+                $reservation.ReleaseAfterRecordedCompletion()
                 $rows.Add([ADAnalyzerEvidenceProjector]::new().Project($entry))
             }
         }
@@ -4111,10 +4571,12 @@ function Invoke-ADAnalyzerRemediationPlan {
             if ($null -eq $action) {
                 continue
             }
-            if (-not $PSCmdlet.ShouldProcess($action.DistinguishedName, 'Disable account from explicit reviewed plan')) {
+            $objectGuid = $action.ObjectGuid
+            $distinguishedName = $action.DistinguishedName
+            if (-not $PSCmdlet.ShouldProcess($distinguishedName, 'Disable account from explicit reviewed plan')) {
                 $skipped = @{
                     ActionId = $action.ActionId
-                    ObjectGuid = $action.ObjectGuid
+                    ObjectGuid = $objectGuid
                 }
                 $executor.SkippedAction($skipped.ActionId, $skipped.ObjectGuid)
                 continue
@@ -4131,17 +4593,19 @@ function Invoke-ADAnalyzerRemediationPlan {
             $header = $executor.NewEntryHeader()
             $fields = @{
                 ActionId = $action.ActionId
-                ObjectGuid = $action.ObjectGuid
+                ObjectGuid = $objectGuid
                 SID = $action.SID
-                DistinguishedName = $action.DistinguishedName
+                DistinguishedName = $distinguishedName
                 ObjectClass = $action.ObjectClass
                 AccountType = $action.AccountType
                 InactivityDays = $action.InactivityDays
             }
             $entry = $executor.BuildEntry($header, $fields)
+            $account = [guid]$objectGuid
+            $reservation = $executor.ReserveAccount($account, $false)
             $added = $false
             try {
-                $current = Get-ADAnalyzerOperationCurrentObject $action.ObjectGuid $connection $planObject
+                $current = Get-ADAnalyzerOperationCurrentObject $account $connection $planObject
                 $entry.Before = Assert-ADAnalyzerOperationPreconditions $action.Preconditions $current $true
                 Assert-ADAnalyzerOperationPrivilege $current $action $planObject $connection
                 Assert-ADAnalyzerOperationInactivity $current $action
@@ -4149,8 +4613,9 @@ function Invoke-ADAnalyzerRemediationPlan {
                 $added = $true
                 # Durable intent precedes the mutation. A failed journal write aborts.
                 Save-ADAnalyzerOperationJournal $journal $JournalPath
-                Disable-ADAccount -Identity ([guid]$action.ObjectGuid) @connection -WhatIf:$false -Confirm:$false
-                $after = Get-ADAnalyzerOperationCurrentObject $action.ObjectGuid $connection $planObject
+                $reservation.BeginDispatch()
+                Disable-ADAccount -Identity $account @connection -WhatIf:$false -Confirm:$false
+                $after = Get-ADAnalyzerOperationCurrentObject $account $connection $planObject
                 $entry.After = Get-ADAnalyzerOperationState $after
                 if (-not $executor.IsVerifiedDisabled($entry.Before, $entry.After)) {
                     throw 'Unable to verify the account disable result'
@@ -4165,10 +4630,13 @@ function Invoke-ADAnalyzerRemediationPlan {
                     Save-ADAnalyzerOperationJournal $journal $JournalPath
                 }
                 catch {
-                    throw $executor.ApplyPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                    $message = $executor.ApplyPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                    throw $executor.NewReservationPersistenceFailure($reservation, $message)
                 }
+                $executor.ReleaseIfNotDispatched($reservation, $failure)
                 throw $failure
             }
+            $reservation.ReleaseAfterRecordedCompletion()
             ConvertTo-ADAnalyzerSafeData $entry
         }
     }
@@ -4236,6 +4704,8 @@ function Undo-ADAnalyzerRemediation {
                     throw 'Journal entry identity changed after undo review'
                 }
             }
+            $reservation = $null
+            $admitting = $false
             try {
                 if (-not $executor.IsReversibleDisable($entry)) {
                     throw 'Journal does not contain a reversible enabled-to-disabled transition'
@@ -4246,13 +4716,18 @@ function Undo-ADAnalyzerRemediation {
                 if (-not $executor.IsApprovedUndoEntry($entry, $approved)) {
                     throw 'Journal entry identity is not bound to an approved reversible action'
                 }
-                $current = Get-ADAnalyzerOperationCurrentObject $entry.ObjectGuid $connection $plan
+                $account = [guid]$entry.ObjectGuid
+                $admitting = $true
+                $reservation = $executor.ReserveAccount($account, $true)
+                $admitting = $false
+                $current = Get-ADAnalyzerOperationCurrentObject $account $connection $plan
                 $state = Assert-ADAnalyzerOperationPreconditions $entry.After $current $false
                 Assert-ADAnalyzerOperationPrivilege $current $entry $plan $connection
                 $executor.PrepareUndoEntry($entry, $state)
                 Save-ADAnalyzerOperationJournal $journal $JournalPath
-                Enable-ADAccount -Identity ([guid]$entry.ObjectGuid) @connection -WhatIf:$false -Confirm:$false
-                $after = Get-ADAnalyzerOperationCurrentObject $entry.ObjectGuid $connection $plan
+                $reservation.BeginDispatch()
+                Enable-ADAccount -Identity $account @connection -WhatIf:$false -Confirm:$false
+                $after = Get-ADAnalyzerOperationCurrentObject $account $connection $plan
                 $entry.Undo.After = Get-ADAnalyzerOperationState $after
                 if (-not $executor.IsVerifiedEnabled($entry.Before, $entry.Undo.After)) {
                     throw 'Unable to verify the account enable result'
@@ -4261,16 +4736,22 @@ function Undo-ADAnalyzerRemediation {
                 Save-ADAnalyzerOperationJournal $journal $JournalPath
             }
             catch {
+                if ($admitting) {
+                    throw
+                }
                 $failure = $_
                 $executor.RecordUndoFailure($entry, $failure.Exception.Message)
                 try {
                     Save-ADAnalyzerOperationJournal $journal $JournalPath
                 }
                 catch {
-                    throw $executor.UndoPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                    $message = $executor.UndoPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                    throw $executor.NewReservationPersistenceFailure($reservation, $message)
                 }
+                $executor.ReleaseIfNotDispatched($reservation, $failure)
                 throw $failure
             }
+            $reservation.ReleaseAfterRecordedCompletion()
             ConvertTo-ADAnalyzerSafeData $entry
         }
     }

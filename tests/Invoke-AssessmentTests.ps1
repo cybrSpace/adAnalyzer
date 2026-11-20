@@ -639,6 +639,416 @@ try {
         Assert-True ($json -notmatch 'fixture-secret|fixture-password') 'Secret crossed assessment boundary'
         Assert-Equal Fail ($result.Checks | Where-Object RuleId -eq GPO.Preferences.CPassword).Status
     }
+    Test-Assessment 'omitted inventoried GPO XML limits credential evidence through both assessment APIs' {
+        $data = New-AssessmentFixture
+        $policy = New-PolicyFixture
+        $xml = [pscustomobject]@{
+            Scope = 'Computer'
+            Path = 'Machine/Preferences/Groups/Groups.xml'
+            Kind = 'Preferences'
+            Xml = '<Groups><User cpasswordPresent="false" /></Groups>'
+        }
+        $policy.XmlFiles = @($xml)
+        $policy.Files = @([pscustomobject]@{
+                Scope = $xml.Scope
+                Path = $xml.Path
+                Kind = 'Xml'
+                Length = 52
+            })
+        $gpoData = @([pscustomobject]@{
+                Gpo = [pscustomobject]@{
+                    Id = [guid]'11111111-1111-1111-1111-111111111111'
+                    Flags = 0
+                    Version = 1
+                    Links = @()
+                }
+                Policy = $policy
+                Error = $null
+            })
+        $target = $data.Domain.DNSRoot
+        $engine = [ADAnalyzerAssessmentEngine]::new()
+        $clean = $engine.Evaluate($data, $gpoData, $target)
+        $original = $clean.Checks | Where-Object RuleId -eq GPO.Preferences.CPassword
+        Assert-Equal Pass $original.Status
+        Assert-True ($original.Observed -is [bool] -and -not $original.Observed) 'Readable clean XML lost Boolean absence'
+        Assert-Equal 0 @($clean.Checks | Where-Object RuleId -eq GPO.Coverage.MissingXml).Count
+
+        $policy.Files += [pscustomobject]@{
+            Scope = 'User'
+            Path = 'User/Preferences/Groups/Groups.xml'
+            Kind = 'Xml'
+            Length = 51
+        }
+        $arguments = @{
+            DirectoryData = $data
+            GpoData = $gpoData
+            Target = $target
+        }
+        foreach ($result in @((Invoke-ADAnalyzerAssessment @arguments), $engine.Evaluate($data, $gpoData, $target))) {
+            Assert-Equal Partial $result.State
+            $credential = $result.Findings | Where-Object RuleId -eq GPO.Preferences.CPassword
+            Assert-Equal Unknown $credential.Status
+            Assert-Equal $original.CheckId $credential.CheckId
+            Assert-True ($null -eq $credential.Observed -and $null -eq $credential.Evidence.SecretPresent) 'Incomplete evidence established absence'
+            $coverage = @($result.Findings | Where-Object RuleId -eq GPO.Coverage.MissingXml)
+            Assert-Equal 1 $coverage.Count
+            Assert-Equal Unknown $coverage[0].Status
+            Assert-True ($coverage[0].Observed -is [int] -and $coverage[0].Observed -eq 1) 'Missing XML lost its integer count'
+            Assert-Equal 0 $coverage[0].Expected
+            Assert-Equal 0 @($result.Checks | Where-Object RuleId -eq GPO.Xml.Readable).Count
+        }
+
+        $xml.Xml = '<Groups><User cpasswordPresent="true" /></Groups>'
+        $result = Invoke-ADAnalyzerAssessment @arguments
+        $json = ConvertTo-Json -InputObject $result -Depth 100
+        $decoded = ConvertFrom-Json -InputObject $json
+        Assert-Equal Partial $decoded.State
+        $positive = $decoded.Findings | Where-Object RuleId -eq GPO.Preferences.CPassword
+        Assert-Equal Fail $positive.Status
+        Assert-True ($positive.Observed -is [bool] -and $positive.Observed -and
+            $positive.Evidence.SecretPresent -is [bool] -and $positive.Evidence.SecretPresent) 'Incomplete coverage erased confirmed presence'
+        $gap = $decoded.Findings | Where-Object RuleId -eq GPO.Coverage.MissingXml
+        Assert-Equal Unknown $gap.Status
+        Assert-Equal 1 $gap.Observed
+        Assert-True ($json -notmatch '<Groups') 'Raw XML escaped through the assessment'
+    }
+    Test-Assessment 'custom GPO comparison distinguishes changed operators, values and registry types' {
+        $ruleId = 'GPO.Expected.FixtureLevel'
+        $key = 'Software\Fixture'
+        $gpo = [pscustomobject]@{
+            Id = [guid]'11111111-1111-1111-1111-111111111111'
+            Version = 1
+            Flags = 0
+            Links = @()
+        }
+        $directory = New-AssessmentFixture
+        $inputs = [ordered]@{
+            Strict = @{
+                Observed = 1
+                Operator = 'Minimum'
+                Expected = 2
+                Status = 'Fail'
+            }
+            Inverted = @{
+                Observed = 1
+                Operator = 'Maximum'
+                Expected = 2
+                Status = 'Pass'
+            }
+            Relaxed = @{
+                Observed = 1
+                Operator = 'Minimum'
+                Expected = 1
+                Status = 'Pass'
+            }
+            Improved = @{
+                Observed = 3
+                Operator = 'Minimum'
+                Expected = 2
+                Status = 'Pass'
+            }
+            EqualStrict = @{
+                Observed = 1
+                Expected = [uint32]2
+                Status = 'Fail'
+            }
+            EqualRelaxed = @{
+                Observed = 1
+                Operator = 'Equals'
+                Expected = [int]1
+                Status = 'Pass'
+            }
+            EqualImproved = @{
+                Observed = 2
+                Operator = 'Equals'
+                Expected = [long]2
+                Status = 'Pass'
+            }
+            NotEqualStrict = @{
+                Observed = 1
+                Operator = 'NotEquals'
+                Expected = [uint32]1
+                Status = 'Fail'
+            }
+            NotEqualRelaxed = @{
+                Observed = 1
+                Operator = 'NotEquals'
+                Expected = [int]2
+                Status = 'Pass'
+            }
+            TypeConstraintWrong = @{
+                Observed = 1
+                Expected = 1
+                RuleType = 'REG_SZ'
+                Status = 'Invalid'
+            }
+            TypeConstraintWrongText = @{
+                Observed = 1
+                Expected = 1
+                RuleType = ' +1 '
+                Status = 'Invalid'
+            }
+            TypeConstraintMatched = @{
+                Observed = 1
+                Expected = 1
+                RuleType = 'REG_DWORD'
+                Status = 'Pass'
+            }
+            TypeUnconstrained = @{
+                Observed = 1
+                Expected = 1
+                RuleType = $null
+                Status = 'Pass'
+            }
+            TypeObservationWrong = @{
+                Observed = 1
+                Expected = 1
+                RuleType = [long]4
+                ObservedType = [uint32]5
+                Status = 'Invalid'
+            }
+            TypeObservationWrongText = @{
+                Observed = 1
+                Expected = 1
+                RuleType = ' +4 '
+                ObservedType = [uint32]5
+                Status = 'Invalid'
+            }
+            UserTypeWrong = @{
+                Observed = 1
+                Expected = 1
+                RuleType = 1
+                UserPolicy = $true
+                Status = 'Invalid'
+            }
+            UserTypeMatched = @{
+                Observed = 1
+                Expected = 1
+                RuleType = 4
+                UserPolicy = $true
+                Status = 'Pass'
+            }
+            AggregateLow = @{
+                Observed = 1
+                Operator = 'Equals'
+                Expected = @([uint32]3)
+                Status = 'Fail'
+                Aggregate = $true
+            }
+            AggregateHigh = @{
+                Observed = 3
+                Operator = 'Equals'
+                Expected = @([uint32]3)
+                Status = 'Pass'
+                Aggregate = $true
+            }
+        }
+        $assessments = @{}
+        $checks = @{}
+        $paths = @{}
+        $pathHashes = @{}
+        foreach ($name in $inputs.Keys) {
+            $inputCase = $inputs[$name]
+            $policy = New-PolicyFixture
+            $policy.RegistrySettings = @([pscustomobject]@{
+                    Hive = 'HKLM'
+                    Scope = 'Computer'
+                    Key = $key
+                    ValueName = 'Level'
+                    Value = [uint32]$inputCase.Observed
+                    Type = 4
+                    Source = 'Machine/Registry.pol'
+                    KeyOnly = $false
+                })
+            if ($inputCase.ContainsKey('ObservedType')) {
+                $policy.RegistrySettings[0].Type = $inputCase.ObservedType
+            }
+            if ($inputCase.UserPolicy) {
+                $policy.RegistrySettings[0].Hive = 'HKCU'
+                $policy.RegistrySettings[0].Scope = 'User'
+                $policy.RegistrySettings[0].Source = 'User/Registry.pol'
+            }
+            $rule = @{
+                Id = 'FixtureLevel'
+                Hive = $policy.RegistrySettings[0].Hive
+                Key = $key
+                ValueName = 'Level'
+                Expected = $inputCase.Expected
+                Type = 4
+            }
+            $operator = 'Equals'
+            if ($inputCase.ContainsKey('Operator')) {
+                $operator = $inputCase.Operator
+                $rule.Operator = $operator
+            }
+            if ($inputCase.ContainsKey('Aggregate')) {
+                $rule.Aggregate = $true
+            }
+            if ($inputCase.ContainsKey('RuleType')) {
+                if ($null -eq $inputCase.RuleType) {
+                    $rule.Remove('Type')
+                }
+                else {
+                    $rule.Type = $inputCase.RuleType
+                }
+            }
+            $arguments = @{
+                DirectoryData = $directory
+                GpoData = @([pscustomobject]@{
+                        Gpo = $gpo
+                        Policy = $policy
+                    })
+                Profile = @{ RegistryRules = @($rule) }
+            }
+            $assessments[$name] = Invoke-ADAnalyzerAssessment @arguments
+            $ruleChecks = @($assessments[$name].Checks | Where-Object RuleId -eq $ruleId)
+            Assert-Equal 1 $ruleChecks.Count
+            $checks[$name] = $ruleChecks[0]
+            Assert-Equal $inputCase.Status $ruleChecks[0].Status
+            Assert-Equal $inputCase.Observed (@($ruleChecks[0].Observed)[0])
+            Assert-Equal $operator $ruleChecks[0].Evidence.Operator
+        }
+        foreach ($name in @(
+            'Inverted'
+            'Relaxed'
+            'Improved'
+            'EqualStrict'
+            'EqualRelaxed'
+            'EqualImproved'
+            'NotEqualStrict'
+            'NotEqualRelaxed'
+            'TypeConstraintWrong'
+            'TypeConstraintWrongText'
+            'TypeConstraintMatched'
+            'TypeUnconstrained'
+            'TypeObservationWrong'
+            'TypeObservationWrongText'
+        )) {
+            Assert-Equal $checks.Strict.CheckId $checks[$name].CheckId
+        }
+        Assert-Equal $checks.AggregateLow.CheckId $checks.AggregateHigh.CheckId
+        Assert-Equal $checks.UserTypeWrong.CheckId $checks.UserTypeMatched.CheckId
+        Assert-Equal User $checks.UserTypeWrong.Evidence.Scope
+        Assert-Equal 'User/Registry.pol' $checks.UserTypeWrong.Evidence.Path
+        Assert-Equal 1 $checks.TypeConstraintWrong.Evidence.ExpectedRegistryType
+        Assert-True ($checks.TypeConstraintWrongText.Evidence.ExpectedRegistryType -is [string]) 'The evaluator did not retain the numeric type text'
+        Assert-Equal ' +1 ' $checks.TypeConstraintWrongText.Evidence.ExpectedRegistryType
+        Assert-Equal 4 $checks.TypeConstraintMatched.Evidence.ExpectedRegistryType
+        Assert-Equal 4 $checks.TypeConstraintWrong.Evidence.RegistryType
+        Assert-Equal 4 $checks.TypeConstraintMatched.Evidence.RegistryType
+        Assert-Equal 5 $checks.TypeObservationWrong.Evidence.RegistryType
+        Assert-Equal $null (Get-ADAnalyzerOperationValue $checks.TypeUnconstrained.Evidence @('ExpectedRegistryType') ([object]::new()))
+
+        $assessments.Legacy = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $assessments.Strict.Target
+            Checks = @([pscustomobject]@{
+                    RuleId = $ruleId
+                    Target = $checks.Relaxed.Target
+                    Status = $checks.Relaxed.Status
+                    Observed = $checks.Relaxed.Observed
+                    Expected = $checks.Relaxed.Expected
+                })
+        }
+        $legacyEqual = $checks.EqualRelaxed.PSObject.Copy()
+        $legacyEqual.PSObject.Properties.Remove('Expected')
+        $assessments.LegacyEqual = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $assessments.Strict.Target
+            Checks = @($legacyEqual)
+        }
+        $legacyType = $checks.TypeConstraintMatched.PSObject.Copy()
+        $legacyType.Evidence = [pscustomobject]@{
+            Path = $checks.TypeConstraintMatched.Evidence.Path
+            Scope = $checks.TypeConstraintMatched.Evidence.Scope
+            Operator = $checks.TypeConstraintMatched.Evidence.Operator
+            RegistryType = $checks.TypeConstraintMatched.Evidence.RegistryType
+        }
+        $assessments.LegacyType = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $assessments.Strict.Target
+            Checks = @($legacyType)
+        }
+        $unknown = $checks.Relaxed.PSObject.Copy()
+        $unknown.Status = 'Unknown'
+        $assessments.Unknown = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $assessments.Strict.Target
+            Checks = @($unknown)
+        }
+        $assessments.Unobserved = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $assessments.Strict.Target
+            Checks = @()
+        }
+
+        foreach ($name in $assessments.Keys) {
+            $paths[$name] = Join-Path $temp ('gpo-compare-predicate-' + $name + '.json')
+            $null = Export-ADAnalyzerAssessment -Assessment $assessments[$name] -Path $paths[$name] -Format Json -Confirm:$false
+            $pathHashes[$name] = (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $cases = @(
+            @('Strict', 'Inverted', 'Changed', 'RulePredicateChanged'),
+            @('Strict', 'Relaxed', 'Changed', 'RulePredicateChanged'),
+            @('Relaxed', 'Strict', 'Changed', 'RulePredicateChanged'),
+            @('Strict', 'Improved', 'Resolved', $null),
+            @('EqualStrict', 'EqualRelaxed', 'Changed', 'RulePredicateChanged'),
+            @('EqualRelaxed', 'EqualStrict', 'Changed', 'RulePredicateChanged'),
+            @('EqualStrict', 'EqualImproved', 'Resolved', $null),
+            @('NotEqualStrict', 'NotEqualRelaxed', 'Changed', 'RulePredicateChanged'),
+            @('NotEqualRelaxed', 'NotEqualStrict', 'Changed', 'RulePredicateChanged'),
+            @('EqualStrict', 'LegacyEqual', 'Resolved', $null),
+            @('TypeConstraintWrongText', 'TypeConstraintMatched', 'Changed', 'RulePredicateChanged'),
+            @('TypeConstraintWrong', 'TypeConstraintMatched', 'Changed', 'RulePredicateChanged'),
+            @('TypeConstraintMatched', 'TypeConstraintWrong', 'Changed', 'RulePredicateChanged'),
+            @('TypeConstraintWrong', 'TypeUnconstrained', 'Changed', 'RulePredicateChanged'),
+            @('TypeUnconstrained', 'TypeConstraintWrong', 'Changed', 'RulePredicateChanged'),
+            @('TypeObservationWrong', 'TypeConstraintMatched', 'Resolved', $null),
+            @('TypeObservationWrongText', 'TypeConstraintMatched', 'Resolved', $null),
+            @('TypeConstraintWrong', 'LegacyType', 'Resolved', $null),
+            @('UserTypeWrong', 'UserTypeMatched', 'Changed', 'RulePredicateChanged'),
+            @('AggregateLow', 'AggregateHigh', 'Resolved', $null),
+            @('Strict', 'Legacy', 'Resolved', $null),
+            @('Strict', 'Unknown', 'Changed', $null),
+            @('Strict', 'Unobserved', 'Changed', 'NotObservedInDifference'),
+            @('Unobserved', 'Strict', 'New', $null)
+        )
+        foreach ($documents in @($assessments, $paths)) {
+            foreach ($case in $cases) {
+                $before, $after, $expectedChange, $expectedReason = $case
+                $arguments = @{
+                    Reference = $documents[$before]
+                    Difference = $documents[$after]
+                }
+                $commandResult = Compare-ADAnalyzerAssessment @arguments
+                $classResult = $comparer.Compare($arguments.Reference, $arguments.Difference)
+                foreach ($result in @($commandResult, $classResult)) {
+                    $changes = @($result.Changes | Where-Object RuleId -eq $ruleId)
+                    Assert-Equal 1 $changes.Count
+                    Assert-True ($changes[0].Change -eq $expectedChange) (
+                        "Comparison $before to $after expected $expectedChange, received $($changes[0].Change)"
+                    )
+                    Assert-Equal $expectedReason $changes[0].Reason
+                    if ($before -eq 'Unobserved') {
+                        Assert-Equal 0 $changes[0].Reference.Count
+                    }
+                    else {
+                        Assert-Equal $checks[$before].Status $changes[0].Reference[0].Status
+                    }
+                    if ($after -eq 'Unobserved') {
+                        Assert-Equal 0 $changes[0].Difference.Count
+                    }
+                    else {
+                        Assert-Equal 1 $changes[0].Difference.Count
+                    }
+                }
+            }
+        }
+        foreach ($name in $paths.Keys) {
+            Assert-Equal $pathHashes[$name] (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+    }
     Test-Assessment 'SYSVOL version mismatch and policy read errors remain explicit' {
         $policy = New-PolicyFixture
         $policy.SysvolVersion = 2

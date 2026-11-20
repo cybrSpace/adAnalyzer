@@ -22,6 +22,8 @@ Export-ADAnalyzerAssessment -Assessment $scan -Path .\reports\current -Format Al
 
 The exporter writes JSON evidence, HTML with summary/check tables and expandable evidence, and CSV projections. Secret-bearing fields and policy XML return boolean presence indicators such as `SecretPresent: true` or `cpasswordPresent="true"`; the values and masked placeholders are omitted. GPO/file/item locations remain available for remediation, and unreadable content stays Unknown. Legacy GPO reports also retain typed `property.setting.secretPresent` booleans; true indicators produce a stored-secret finding, false indicators remain inventory, and setting values are omitted. Exporting copies records without modifying the returned scan. Compare saved JSON snapshots with `Compare-ADAnalyzerAssessment -Reference .\reports\previous.json -Difference $scan`. Changes are classified as New, Resolved, Changed, or Unchanged using stable rule/target identities, including changes to passing checks. A failed check becoming Pass/NotApplicable is resolved; becoming Unknown does not prove resolution. A check absent from the new scan is Changed with `Reason: NotObservedInDifference`, including after failed or skipped collection; absence does not prove remediation. Different targets/search-base scopes are rejected as drift comparisons.
 
+When an assessment carries an explicit comparison, the HTML report shows the two run IDs, recorded outcome totals and changed rows alongside the current checks. An unobserved result directs the reader to check coverage and collect fresh evidence for that rule and target. A changed predicate directs review to the rule requirements. The full comparison remains in the embedded snapshot and JSON export.
+
 Structured assessment and raw policy inputs support generic .NET dictionaries as well as hashtables and ordered dictionaries. Lookup honors each dictionary's key comparer and key types, distinguishes a present null from a missing key, and preserves boolean-only named-secret evidence in JSON, HTML and CSV under normal or strict error handling.
 
 Secret presence uses native password/string length and collection cardinality. A data key named `Count` or an extended `Password`, `Length` or `Count` member cannot override that metadata. Null values, empty strings/collections/passwords and disposed secure strings remain absent; scalar false and zero still count as present. Returned evidence contains only a boolean indicator, without reading credential contents.
@@ -344,6 +346,12 @@ $remediationGuard.AssertPlan($reviewedPlan)
 
 `ADAnalyzerAssessmentComparer` has an inert constructor. `Compare(reference, difference)` accepts in-memory snapshots, literal assessment JSON paths, or a mix. It checks target and search-base compatibility, groups rows by stable rule and target identities, and returns one ordered comparison with a UTC timestamp and summary counts. Compared check rows and structured run identifiers are detached and project recognized secrets to Boolean presence. The operation can read explicitly supplied files and has no write or directory effects. Each call uses fresh state. `Compare-ADAnalyzerAssessment` preserves native binding, input-read order, and diagnostics for existing callers.
 
+A matched custom GPO finding with a different recorded operator, integer minimum or maximum, or scalar integer equality expectation is reported as `Changed` with reason `RulePredicateChanged` when its status would otherwise imply resolution or a newly failing setting. Scalar `Equals` and `NotEquals` require integer observations on both records. Both recorded observations are retained. Older snapshots that lack the required predicate fields retain the historical comparison behavior.
+
+Aggregate Registry.pol checks record the selected hive, key, and value name in `Evidence.RegistrySelector` when the safe evidence projector can preserve the identity. The first character of each recorded key and value name is `:`, which keeps timestamp-shaped names as literal strings in saved JSON. An unnamed value is recorded as `:`. When both snapshots identify a different selector on the same matched check, a status transition that would imply a new or resolved finding is reported as `Changed` with `RulePredicateChanged`. Case-equivalent selectors and snapshots without selector metadata retain the existing comparison behavior.
+
+The same distinction applies to a changed expected registry type when both records contain typed scalar observations from the matching Computer or User `Registry.pol`. Recorded numeric types and equivalent invariant integer text are compared by value. An explicitly absent type constraint and a recorded numeric type are different expectations. When you need to verify an improvement, use assessments made against the same type expectation.
+
 `ADAnalyzerRemediationPlanner` owns offline plan selection and assembly. Dot-source the full constructor loader, then call `CreatePlan(assessment)` for the default profile or `CreatePlan(assessment, profile)` with supplied profile settings. The assessment can be an in-memory record or a literal JSON path. Construction is inert. Each call builds an independent plan from the reviewed account identities, captured safety evidence, and profile policy. It preserves approved action order and returns detached display metadata with Boolean presence for recognized secrets. The method can read the supplied snapshot path and throws when the assessment or policy is invalid. Planning has no directory, journal, or mutation effects.
 
 ```powershell
@@ -360,6 +368,35 @@ The `New-ADAnalyzerRemediationPlan` compatibility command preserves native param
 `AssertInactivity(object, action)` checks supplied directory activity against the reviewed threshold. It uses the latest known logon observation and falls back to the creation time when logon evidence is absent. A malformed observation or unavailable evidence fails the check. The method is also available when dot-sourcing `bin/ADOperations.ps1` on its own.
 
 `AssertPrivilege(object, action, plan, server)` accepts a current object from the selected controller and reads groups from that same controller with the bundled Windows Active Directory command. A trailing `PSCredential` supplies explicit credentials. The server must match the plan's recorded controller when one is recorded. The full constructor loader, `bin/ADAnalyzer.ps1`, makes the membership resolver and account classification available. The method checks effective privilege, fresh user classification, and exclusions. Successful eligibility checks return no output. Approval, identity verification, mutation, and journal operations belong to the guarded execution workflow.
+
+### Account remediation reservations
+
+Apply and Undo share a persistent reservation per AD object GUID across journals and PowerShell processes on one designated Windows host. The reservation is created before the directory write. If a write may have been dispatched and the command or its verification fails, the reservation survives the failure and process restart. A later Apply or Undo for that account that reaches reservation admission reports `Uncertain` before contacting AD. A matching read alone cannot clear a reservation. Planning, previews, and declined prompts leave the authority untouched.
+
+Before enabling writes, a Windows administrator must provision a stable local `ADAnalyzer.Remediation` directory underneath the system's Common Application Data folder, normally `C:\ProgramData\ADAnalyzer.Remediation`. Restrict its ownership and write access to the authorized remediation service or administrators. Keep journal and report output outside that directory. Use one current-build writer host and stop older writers before cutover. Reconcile unsettled attempts from older versions and other hosts before provisioning or restoring this authority. The application does not initialize or migrate the authority automatically. If it is unavailable, the write fails closed.
+
+The account GUID identifies the `.hold` file. Its text records the attempt ID, operation, creation time, and last confirmed step. Preserve that file and its journal when escalating a timeout or interruption. The application offers no automatic retry, Undo, or clear operation for an uncertain reservation. Require independent evidence of settlement and fresh approval before any later write. Synthetic tests qualify the control flow. Native provider settlement, distributed writers, and power-loss or host-restore recovery require separate qualification.
+
+When Apply or Undo rethrows a failure after dispatch might have started, the originating exception can carry local reservation context under `ADAnalyzer.RemediationReservation` in `Exception.Data`. Look there or in the inner exception chain for the account GUID, attempt GUID, and last confirmed step. Match both GUIDs against the retained hold before using the error details for reconciliation. If saving the failure to the journal also fails, the compound error retains both failure messages and can still identify the held attempt. Inspecting a hold still conveys no settlement or approval evidence.
+
+Enterprise-readiness development and pull-request checks use repository-owned synthetic directory records, simulated provider failures, disposable local storage, and the RSAT-free Windows matrix. They require no directory access or operator-supplied validation data. Native deployment qualification has a separate scope.
+
+To inspect the local authority by account object GUID through the class API, load the analyzer and call the inspector.
+
+```powershell
+. ./bin/ADAnalyzer.ps1
+$inspector = [ADAnalyzerRemediationReservationInspector]::new()
+$inspector.Inspect([guid]'20000000-0000-4000-8000-000000000001')
+```
+
+The packaged PowerShell command exposes the same observation.
+
+```powershell
+Import-Module ./ADEnvironment.psd1
+Get-ADAnalyzerRemediationReservation -ObjectGuid '20000000-0000-4000-8000-000000000001'
+```
+
+A `Held` result shows the validated attempt ID, operation, recorded UTC time, and last confirmed step. It covers both an active reservation and a retained uncertain attempt. `NotObserved` means the record was absent from the local authority at the time of the check. `Indeterminate` means the record could not be read and validated. The operation reports an error if the local authority is unavailable. Apply and Undo still need fresh approval and their own reservation. Inspection reads only local reservation metadata.
 
 `ADAnalyzerRemediationJournal` manages a local journal. Its constructor is inert. `Open(plan, server, path)` validates the reviewed plan, resolves one PowerShell FileSystem path, and holds that path's exclusive lock. A newly opened journal stays in memory until the first write. `Read()` returns a detached record. `Write(journal)` checks the bound journal identity, persists the supplied entries with the bound settings, and sets the update time. Call `Dispose()` in a `finally` block to release the lease. Disposal is safe to repeat, preserves the empty lock marker, and allows the instance to be opened again.
 
@@ -514,6 +551,8 @@ User/service classification uses configured OUs, group identities, explicit attr
 
 Checks expose Pass, Fail, Unknown, Unreadable, NotConfigured, Invalid, and NotApplicable. Applicability is separate: GPO checks describe stored risk and normally leave target applicability Unknown. WMI filters, disabled links/sides, and preference targeting are retained; a complete inheritance/security-filter/RSoP engine is not provided. Missing settings in one GPO do not prove effective noncompliance. A retained cpassword remains a credential exposure even when its item is disabled.
 
+When a GPO snapshot lists XML without a matching payload for the same scope and relative path, the assessment reports `GPO.Coverage.MissingXml` with a count. Credential absence stays `Unknown` until the listed XML is available and readable. Confirmed presence remains a Boolean finding even if other XML is missing.
+
 The new analyzers cover cpassword using boolean presence only, Restricted Groups, Local Users and Groups preference actions, exact-SID user-right allowlists, password/lockout sentinel values, raw Registry.pol types/deletions, and custom baseline rules. Security-template flags use their MS-GPSB numeric domains, including documented nonzero enabled values. Invalid tokens remain raw with `ValueValid: false` and produce Invalid checks or legacy validation findings; canonical XML and flat/wide reports retain the marker. Invalid marked settings cannot be imported as baseline expectations. Optional ADMX/ADML enrichment accepts `Analysis.TemplatePath` and `Analysis.Language`; unresolved or complex definitions stay Unknown and raw registry identity remains authoritative.
 
 Custom value baselines in `RegistryRules`, `ExpectedGpoSettings`, and `Host.RegistryRules` reject known secret-bearing settings. Use the built-in boolean secret-presence findings for those settings; their stored values are not supported baseline inputs. Identity fields (`Kind`, `Name`, `Key`, `ValueName`) identify one setting and must be strings or null; expected value collections remain supported.
@@ -592,6 +631,8 @@ Journal paths resolve once against the caller's PowerShell FileSystem location a
 `bin/Start-ADAnalyzer.ps1` accepts explicit Operation, Domain/FQDN, Server, SearchBase, Credential, ProfilePath, OutputPath, PlanPath, JournalPath, ReferencePath, and collection switches. It does not clear caller modules/variables, change location, or select a hardcoded domain. Dot sourcing defines the function without running a scan. Script operations are assess/report, plan/remediate, apply, undo, and prerequisites. Apply requires PlanPath and JournalPath; undo requires JournalPath. The function throws on scan/export failures. The script exits 1 on failure, 2 for partial/unreadable coverage, and optionally 3 with `-FailOnFindings`; findings and collection completeness are separate concepts.
 
 `Get-ADAnalyzerPrerequisite` reports platform/runtime, bundled DLL version/hash and optional ADWS/SMB reachability/authentication. `DependencyHashes` may pin a trusted SHA256 for `Microsoft.ActiveDirectory.Management.dll`; availability is not signature verification. `Start-ADAnalyzer -Operation prerequisites -FQDN example.com -Online` accepts the same target/profile configuration. No prerequisite command installs RSAT or changes domain/host configuration.
+
+The standalone prerequisites path uses an already-loaded prerequisite command or loads the local implementation. Cold offline startup reads package metadata. Network checks require explicit `-Online`.
 
 Assessment state describes evidence completeness. Invalid stored values or observations produce `Partial`, as do unknown evidence and collection errors. A fully evaluated failed check can still belong to a `Complete` assessment; `Complete` does not mean compliant.
 
