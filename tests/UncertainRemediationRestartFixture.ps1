@@ -107,9 +107,12 @@ try {
         Assert-RestartFixture ($watch.Elapsed.TotalSeconds -lt 45) 'Timed out waiting for the sender provider barrier.'
         Start-Sleep -Milliseconds 25
     }
-    Assert-RestartFixture (
-        -not $sender.HasExited -and [IO.File]::Exists($queued)
-    ) ('Sender did not reach the pending provider barrier. ' + [IO.File]::ReadAllText((Join-Path $ScenarioRoot 'Sender.err')))
+    if ($sender.HasExited) {
+        $sender.WaitForExit()
+        $senderError = [IO.File]::ReadAllText((Join-Path $ScenarioRoot 'Sender.err'))
+        throw ('Sender exited before the parent could interrupt it at the pending provider barrier. ' + $senderError)
+    }
+    Assert-RestartFixture ([IO.File]::Exists($queued)) 'Sender did not reach the pending provider barrier.'
     Assert-RestartFixture (
         [guid][IO.File]::ReadAllText($queued) -eq $identity -and
         [guid][IO.File]::ReadAllText((Join-Path $ScenarioRoot 'Sender.dispatch')) -eq $identity
@@ -125,11 +128,13 @@ try {
     $alternative = if ($Route -eq 'Native') { 'Direct' } else { 'Native' }
     $challenger = Start-RestartChild Challenger $alternative
     Assert-RestartFixture ($challenger.WaitForExit(45000)) 'The restarted challenger did not exit.'
+    $challenger.WaitForExit()
     $marker = "PASS restarted $alternative Apply holds the pending synthetic effect"
     $output = [IO.File]::ReadAllLines((Join-Path $ScenarioRoot 'Challenger.out'))
-    Assert-RestartFixture (
-        $challenger.ExitCode -eq 0 -and @($output | Where-Object { $_ -ceq $marker }).Count -eq 1
-    ) ('The restarted challenger did not report uncertainty. ' + [IO.File]::ReadAllText((Join-Path $ScenarioRoot 'Challenger.err')))
+    if ($challenger.ExitCode -ne 0 -or @($output | Where-Object { $_ -ceq $marker }).Count -ne 1) {
+        $challengerError = [IO.File]::ReadAllText((Join-Path $ScenarioRoot 'Challenger.err'))
+        throw ('The restarted challenger did not report uncertainty. ' + $challengerError)
+    }
     Assert-RestartFixture (
         -not [IO.File]::Exists((Join-Path $ScenarioRoot 'Challenger.dispatch')) -and
         [guid][IO.File]::ReadAllText($queued) -eq $identity -and
