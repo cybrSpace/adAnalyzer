@@ -2298,6 +2298,42 @@ class ADAnalyzerGpoPolicyEvaluator {
         }
     }
 
+    hidden [hashtable] RecordAggregateRegistrySelector([object]$Sample) {
+        # The replayed row identifies the actual selection without reading the rule again.
+        $hive = $Sample.Hive
+        $key = $Sample.Key
+        $name = $Sample.ValueName
+        $path = $Sample.Source
+        $scope = $Sample.Scope
+        if ($key -isnot [string] -or $key.Length -eq 0 -or $name -isnot [string] -or
+            $hive -isnot [string] -or $path -isnot [string] -or $scope -isnot [string] -or
+            -not (($scope -eq 'Computer' -and $path -eq 'Machine/Registry.pol' -and $hive -eq 'HKLM') -or
+                ($scope -eq 'User' -and $path -eq 'User/Registry.pol' -and $hive -eq 'HKCU'))) {
+            return $null
+        }
+
+        # Keep these literal strings outside the JSON reader's date coercion.
+        $recordedKey = ':' + $key
+        $recordedName = ':' + $name
+        $secretType = 'ADAnalyzerSecretIndicator' -as [type]
+        $secretIndicator = $secretType::new()
+        try {
+            if ($secretIndicator.ProjectText($key) -cne $key -or $secretIndicator.ProjectText($name) -cne $name -or
+                $secretIndicator.ProjectText($recordedKey) -cne $recordedKey -or
+                $secretIndicator.ProjectText($recordedName) -cne $recordedName) {
+                return $null
+            }
+        }
+        catch [IO.InvalidDataException] {
+            return $null
+        }
+        return @{
+            Hive = $hive
+            Key = $recordedKey
+            ValueName = $recordedName
+        }
+    }
+
     hidden [void] EvaluateCustomBaseline([hashtable]$state) {
         $Gpo = $state.Gpo
         $Policy = $state.Policy
@@ -2386,6 +2422,19 @@ class ADAnalyzerGpoPolicyEvaluator {
                     catch {
                         $status = 'Invalid'
                     }
+                    $evidence = @{
+                        Path = $sample.Source
+                        Scope = $sample.Scope
+                        Operator = $operator
+                        Aggregate = $true
+                        ExpectedRegistryType = $expectedType
+                    }
+                    if ($kind -eq 'Registry') {
+                        $selector = $this.RecordAggregateRegistrySelector($sample)
+                        if ($null -ne $selector) {
+                            $evidence.RegistrySelector = $selector
+                        }
+                    }
                     $this.Emit($state, @{
                         RuleId = ('GPO.Expected.' + $id)
                         Status = $status
@@ -2394,13 +2443,7 @@ class ADAnalyzerGpoPolicyEvaluator {
                         Target = $checkTarget
                         Observed = $observed
                         Expected = $expected
-                        Evidence = @{
-                            Path = $sample.Source
-                            Scope = $sample.Scope
-                            Operator = $operator
-                            Aggregate = $true
-                            ExpectedRegistryType = $expectedType
-                        }
+                        Evidence = $evidence
                         Message = 'The complete configured value collection was compared as a set within its source and scope.'
                         Applicability = (Get-ADAnalyzerPolicyApplicability $Gpo $sample.Scope $Profile)
                     })

@@ -1289,8 +1289,10 @@ class ADAnalyzerAssessmentComparer {
                 )
                 $observation = $this.ClassifyPresence($hasOld, $hasNew)
                 if ($observation.CompareContents) {
-                    $oldJson = ConvertTo-Json -InputObject ($this.NormalizeValue($old, '')) -Depth 100 -Compress
-                    $newJson = ConvertTo-Json -InputObject ($this.NormalizeValue($new, '')) -Depth 100 -Compress
+                    $oldComparable = $this.GetComparableChecks($key, $old, $projector)
+                    $newComparable = $this.GetComparableChecks($key, $new, $projector)
+                    $oldJson = ConvertTo-Json -InputObject ($this.NormalizeValue($oldComparable, '')) -Depth 100 -Compress
+                    $newJson = ConvertTo-Json -InputObject ($this.NormalizeValue($newComparable, '')) -Depth 100 -Compress
                     $oldFail = @($old | Where-Object Status -in 'Fail', 'Invalid').Count -gt 0
                     $newFail = @($new | Where-Object Status -in 'Fail', 'Invalid').Count -gt 0
                     $oldGood = @($old | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
@@ -1493,10 +1495,79 @@ class ADAnalyzerAssessmentComparer {
                 $predicateChanged = $this.IsRecordedInteger($oldObserved) -and $this.IsRecordedInteger($newObserved)
             }
         }
-        if ($predicateChanged -or $this.RegistryTypePredicateChanged($oldEvidence, $newEvidence, $projector, $missing)) {
+        if ($predicateChanged -or
+            $this.RegistryTypePredicateChanged($oldEvidence, $newEvidence, $projector, $missing) -or
+            $this.RegistrySelectorPredicateChanged($oldEvidence, $newEvidence, $projector)) {
             $Observation.Change = 'Changed'
             $Observation.Reason = 'RulePredicateChanged'
         }
+    }
+
+    hidden [object[]] GetComparableChecks(
+        [string]$Key,
+        [object[]]$Rows,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        if (-not $Key.StartsWith('GPO.EXPECTED.', [StringComparison]::Ordinal)) {
+            return $Rows
+        }
+
+        return @(
+            foreach ($row in $Rows) {
+                $evidence = $Projector.GetValue($row, @('Evidence'))
+                if ($null -eq $this.GetRecordedRegistrySelector($evidence, $Projector)) {
+                    $row
+                    continue
+                }
+
+                # Compare selectors separately so new metadata alone does not change legacy comparisons.
+                $comparableEvidence = $evidence.PSObject.Copy()
+                $comparableEvidence.PSObject.Properties.Remove('RegistrySelector')
+                $comparableRow = $row.PSObject.Copy()
+                $comparableRow.PSObject.Properties['Evidence'].Value = $comparableEvidence
+                $comparableRow
+            }
+        )
+    }
+
+    hidden [object] GetRecordedRegistrySelector([object]$Evidence, [ADAnalyzerEvidenceProjector]$Projector) {
+        $selector = $Projector.GetValue($Evidence, @('RegistrySelector'))
+        if ($null -eq $selector) {
+            return $null
+        }
+
+        $aggregate = $Projector.GetValue($Evidence, @('Aggregate'))
+        $scope = $Projector.GetValue($Evidence, @('Scope'))
+        $path = $Projector.GetValue($Evidence, @('Path'))
+        $hive = $Projector.GetValue($selector, @('Hive'))
+        $key = $Projector.GetValue($selector, @('Key'))
+        $valueName = $Projector.GetValue($selector, @('ValueName'))
+        if ($aggregate -isnot [bool] -or -not $aggregate -or $scope -isnot [string] -or
+            $path -isnot [string] -or $hive -isnot [string] -or $key -isnot [string] -or
+            $key.Length -lt 2 -or $valueName -isnot [string] -or
+            -not $key.StartsWith(':', [StringComparison]::Ordinal) -or
+            -not $valueName.StartsWith(':', [StringComparison]::Ordinal) -or
+            -not (($scope -eq 'Computer' -and $path -eq 'Machine/Registry.pol' -and $hive -eq 'HKLM') -or
+                ($scope -eq 'User' -and $path -eq 'User/Registry.pol' -and $hive -eq 'HKCU'))) {
+            return $null
+        }
+
+        return $selector
+    }
+
+    hidden [bool] RegistrySelectorPredicateChanged(
+        [object]$Before,
+        [object]$After,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        $oldSelector = $this.GetRecordedRegistrySelector($Before, $Projector)
+        $newSelector = $this.GetRecordedRegistrySelector($After, $Projector)
+        if ($null -eq $oldSelector -or $null -eq $newSelector) {
+            return $false
+        }
+        return $oldSelector.Hive -ine $newSelector.Hive -or
+            $oldSelector.Key.Substring(1) -ine $newSelector.Key.Substring(1) -or
+            $oldSelector.ValueName.Substring(1) -ine $newSelector.ValueName.Substring(1)
     }
 
     hidden [bool] RegistryTypePredicateChanged(
@@ -1851,6 +1922,7 @@ function Compare-ADAnalyzerAssessment {
         }
     }
 
+    $projector = [ADAnalyzerEvidenceProjector]::new()
     $changes = @(
         foreach ($key in @(@($maps[0].Keys) + @($maps[1].Keys) | Sort-Object -Unique)) {
             $old = @(
@@ -1865,8 +1937,10 @@ function Compare-ADAnalyzerAssessment {
             )
             $observation = $comparer.ClassifyPresence($maps[0].ContainsKey($key), $maps[1].ContainsKey($key))
             if ($observation.CompareContents) {
-                $oldJson = ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerComparableValue $old) -Depth 100 -Compress
-                $newJson = ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerComparableValue $new) -Depth 100 -Compress
+                $oldComparable = $comparer.GetComparableChecks($key, $old, $projector)
+                $newComparable = $comparer.GetComparableChecks($key, $new, $projector)
+                $oldJson = ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerComparableValue $oldComparable) -Depth 100 -Compress
+                $newJson = ConvertTo-Json -InputObject (ConvertTo-ADAnalyzerComparableValue $newComparable) -Depth 100 -Compress
                 $oldFail = @($old | Where-Object Status -in 'Fail', 'Invalid').Count -gt 0
                 $newFail = @($new | Where-Object Status -in 'Fail', 'Invalid').Count -gt 0
                 $oldGood = @($old | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
@@ -1883,7 +1957,6 @@ function Compare-ADAnalyzerAssessment {
 
     $referenceRunId = Get-ADAnalyzerOperationValue $before @('RunId')
     $differenceRunId = Get-ADAnalyzerOperationValue $after @('RunId')
-    $projector = [ADAnalyzerEvidenceProjector]::new()
     $referenceRunId = $projector.ProjectIdentityMetadata($referenceRunId)
     $differenceRunId = $projector.ProjectIdentityMetadata($differenceRunId)
     $timestamp = $comparer.CreateTimestamp()

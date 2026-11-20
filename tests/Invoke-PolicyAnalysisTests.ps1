@@ -1389,6 +1389,188 @@ Test-Policy 'aggregate security expectations compare a complete multi-string set
     Assert-Policy (((Get-PolicyChecks $policy $profile) | Where-Object RuleId `
                 -eq GPO.Expected.Aggregate).Status -eq 'Fail') 'Changed set member was missed'
 }
+Test-Policy 'aggregate registry comparisons distinguish a different selector from genuine resolution' {
+    $key = 'Software\AggregateFixture'
+    $path = 'Machine/Registry.pol'
+    $ruleId = 'GPO.Expected.AggregateSelector'
+    $policy = New-PolicyFixture
+    $policy.RegistrySettings = @(
+        New-RegistryFixture $key Level ([uint32]1)
+        New-RegistryFixture $key '' ([uint32]3)
+    )
+    $improvedPolicy = New-PolicyFixture
+    $improvedPolicy.RegistrySettings = @(
+        New-RegistryFixture $key Level ([uint32]3)
+        New-RegistryFixture $key '' ([uint32]3)
+    )
+    $utcName = '2026-01-01T00:00:00Z'
+    $offsetName = '2025-12-31T19:00:00-05:00'
+    $dateNamedPolicy = New-PolicyFixture
+    $dateNamedPolicy.RegistrySettings = @(
+        New-RegistryFixture $key $utcName ([uint32]1)
+        New-RegistryFixture $key $offsetName ([uint32]3)
+    )
+    $rule = @{
+        Id = 'AggregateSelector'
+        Key = $key
+        ValueName = 'Level'
+        Expected = @([uint32]3)
+        Type = 4
+        Aggregate = $true
+    }
+    $caseOnlyPolicy = New-PolicyFixture
+    $caseOnlyPolicy.RegistrySettings = @(
+        New-RegistryFixture $key.ToLowerInvariant() level ([uint32]1)
+        New-RegistryFixture $key.ToLowerInvariant() '' ([uint32]3)
+    )
+    $retargetedRule = $rule.Clone()
+    $retargetedRule.ValueName = ''
+    $utcRule = $rule.Clone()
+    $utcRule.ValueName = $utcName
+    $offsetRule = $rule.Clone()
+    $offsetRule.ValueName = $offsetName
+    $equivalentRule = $rule.Clone()
+    $equivalentRule.Hive = 'hklm'
+    $equivalentRule.Key = $key.ToLowerInvariant()
+    $equivalentRule.ValueName = 'level'
+
+    $recordCheck = {
+        param($Artifact, $SelectedRule, [string]$Status, [uint32]$Observed)
+
+        $profile = @{
+            RegistryRules = @($SelectedRule)
+        }
+        $rows = @(Get-PolicyChecks $Artifact $profile | Where-Object RuleId -eq $ruleId)
+        Assert-Policy ($rows.Count -eq 1) 'Expected one aggregate check'
+        $row = $rows[0]
+        Assert-Policy ($row.Status -ceq $Status) ('Unexpected observation status: ' + $row.Status)
+        Assert-Policy ($row.Observed -is [array] -and $row.Observed.Count -eq 1 -and
+            $row.Observed[0] -is [uint32] -and $row.Observed[0] -eq $Observed) 'Unexpected stored DWORD observation'
+        Assert-Policy ($row.Evidence.Path -ceq $path -and $row.Evidence.Scope -ceq 'Computer') 'Aggregate source or scope changed'
+        return $row
+    }
+    $checks = [ordered]@{
+        Reference = & $recordCheck $policy $rule Fail 1
+        Retargeted = & $recordCheck $policy $retargetedRule Pass 3
+        Equivalent = & $recordCheck $policy $equivalentRule Fail 1
+        EquivalentStored = & $recordCheck $caseOnlyPolicy $equivalentRule Fail 1
+        DateNamedReference = & $recordCheck $dateNamedPolicy $utcRule Fail 1
+        DateNamedRetargeted = & $recordCheck $dateNamedPolicy $offsetRule Pass 3
+        Improved = & $recordCheck $improvedPolicy $equivalentRule Pass 3
+    }
+    foreach ($check in $checks.Values) {
+        Assert-Policy ($check.Target -ceq $checks.Reference.Target -and
+            $check.CheckId -ceq $checks.Reference.CheckId) 'The matched aggregate identity changed'
+    }
+    $checks['Legacy'] = $checks.Reference.PSObject.Copy()
+    $legacyEvidence = @{}
+    foreach ($name in $checks.Reference.Evidence.Keys) {
+        if ($name -ne 'RegistrySelector') {
+            $legacyEvidence[$name] = $checks.Reference.Evidence[$name]
+        }
+    }
+    $checks.Legacy.Evidence = $legacyEvidence
+    $documents = [ordered]@{}
+    foreach ($name in $checks.Keys) {
+        $documents[$name] = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = 'fixture.invalid'
+            Checks = @($checks[$name])
+        }
+    }
+
+    $comparer = [ADAnalyzerAssessmentComparer]::new()
+    $cases = @(
+        @('Reference', 'Retargeted', 'Changed', 'RulePredicateChanged'),
+        @('Retargeted', 'Reference', 'Changed', 'RulePredicateChanged'),
+        @('DateNamedReference', 'DateNamedRetargeted', 'Changed', 'RulePredicateChanged'),
+        @('Reference', 'Equivalent', 'Unchanged', $null),
+        @('Reference', 'EquivalentStored', 'Unchanged', $null),
+        @('Legacy', 'Reference', 'Unchanged', $null),
+        @('Reference', 'Improved', 'Resolved', $null),
+        @('Legacy', 'Retargeted', 'Resolved', $null)
+    )
+    $checkComparison = {
+        param($Inputs)
+
+        foreach ($case in $cases) {
+            $before, $after, $change, $reason = $case
+            $results = @(
+                Compare-ADAnalyzerAssessment -Reference $Inputs[$before] -Difference $Inputs[$after]
+                $comparer.Compare($Inputs[$before], $Inputs[$after])
+            )
+            Assert-Policy ($results.Count -eq 2) 'Expected a comparison from each public route'
+            foreach ($result in $results) {
+                Assert-Policy ($result.Changes.Count -eq 1) 'The comparer split the stable aggregate check'
+                $row = $result.Changes[0]
+                Assert-Policy ($row.Change -ceq $change -and $row.Reason -ceq $reason) (
+                    "Comparison $before to $after expected $change/$reason, received $($row.Change)/$($row.Reason)"
+                )
+                Assert-Policy ($result.Summary.$change -eq 1 -and
+                    ($change -eq 'Resolved' -or $result.Summary.Resolved -eq 0)) 'The comparison summary misclassified the check'
+                Assert-Policy ($row.Reference.Count -eq 1 -and $row.Difference.Count -eq 1 -and
+                    $row.Reference[0].Observed[0] -eq $checks[$before].Observed[0] -and
+                    $row.Difference[0].Observed[0] -eq $checks[$after].Observed[0] -and
+                    $row.Reference[0].Evidence.Path -ceq $path -and
+                    $row.Difference[0].Evidence.Path -ceq $path) 'The comparison lost a recorded observation or its source'
+                $referenceSelector = $row.Reference[0].Evidence.RegistrySelector
+                $differenceSelector = $row.Difference[0].Evidence.RegistrySelector
+                foreach ($field in @('Hive', 'Key', 'ValueName')) {
+                    Assert-Policy ($referenceSelector.$field -ceq $checks[$before].Evidence.RegistrySelector.$field -and
+                        $differenceSelector.$field -ceq $checks[$after].Evidence.RegistrySelector.$field) (
+                        'The comparison did not retain recorded selector evidence'
+                    )
+                }
+            }
+        }
+    }
+    & $checkComparison $documents
+
+    foreach ($name in @('Reference', 'Retargeted')) {
+        $selector = $checks[$name].Evidence.RegistrySelector
+        $valueName = if ($name -eq 'Reference') {
+            'Level'
+        }
+        else {
+            ''
+        }
+        Assert-Policy ($selector.Hive -ceq 'HKLM' -and $selector.Key -ceq (':' + $key) -and
+            $selector.ValueName -is [string] -and $selector.ValueName -ceq (':' + $valueName)) 'Expected the selected registry identity'
+    }
+    Assert-Policy ($policy.RegistrySettings[0].Value -eq 1 -and
+        $policy.RegistrySettings[1].Value -eq 3 -and $rule.ValueName -ceq 'Level') 'Evaluation changed the original policy or profile'
+
+    foreach ($unsafeName in @('cpassword="fixture-marker"', '<!DOCTYPE fixture>')) {
+        $unsafePolicy = New-PolicyFixture
+        $unsafePolicy.RegistrySettings = @(New-RegistryFixture $key $unsafeName ([uint32]1))
+        $unsafeRule = $rule.Clone()
+        $unsafeRule.ValueName = $unsafeName
+        $check = & $recordCheck $unsafePolicy $unsafeRule Fail 1
+        Assert-Policy ($null -eq $check.Evidence.RegistrySelector) 'Unsafe selector text entered the recorded identity'
+    }
+
+    $directory = Join-Path ([IO.Path]::GetTempPath()) ('ad-analyzer-selectors-' + [guid]::NewGuid().ToString('N'))
+    $null = [IO.Directory]::CreateDirectory($directory)
+    try {
+        $paths = [ordered]@{}
+        $hashes = @{}
+        foreach ($name in $documents.Keys) {
+            $paths[$name] = Join-Path $directory ($name + '.json')
+            $null = Export-ADAnalyzerAssessment -Assessment $documents[$name] -Path $paths[$name] -Format Json -Confirm:$false
+            $hashes[$name] = (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+        & $checkComparison $paths
+        foreach ($name in $paths.Keys) {
+            Assert-Policy ($hashes[$name] -ceq (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash) (
+                'Comparison rewrote a saved assessment'
+            )
+        }
+    }
+    finally {
+        [IO.Directory]::Delete($directory, $true)
+    }
+}
+
 Test-Policy 'a retained WMI filter keeps applicability unknown despite an assume flag' {
     $profile = Get-ADAnalyzerDefaultProfile
     $profile.Analysis.AssumeGpoApplicable = $true
