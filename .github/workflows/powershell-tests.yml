@@ -3,7 +3,7 @@ name: PowerShell regression tests
 on:
   pull_request:
   push:
-    branches: [main, main.v2]
+    branches: [main.v2]
 
 permissions:
   contents: read
