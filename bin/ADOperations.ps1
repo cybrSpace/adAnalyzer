@@ -1384,17 +1384,29 @@ class ADAnalyzerAssessmentComparer {
             return
         }
 
-        if ($oldOperator -ine $newOperator -or
-            ($oldOperator -in 'Minimum', 'Maximum' -and
-                $this.IsRecordedIntegerBound($oldExpected) -and
-                $this.IsRecordedIntegerBound($newExpected) -and
-                [decimal]$oldExpected -ne [decimal]$newExpected)) {
+        $predicateChanged = $oldOperator -ine $newOperator
+        if (-not $predicateChanged -and
+            $oldOperator -in 'Minimum', 'Maximum', 'Equals', 'NotEquals' -and
+            $this.IsRecordedInteger($oldExpected) -and
+            $this.IsRecordedInteger($newExpected) -and
+            [decimal]$oldExpected -ne [decimal]$newExpected) {
+            $predicateChanged = $oldOperator -in 'Minimum', 'Maximum'
+            if ($oldOperator -in 'Equals', 'NotEquals' -and
+                $projector.GetValue($oldEvidence, @('Aggregate')) -ne $true -and
+                $projector.GetValue($newEvidence, @('Aggregate')) -ne $true) {
+                # Numeric equality is comparable here only for recorded scalar observations.
+                $oldObserved = $projector.GetValue($Before[0], @('Observed'))
+                $newObserved = $projector.GetValue($After[0], @('Observed'))
+                $predicateChanged = $this.IsRecordedInteger($oldObserved) -and $this.IsRecordedInteger($newObserved)
+            }
+        }
+        if ($predicateChanged) {
             $Observation.Change = 'Changed'
             $Observation.Reason = 'RulePredicateChanged'
         }
     }
 
-    hidden [bool] IsRecordedIntegerBound([object]$Value) {
+    hidden [bool] IsRecordedInteger([object]$Value) {
         if ($null -eq $Value -or $Value -is [Enum]) {
             return $false
         }

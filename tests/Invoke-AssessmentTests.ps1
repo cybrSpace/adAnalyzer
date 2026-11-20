@@ -712,7 +712,7 @@ try {
         Assert-Equal 1 $gap.Observed
         Assert-True ($json -notmatch '<Groups') 'Raw XML escaped through the assessment'
     }
-    Test-Assessment 'custom GPO comparison distinguishes changed predicates from observed resolution' {
+    Test-Assessment 'custom GPO comparison distinguishes changed operators, bounds and scalar equality' {
         $ruleId = 'GPO.Expected.FixtureLevel'
         $key = 'Software\Fixture'
         $gpo = [pscustomobject]@{
@@ -745,6 +745,35 @@ try {
                 Observed = 3
                 Operator = 'Minimum'
                 Expected = 2
+                Status = 'Pass'
+            }
+            EqualStrict = @{
+                Observed = 1
+                Expected = [uint32]2
+                Status = 'Fail'
+            }
+            EqualRelaxed = @{
+                Observed = 1
+                Operator = 'Equals'
+                Expected = [int]1
+                Status = 'Pass'
+            }
+            EqualImproved = @{
+                Observed = 2
+                Operator = 'Equals'
+                Expected = [long]2
+                Status = 'Pass'
+            }
+            NotEqualStrict = @{
+                Observed = 1
+                Operator = 'NotEquals'
+                Expected = [uint32]1
+                Status = 'Fail'
+            }
+            NotEqualRelaxed = @{
+                Observed = 1
+                Operator = 'NotEquals'
+                Expected = [int]2
                 Status = 'Pass'
             }
             AggregateLow = @{
@@ -783,9 +812,13 @@ try {
                 Hive = 'HKLM'
                 Key = $key
                 ValueName = 'Level'
-                Operator = $inputCase.Operator
                 Expected = $inputCase.Expected
                 Type = 4
+            }
+            $operator = 'Equals'
+            if ($inputCase.ContainsKey('Operator')) {
+                $operator = $inputCase.Operator
+                $rule.Operator = $operator
             }
             if ($inputCase.ContainsKey('Aggregate')) {
                 $rule.Aggregate = $true
@@ -804,9 +837,18 @@ try {
             $checks[$name] = $ruleChecks[0]
             Assert-Equal $inputCase.Status $ruleChecks[0].Status
             Assert-Equal $inputCase.Observed (@($ruleChecks[0].Observed)[0])
-            Assert-Equal $inputCase.Operator $ruleChecks[0].Evidence.Operator
+            Assert-Equal $operator $ruleChecks[0].Evidence.Operator
         }
-        foreach ($name in @('Inverted', 'Relaxed', 'Improved')) {
+        foreach ($name in @(
+            'Inverted'
+            'Relaxed'
+            'Improved'
+            'EqualStrict'
+            'EqualRelaxed'
+            'EqualImproved'
+            'NotEqualStrict'
+            'NotEqualRelaxed'
+        )) {
             Assert-Equal $checks.Strict.CheckId $checks[$name].CheckId
         }
         Assert-Equal $checks.AggregateLow.CheckId $checks.AggregateHigh.CheckId
@@ -821,6 +863,13 @@ try {
                     Observed = $checks.Relaxed.Observed
                     Expected = $checks.Relaxed.Expected
                 })
+        }
+        $legacyEqual = $checks.EqualRelaxed.PSObject.Copy()
+        $legacyEqual.PSObject.Properties.Remove('Expected')
+        $assessments.LegacyEqual = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $assessments.Strict.Target
+            Checks = @($legacyEqual)
         }
         $unknown = $checks.Relaxed.PSObject.Copy()
         $unknown.Status = 'Unknown'
@@ -845,6 +894,12 @@ try {
             @('Strict', 'Relaxed', 'Changed', 'RulePredicateChanged'),
             @('Relaxed', 'Strict', 'Changed', 'RulePredicateChanged'),
             @('Strict', 'Improved', 'Resolved', $null),
+            @('EqualStrict', 'EqualRelaxed', 'Changed', 'RulePredicateChanged'),
+            @('EqualRelaxed', 'EqualStrict', 'Changed', 'RulePredicateChanged'),
+            @('EqualStrict', 'EqualImproved', 'Resolved', $null),
+            @('NotEqualStrict', 'NotEqualRelaxed', 'Changed', 'RulePredicateChanged'),
+            @('NotEqualRelaxed', 'NotEqualStrict', 'Changed', 'RulePredicateChanged'),
+            @('EqualStrict', 'LegacyEqual', 'Resolved', $null),
             @('AggregateLow', 'AggregateHigh', 'Resolved', $null),
             @('Strict', 'Legacy', 'Resolved', $null),
             @('Strict', 'Unknown', 'Changed', $null),
@@ -863,7 +918,9 @@ try {
                 foreach ($result in @($commandResult, $classResult)) {
                     $changes = @($result.Changes | Where-Object RuleId -eq $ruleId)
                     Assert-Equal 1 $changes.Count
-                    Assert-Equal $expectedChange $changes[0].Change
+                    Assert-True ($changes[0].Change -eq $expectedChange) (
+                        "Comparison $before to $after expected $expectedChange, received $($changes[0].Change)"
+                    )
                     Assert-Equal $expectedReason $changes[0].Reason
                     if ($before -eq 'Unobserved') {
                         Assert-Equal 0 $changes[0].Reference.Count
