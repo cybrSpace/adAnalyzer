@@ -661,6 +661,84 @@ if($null -eq $caught -or $caught.Exception.Message -ne 'Value baselines for secr
         Assert-Equal $a.CheckId $b.CheckId
         Assert-True ($a.CheckId -ne $c.CheckId) 'Different targets collided'
     }
+    Invoke-Test 'cold offline prerequisites only look for an already loaded command' {
+        $fixture = Join-Path $temporary 'offline-prerequisite-discovery.ps1'
+        $body = @'
+param([Parameter(Mandatory)][string]$RepositoryRoot)
+
+$ErrorActionPreference = 'Stop'
+$entryPoint = Join-Path $RepositoryRoot 'bin/Start-ADAnalyzer.ps1'
+. $entryPoint
+
+$loaded = Microsoft.PowerShell.Core\Get-Command -Name Get-ADAnalyzerPrerequisite -ListImported -ErrorAction SilentlyContinue
+if ($loaded) {
+    throw 'The cold fixture started with a prerequisite command already loaded.'
+}
+
+$script:prerequisiteLookups = [Collections.Generic.List[bool]]::new()
+$script:explicitImportAttempts = 0
+function script:Get-Command {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, Position = 0)][string]$Name,
+        [switch]$ListImported
+    )
+
+    if ($Name -cne 'Get-ADAnalyzerPrerequisite') {
+        throw 'The offline prerequisite path tried to discover an unexpected command.'
+    }
+    $script:prerequisiteLookups.Add($ListImported.IsPresent)
+    # Simulate no loaded match. Never run native discovery or load a module here.
+}
+
+function script:Import-Module {
+    $script:explicitImportAttempts++
+    throw 'The offline prerequisite path tried to import a module explicitly.'
+}
+
+# Calibrate the mock with an unrestricted request that cannot reach discovery.
+$null = Get-Command Get-ADAnalyzerPrerequisite -ErrorAction SilentlyContinue
+if ($script:prerequisiteLookups.Count -ne 1 -or $script:prerequisiteLookups[0]) {
+    throw 'The fixture failed to distinguish unrestricted discovery.'
+}
+$script:prerequisiteLookups.Clear()
+
+$checks = @(Start-ADAnalyzer -Operation prerequisites)
+if ($script:prerequisiteLookups.Count -ne 1 -or -not $script:prerequisiteLookups[0]) {
+    throw 'Cold offline prerequisites did not restrict discovery to loaded commands.'
+}
+if ($script:explicitImportAttempts) {
+    throw 'Cold offline prerequisites attempted an explicit module import.'
+}
+
+$powershell = @($checks | Where-Object RuleId -EQ 'PACKAGE.POWERSHELL')
+$assembly = @($checks | Where-Object RuleId -EQ 'PACKAGE.BUNDLED_AD')
+if ($powershell.Count -ne 1 -or $powershell[0].Target -ne $RepositoryRoot -or
+    $assembly.Count -ne 1 -or $assembly[0].Status -ne 'Pass') {
+    throw 'Cold offline prerequisites did not run the package-owned fallback.'
+}
+if (@($checks | Where-Object RuleId -NotLike 'PACKAGE.*').Count) {
+    throw 'The offline check emitted a non-package result.'
+}
+
+'PASS offline prerequisite fetched package checks using loaded-only discovery'
+'@
+        Set-Content -LiteralPath $fixture -Value $body -Encoding UTF8
+
+        $engine = (Get-Process -Id $PID).Path
+        $arguments = @(
+            '-NoLogo'
+            '-NoProfile'
+            '-NonInteractive'
+            '-File'
+            $fixture
+            '-RepositoryRoot'
+            $RepositoryRoot
+        )
+        $output = @(& $engine @arguments)
+        Assert-Equal 0 $LASTEXITCODE
+        Assert-True (($output -join ' ') -match 'PASS offline prerequisite fetched package checks using loaded-only discovery') ($output -join [Environment]::NewLine)
+    }
     Invoke-Test 'prerequisite CLI honors the same domain target argument' {
 
         function Get-ADAnalyzerPrerequisite {
@@ -674,10 +752,12 @@ if($null -eq $caught -or $caught.Exception.Message -ne 'Value baselines for secr
             ) [pscustomobject]@{
                 Observed = $Server
                 Status = 'Pass'
+                Online = $Online.IsPresent
             }
         }
         $result = Start-ADAnalyzer -Operation prerequisites -FQDN target.example.invalid -Online
         Assert-Equal target.example.invalid $result.Observed
+        Assert-Equal $true $result.Online
     }
     $harness = Join-Path $temporary 'cli-harness.ps1'
     $harnessSource = @'

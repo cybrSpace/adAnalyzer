@@ -626,6 +626,8 @@ Journal paths resolve once against the caller's PowerShell FileSystem location a
 
 `Get-ADAnalyzerPrerequisite` reports platform/runtime, bundled DLL version/hash and optional ADWS/SMB reachability/authentication. `DependencyHashes` may pin a trusted SHA256 for `Microsoft.ActiveDirectory.Management.dll`; availability is not signature verification. `Start-ADAnalyzer -Operation prerequisites -FQDN example.com -Online` accepts the same target/profile configuration. No prerequisite command installs RSAT or changes domain/host configuration.
 
+The standalone prerequisites path uses an already-loaded prerequisite command or loads the local implementation. Cold offline startup reads package metadata. Network checks require explicit `-Online`.
+
 Assessment state describes evidence completeness. Invalid stored values or observations produce `Partial`, as do unknown evidence and collection errors. A fully evaluated failed check can still belong to a `Complete` assessment; `Complete` does not mean compliant.
 
 ## Validation
