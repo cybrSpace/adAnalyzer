@@ -670,7 +670,9 @@ class ADAnalyzerGpoSourceNormalizer {
         $normalizer = $this
         foreach ($field in $normalizer.RecordCollections()) {
             foreach ($record in @($Policy.$field)) {
-                if ($normalizer.IsUnsupportedRecord(@{ Record = $record })) {
+                if ($normalizer.IsUnsupportedRecord(@{
+                            Record = $record
+                        })) {
                     throw 'InputObject policy records must use package report objects or JSON objects.'
                 }
             }
@@ -721,7 +723,9 @@ class ADAnalyzerGpoSourceNormalizer {
                     $null -ne $_
                 } | ForEach-Object {
                     $record = ConvertTo-ADAnalyzerSecretRecord $_.PSObject.Copy()
-                    if ($normalizer.RequiresBinaryConversion(@{ Type = $record.Type }) -and
+                    if ($normalizer.RequiresBinaryConversion(@{
+                                Type = $record.Type
+                            }) -and
                         ($null -ne $record.PSObject.Properties['Value'] -or
                             $null -eq $record.PSObject.Properties['SecretPresent']) -and
                         $record.Value -is [array]) {
@@ -803,7 +807,9 @@ function ConvertTo-ADAnalyzerProvidedGpoPolicy {
     # Keep native XML, property observations, and binary casts in command scope.
     foreach ($field in $normalizer.RecordCollections()) {
         foreach ($record in @($Policy.$field)) {
-            if ($normalizer.IsUnsupportedRecord(@{ Record = $record })) {
+            if ($normalizer.IsUnsupportedRecord(@{
+                        Record = $record
+                    })) {
                 throw 'InputObject policy records must use package report objects or JSON objects.'
             }
         }
@@ -854,7 +860,9 @@ function ConvertTo-ADAnalyzerProvidedGpoPolicy {
                 $null -ne $_
             } | ForEach-Object {
                 $record = ConvertTo-ADAnalyzerSecretRecord $_.PSObject.Copy()
-                if ($normalizer.RequiresBinaryConversion(@{ Type = $record.Type }) -and
+                if ($normalizer.RequiresBinaryConversion(@{
+                            Type = $record.Type
+                        }) -and
                     ($null -ne $record.PSObject.Properties['Value'] -or
                         $null -eq $record.PSObject.Properties['SecretPresent']) -and
                     $record.Value -is [array]) {
@@ -1002,12 +1010,18 @@ class ADAnalyzerGpoCatalog {
     }
 
     hidden [object[]] Discover(
-        [string]$Domain, [string]$Server, [pscredential]$Credential,
-        [string]$Selection, [guid]$Guid, [string]$Name
+        [string]$Domain,
+        [string]$Server,
+        [pscredential]$Credential,
+        [string]$Selection,
+        [guid]$Guid,
+        [string]$Name
     ) {
         $ErrorActionPreference = 'Stop'
         $catalog = $this
-        if (-not $catalog.IsHostName(@{ Value = $Server })) {
+        if (-not $catalog.IsHostName(@{
+                    Value = $Server
+                })) {
             throw 'Server must be a DNS or NetBIOS host name'
         }
         if ([string]::IsNullOrWhiteSpace($Domain)) {
@@ -1033,17 +1047,23 @@ class ADAnalyzerGpoCatalog {
         $connection = $catalog.NewConnection($Server, $Credential)
         $requestedServer = $Server
         $rootDse = & $rootCommand @connection
-        if (-not $catalog.IsHostName(@{ Value = $rootDse.DnsHostName })) {
+        if (-not $catalog.IsHostName(@{
+                    Value = $rootDse.DnsHostName
+                })) {
             throw 'The directory server did not return a valid DC host name'
         }
         $Server = [string]$rootDse.DnsHostName
-        if (-not $catalog.IsHostName(@{ Value = $Server })) {
+        if (-not $catalog.IsHostName(@{
+                    Value = $Server
+                })) {
             throw 'The directory server did not return a valid DC host name'
         }
         $connection.Server = $Server
         $domainInfo = & $domainCommand -Identity $Domain @connection
         $dns = [string]$domainInfo.DNSRoot
-        if (-not $catalog.IsHostName(@{ Value = $dns })) {
+        if (-not $catalog.IsHostName(@{
+                    Value = $dns
+                })) {
             throw 'Invalid domain DNS name'
         }
 
@@ -1067,7 +1087,10 @@ class ADAnalyzerGpoCatalog {
             if ($selection -eq 'Guid' -and $catalog.RejectGuid($id, $Guid)) {
                 continue
             }
-            if ($selection -eq 'Name' -and $catalog.RejectName(@{ Name = $object.displayName }, $Name)) {
+            if ($selection -eq 'Name' -and
+                $catalog.RejectName(@{
+                        Name = $object.displayName
+                    }, $Name)) {
                 continue
             }
 
@@ -1140,7 +1163,9 @@ function Get-ADAnalyzerGpo {
     )
     $catalog = [ADAnalyzerGpoCatalog]::new()
     $selection = $PSCmdlet.ParameterSetName
-    if (-not $catalog.IsHostName(@{ Value = $Server })) {
+    if (-not $catalog.IsHostName(@{
+                Value = $Server
+            })) {
         throw 'Server must be a DNS or NetBIOS host name'
     }
 
@@ -1148,14 +1173,18 @@ function Get-ADAnalyzerGpo {
     $connection = $catalog.NewConnection($Server, $Credential)
     $requestedServer = $Server
     $rootDse = Get-ADRootDSE @connection
-    if (-not $catalog.IsHostName(@{ Value = $rootDse.DnsHostName })) {
+    if (-not $catalog.IsHostName(@{
+                Value = $rootDse.DnsHostName
+            })) {
         throw 'The directory server did not return a valid DC host name'
     }
     $Server = [string]$rootDse.DnsHostName
     $connection.Server = $Server
     $domainInfo = Get-ADDomain -Identity $Domain @connection
     $dns = [string]$domainInfo.DNSRoot
-    if (-not $catalog.IsHostName(@{ Value = $dns })) {
+    if (-not $catalog.IsHostName(@{
+                Value = $dns
+            })) {
         throw 'Invalid domain DNS name'
     }
 
@@ -1183,7 +1212,10 @@ function Get-ADAnalyzerGpo {
         if ($selection -eq 'Guid' -and $catalog.RejectGuid($id, $Guid)) {
             continue
         }
-        if ($selection -eq 'Name' -and $catalog.RejectName(@{ Name = $object.displayName }, $Name)) {
+        if ($selection -eq 'Name' -and
+            $catalog.RejectName(@{
+                    Name = $object.displayName
+                }, $Name)) {
             continue
         }
 
@@ -1257,7 +1289,12 @@ class ADAnalyzerGpoXmlWriter {
         return $this.Render($Gpo, $Policy, @{}, @{})
     }
 
-    [string] Render([object]$Gpo, [object]$Policy, [hashtable]$SidNames, [hashtable]$SidStatus) {
+    [string] Render(
+        [object]$Gpo,
+        [object]$Policy,
+        [hashtable]$SidNames,
+        [hashtable]$SidStatus
+    ) {
         $writer = $this
         $Parsed = $Policy
         $appendSourceNode = {
@@ -1824,15 +1861,22 @@ class ADAnalyzerGpoReportService {
     }
 
     hidden [object] ReadReport(
-        [object]$Gpo, [pscredential]$Credential, [bool]$AsXml, [hashtable]$SidNames
+        [object]$Gpo,
+        [pscredential]$Credential,
+        [bool]$AsXml,
+        [hashtable]$SidNames
     ) {
         $ErrorActionPreference = 'Stop'
         $report = $this
         $server = $null
         $domain = $null
         if ($null -eq $Gpo -or
-            -not $report.IsHostName(@{ Value = ($server = $Gpo.Server) }) -or
-            -not $report.IsHostName(@{ Value = ($domain = $Gpo.Domain) })) {
+            -not $report.IsHostName(@{
+                    Value = ($server = $Gpo.Server)
+                }) -or
+            -not $report.IsHostName(@{
+                    Value = ($domain = $Gpo.Domain)
+                })) {
             throw 'Invalid GPO server/domain'
         }
         $id = [guid]$Gpo.Id
@@ -1916,8 +1960,12 @@ function Get-ADAnalyzerGpoReport {
         $Gpo = $Gpo[0]
     }
     # Use only the single validated target for SYSVOL and directory lookups.
-    if (-not $report.IsHostName(@{ Value = ($reportServer = $Gpo.Server) }) -or
-        -not $report.IsHostName(@{ Value = ($reportDomain = $Gpo.Domain) })) {
+    if (-not $report.IsHostName(@{
+                Value = ($reportServer = $Gpo.Server)
+            }) -or
+        -not $report.IsHostName(@{
+                Value = ($reportDomain = $Gpo.Domain)
+            })) {
         throw 'Invalid GPO server/domain'
     }
     $id = [guid]$Gpo.Id

@@ -68,7 +68,9 @@ This is a file-based policy reader, not a GPMC HTML report generator or an ADMX 
 ```powershell
 . .\etc\New-ADPASUser.ps1
 $importer = [ADAnalyzerPasUserImporter]::new()
-$options = @{ Server = 'dc01.example.com' }
+$options = @{
+    Server = 'dc01.example.com'
+}
 $plan = $importer.Preview('.\pas-users.csv', $options)
 $plan.Actions | Select-Object ActionId, Username, Path, Status, PasswordPresent
 
@@ -85,7 +87,9 @@ The prototype's `Format-WindowsServerException` uses local classification state 
 ```powershell
 . .\bin\ADHostScanState.ps1
 $formatter = [ADAnalyzerHostScanState]::new()
-$attempts = [hashtable]::Synchronized(@{ attempt = 0 })
+$attempts = [hashtable]::Synchronized(@{
+    attempt = 0
+})
 $rules = [ordered]@{
     denied = @{
         msg = 'access denied'

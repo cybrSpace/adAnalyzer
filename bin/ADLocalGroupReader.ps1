@@ -63,7 +63,10 @@ class ADAnalyzerLocalGroupReader {
             $principalContext = $Framework.PrincipalContext
             if ($this.UsesCredential($Credential)) {
                 $context = $principalContext::new(
-                    $Framework.Machine, $Computer, $Credential.UserName, $Credential.GetNetworkCredential().Password
+                    $Framework.Machine,
+                    $Computer,
+                    $Credential.UserName,
+                    $Credential.GetNetworkCredential().Password
                 )
             }
             else {
@@ -204,7 +207,11 @@ class ADAnalyzerLocalGroupReader {
         return [string]::IsNullOrEmpty([string]$Name)
     }
 
-    hidden [Collections.Specialized.OrderedDictionary] NewRow([string]$Computer, [object]$Domain, [object]$Sam) {
+    hidden [Collections.Specialized.OrderedDictionary] NewRow(
+        [string]$Computer,
+        [object]$Domain,
+        [object]$Sam
+    ) {
         return [ordered]@{
             Computer = $Computer
             Domain = $Domain

@@ -56,7 +56,9 @@ class ADAnalyzerSecretIndicator {
                 if ($null -eq $rule) {
                     continue
                 }
-                $inputFrame = @{ Record = $rule }
+                $inputFrame = @{
+                    Record = $rule
+                }
                 foreach ($field in @('Kind', 'Name', 'Key', 'ValueName')) {
                     if ((Test-ADAnalyzerOptionalSecretRecordMember $inputFrame $field) -and
                         $null -ne $rule.$field -and $rule.$field -isnot [string]) {
@@ -117,7 +119,9 @@ class ADAnalyzerSecretIndicator {
         if ($null -eq $Record) {
             throw [ArgumentNullException]::new('Record')
         }
-        $inputFrame = @{ Record = $Record }
+        $inputFrame = @{
+            Record = $Record
+        }
         $secret = $false
         $identityLabels = @('Name', 'ValueName', 'Attribute', 'PropertyName')
         foreach ($label in $identityLabels) {

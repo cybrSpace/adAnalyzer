@@ -109,7 +109,9 @@ class ADAnalyzerAssessmentEngine {
             $null = $checks.Add($check)
         }
         # A snapshot can omit HostChecks when host policy was not requested.
-        if (Test-ADAnalyzerOptionalSecretRecordMember @{ Record = $DirectoryData } 'HostChecks') {
+        if (Test-ADAnalyzerOptionalSecretRecordMember @{
+                Record = $DirectoryData
+            } 'HostChecks') {
             foreach ($check in @($DirectoryData.HostChecks | Where-Object { $null -ne $_ })) {
                 $null = $checks.Add($check)
             }

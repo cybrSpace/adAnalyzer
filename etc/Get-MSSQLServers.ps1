@@ -204,7 +204,12 @@ class ADAnalyzerSqlServiceInventory {
                     $cleanupErrors.Add($_)
                 }
                 try {
-                    Remove-PSDrive -Name $drive.Name -Scope Local -Force -ErrorAction Stop -WhatIf:$false -Confirm:$false
+                    Remove-PSDrive -Name $drive.Name `
+                        -Scope Local `
+                        -Force `
+                        -ErrorAction Stop `
+                        -WhatIf:$false `
+                        -Confirm:$false
                 }
                 catch {
                     $cleanupErrors.Add($_)
@@ -268,8 +273,11 @@ class ADAnalyzerSqlServiceInventory {
         elseif ($services.Count) {
             foreach ($service in $services) {
                 $Results.Finding(
-                    $Computer.Name, [string]$service.Name, [string]$service.DisplayName,
-                    [string]$service.State, $messages.Cleanup
+                    $Computer.Name,
+                    [string]$service.Name,
+                    [string]$service.DisplayName,
+                    [string]$service.State,
+                    $messages.Cleanup
                 )
             }
         }

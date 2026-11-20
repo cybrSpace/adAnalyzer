@@ -304,7 +304,10 @@ class ADAnalyzerPasUserImporter {
         }
     }
 
-    hidden [Collections.Specialized.OrderedDictionary] ReadReviewFields([object]$Value, [string]$Failure) {
+    hidden [Collections.Specialized.OrderedDictionary] ReadReviewFields(
+        [object]$Value,
+        [string]$Failure
+    ) {
         if ($Value -isnot [pscustomobject]) {
             throw $Failure
         }
@@ -324,9 +327,12 @@ class ADAnalyzerPasUserImporter {
         $expectedPlan = 'SchemaVersion,CsvPath,Server,NamingContext,Actions,Fingerprint'
         if (($planFields.get_Keys() -join ',') -cne $expectedPlan -or
             ($planFields.SchemaVersion -isnot [int] -and $planFields.SchemaVersion -isnot [long]) -or
-            $planFields.SchemaVersion -ne 1 -or $planFields.CsvPath -isnot [string] -or
-            $planFields.Server -isnot [string] -or $planFields.NamingContext -isnot [string] -or
-            $planFields.Actions -isnot [object[]] -or $planFields.Fingerprint -isnot [string] -or
+            $planFields.SchemaVersion -ne 1 -or
+            $planFields.CsvPath -isnot [string] -or
+            $planFields.Server -isnot [string] -or
+            $planFields.NamingContext -isnot [string] -or
+            $planFields.Actions -isnot [object[]] -or
+            $planFields.Fingerprint -isnot [string] -or
             $planFields.Fingerprint -cnotmatch '^[0-9a-f]{64}$') {
             throw $planError
         }
@@ -338,12 +344,16 @@ class ADAnalyzerPasUserImporter {
         foreach ($record in $planFields.Actions) {
             $action = $this.ReadReviewFields($record, $actionError)
             if (($action.get_Keys() -join ',') -cne $expectedAction -or
-                $action.ActionId -isnot [string] -or $action.ActionId -cnotmatch '^[0-9a-f]{64}$' -or
+                $action.ActionId -isnot [string] -or
+                $action.ActionId -cnotmatch '^[0-9a-f]{64}$' -or
                 -not $ids.Add($action.ActionId) -or
                 ($action.RowNumber -isnot [int] -and $action.RowNumber -isnot [long]) -or
-                $action.RowNumber -ne ($actions.Count + 1) -or $action.Username -isnot [string] -or
-                $action.Status -isnot [string] -or $action.Status -cnotin @('Pending', 'Existing') -or
-                $action.Name -isnot [string] -or $action.Path -isnot [string] -or
+                $action.RowNumber -ne ($actions.Count + 1) -or
+                $action.Username -isnot [string] -or
+                $action.Status -isnot [string] -or
+                $action.Status -cnotin @('Pending', 'Existing') -or
+                $action.Name -isnot [string] -or
+                $action.Path -isnot [string] -or
                 $action.PasswordPresent -isnot [bool]) {
                 throw $actionError
             }

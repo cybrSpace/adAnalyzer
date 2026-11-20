@@ -1288,11 +1288,22 @@ class ADAnalyzerDirectoryCollector {
         $expectedDrive = $null
         $connectionError = $null
         $query = {
-            param($Command, $Arguments, $Key)
+            param(
+                $Command,
+                $Arguments,
+                $Key
+            )
 
             $splat = @{} + $common + $Arguments
             $collector.ObserveQuery(
-                $capabilities[$Command], $splat, $Key, $coverage, $errors, $server, $expectedDrive, $connectionError
+                $capabilities[$Command],
+                $splat,
+                $Key,
+                $coverage,
+                $errors,
+                $server,
+                $expectedDrive,
+                $connectionError
             )
         }
         $root = @(& $query 'Get-ADRootDSE' @{} 'RootDSE') | Select-Object -First 1

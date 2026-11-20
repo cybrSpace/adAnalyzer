@@ -12,8 +12,14 @@ class ADAnalyzerLocalAdministratorInventory {
         $rows = [Collections.Generic.List[object]]::new()
         foreach ($member in $members) {
             $row = $this.BuildRow(
-                $member.Domain, $member.Name, $member.Class, $machine,
-                $member.SID, $member.SidValid, $null, $member.Message
+                $member.Domain,
+                $member.Name,
+                $member.Class,
+                $machine,
+                $member.SID,
+                $member.SidValid,
+                $null,
+                $member.Message
             )
             if ($this.NeedsLocalUser($row)) {
                 try {
@@ -61,8 +67,14 @@ class ADAnalyzerLocalAdministratorInventory {
         }
 
         return $this.BuildRow(
-            $metadata.Domain, $metadata.Name, $metadata.Class, $MachineName,
-            $metadata.SID, $metadata.SidValid, $metadata.EnabledEvidence, $metadata.Message
+            $metadata.Domain,
+            $metadata.Name,
+            $metadata.Class,
+            $MachineName,
+            $metadata.SID,
+            $metadata.SidValid,
+            $metadata.EnabledEvidence,
+            $metadata.Message
         )
     }
 

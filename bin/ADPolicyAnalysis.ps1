@@ -528,7 +528,9 @@ class ADAnalyzerGpoPolicyRecordParser {
         $records = $this.ReadXmlRecords($XmlFiles)
         $results = [Collections.Generic.List[object]]::new()
         foreach ($record in $records) {
-            foreach ($item in $this.SelectLocalGroupItems(@{ Record = $record })) {
+            foreach ($item in $this.SelectLocalGroupItems(@{
+                        Record = $record
+                    })) {
                 $results.Add($this.ParseLocalGroupItem(@{
                     Record = $record
                     Item = $item
@@ -817,7 +819,9 @@ function ConvertFrom-ADAnalyzerLocalUsersGroups {
     $parser = [ADAnalyzerGpoPolicyRecordParser]::new()
     foreach ($record in @(Get-ADAnalyzerPolicyXmlRecords $XmlFiles)) {
         # Emit each item before reading metadata for the next file item.
-        foreach ($item in $parser.SelectLocalGroupItems(@{ Record = $record })) {
+        foreach ($item in $parser.SelectLocalGroupItems(@{
+                    Record = $record
+                })) {
             $parser.ParseLocalGroupItem(@{
                 Record = $record
                 Item = $item
@@ -904,7 +908,9 @@ class ADAnalyzerRegistryPolicyReplay {
                 continue
             }
 
-            if ($action -eq 'Write' -and $this.CanWrite(@{ KeyOnly = $row.KeyOnly })) {
+            if ($action -eq 'Write' -and $this.CanWrite(@{
+                        KeyOnly = $row.KeyOnly
+                    })) {
                 $copy = [ordered]@{}
                 foreach ($property in $row.PSObject.Properties) {
                     $copy[$property.Name] = $property.Value
@@ -1096,7 +1102,9 @@ function Get-ADAnalyzerEffectiveRegistryRecords {
             continue
         }
 
-        if ($action -eq 'Write' -and $replay.CanWrite(@{ KeyOnly = $row.KeyOnly })) {
+        if ($action -eq 'Write' -and $replay.CanWrite(@{
+                    KeyOnly = $row.KeyOnly
+                })) {
             $copy = [ordered]@{}
             foreach ($property in $row.PSObject.Properties) {
                 $copy[$property.Name] = $property.Value
@@ -2559,7 +2567,9 @@ class ADAnalyzerAdmxResolver {
         $catalogue = $this.LoadCatalogue($TemplatePath, $Language)
         $results = [Collections.Generic.List[object]]::new()
         foreach ($row in $RegistrySettings) {
-            $selection = $this.SelectResolution(@{ Record = $row }, $catalogue)
+            $selection = $this.SelectResolution(@{
+                    Record = $row
+                }, $catalogue)
             if ($null -ne $selection.PresenceRecord) {
                 $results.Add($selection.PresenceRecord)
                 continue
@@ -2919,7 +2929,9 @@ function Resolve-ADAnalyzerRegistryPolicy {
 
     foreach ($row in @($RegistrySettings)) {
         $selection = $null
-        $selection = $resolver.SelectResolution(@{ Record = $row }, $catalogue)
+        $selection = $resolver.SelectResolution(@{
+                Record = $row
+            }, $catalogue)
         if ($null -eq $selection) {
             continue
         }
