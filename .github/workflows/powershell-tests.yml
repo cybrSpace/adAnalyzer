@@ -3,7 +3,7 @@ name: PowerShell regression tests
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, main.v2]
 
 permissions:
   contents: read
@@ -29,6 +29,29 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Verify the checked-out revision and RSAT-free runner
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $commit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $commit -cne $env:GITHUB_SHA) {
+              throw 'The test checkout does not match the event commit'
+          }
+          $tree = git rev-parse 'HEAD^{tree}'
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Could not read the test checkout tree'
+          }
+          Write-Host "TEST_COMMIT=$commit"
+          Write-Host "TEST_TREE=$tree"
+          $featureNames = @('RSAT-AD-Tools', 'RSAT-AD-PowerShell', 'GPMC')
+          $features = @(Get-WindowsFeature -Name $featureNames)
+          foreach ($name in $featureNames) {
+              $feature = @($features | Where-Object Name -EQ $name)
+              if ($feature.Count -ne 1 -or $feature[0].Installed) {
+                  throw "Windows feature is installed or its state is unknown: $name"
+              }
+              Write-Host "WINDOWS_FEATURE=$name INSTALL_STATE=$($feature[0].InstallState)"
+          }
       - name: Select pinned test engine
         shell: powershell
         env:
@@ -76,3 +99,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
           }
+
+      - name: Recheck the checkout after tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $commit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $commit -cne $env:GITHUB_SHA) {
+              throw 'The test checkout changed commits'
+          }
+          $changes = @(git status --porcelain=v1 --untracked-files=no)
+          if ($LASTEXITCODE -ne 0 -or $changes.Count -gt 0) {
+              throw 'The test checkout has tracked changes'
+          }
+          Write-Host 'Test source is unchanged after tests'
