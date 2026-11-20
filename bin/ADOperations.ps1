@@ -3083,6 +3083,22 @@ function Assert-ADAnalyzerOperationInactivity {
     # it is not an authoritative all-DC lastLogon sweep.
 }
 
+function Initialize-ADAnalyzerJournalTypes {
+    if ('ADAnalyzer.JournalLease' -as [type]) {
+        return
+    }
+    try {
+        Add-Type -Path (Join-Path $PSScriptRoot 'ADJournalLease.cs') -ErrorAction Stop
+    }
+    catch {
+        # A concurrent runspace may have loaded the same package types.
+        if (-not ('ADAnalyzer.JournalLease' -as [type]) -or
+            -not ('ADAnalyzer.AccountEffectReservation' -as [type])) {
+            throw
+        }
+    }
+}
+
 class ADAnalyzerRemediationJournal : System.IDisposable {
     hidden [object] $Lease
     hidden [object] $OwnershipGate
@@ -3281,11 +3297,8 @@ class ADAnalyzerRemediationJournal : System.IDisposable {
     }
 
     hidden [object] AcquireLease([string]$Path, [string]$PlanId, [string]$Server) {
-        $leaseType = 'ADAnalyzer.JournalLease' -as [type]
-        if ($null -eq $leaseType) {
-            Add-Type -Path (Join-Path $PSScriptRoot 'ADJournalLease.cs') -ErrorAction Stop
-            $leaseType = [type]'ADAnalyzer.JournalLease'
-        }
+        Initialize-ADAnalyzerJournalTypes
+        $leaseType = [type]'ADAnalyzer.JournalLease'
         try {
             return $leaseType::Open($Path, $PlanId, $Server, $this)
         }
@@ -3519,8 +3532,57 @@ function Assert-ADAnalyzerOperationPlan {
     }
 }
 
+function Get-ADAnalyzerRemediationAuthorityDirectory {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        throw 'The remediation account reservation requires a designated Windows host.'
+    }
+
+    $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    if ($programData -notmatch '^[A-Za-z]:\\') {
+        throw 'The remediation account reservation requires a local ProgramData directory.'
+    }
+    $path = [IO.Path]::Combine($programData, 'ADAnalyzer.Remediation')
+    $directory = [IO.DirectoryInfo]::new($path)
+    if (-not $directory.Exists -or
+        [IO.DriveInfo]::new($directory.Root.FullName).DriveType -ne [IO.DriveType]::Fixed) {
+        throw 'The protected ADAnalyzer.Remediation directory must be provisioned on the designated Windows host.'
+    }
+
+    $component = $directory
+    while ($null -ne $component) {
+        if (($component.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The remediation account reservation directory cannot use a reparse point.'
+        }
+        $component = $component.Parent
+    }
+    return $directory.FullName
+}
+
 class ADAnalyzerRemediationExecutor {
     ADAnalyzerRemediationExecutor() {
+    }
+
+    hidden [object] ReserveAccount([guid]$ObjectGuid, [bool]$Undo) {
+        $directory = Get-ADAnalyzerRemediationAuthorityDirectory
+        Initialize-ADAnalyzerJournalTypes
+        $reservationType = 'ADAnalyzer.AccountEffectReservation' -as [type]
+        if ($null -eq $reservationType) {
+            throw 'Start a fresh PowerShell process to load the remediation account reservation support.'
+        }
+        return $reservationType::Acquire($directory, $ObjectGuid, $Undo)
+    }
+
+    hidden [void] ReleaseIfNotDispatched([object]$Reservation, [Management.Automation.ErrorRecord]$Failure) {
+        if ($null -ne $Reservation) {
+            try {
+                $Reservation.ReleaseBeforeDispatch()
+            }
+            catch {
+                $message = 'The account reservation could not be released after the remediation failure. ' +
+                    $_.Exception.Message
+                throw [InvalidOperationException]::new($message, $Failure.Exception)
+            }
+        }
     }
 
     [object[]] PreviewUndo([string]$JournalPath, [string]$Server) {
@@ -3590,6 +3652,8 @@ class ADAnalyzerRemediationExecutor {
                         throw 'Journal entry identity changed after undo review'
                     }
                 }
+                $reservation = $null
+                $admitting = $false
                 try {
                     if ($entry.Before.Enabled -isnot [bool] -or $entry.After.Enabled -isnot [bool] -or
                         -not $this.IsReversibleDisable($entry)) {
@@ -3601,23 +3665,28 @@ class ADAnalyzerRemediationExecutor {
                     if (-not $this.IsApprovedUndoEntry($entry, $approved)) {
                         throw 'Journal entry identity is not bound to an approved reversible action'
                     }
+                    $account = [guid]$entry.ObjectGuid
+                    $admitting = $true
+                    $reservation = $this.ReserveAccount($account, $true)
+                    $admitting = $false
                     if ($null -eq $commands) {
                         $commands = $this.GetUndoDirectoryCommands()
                     }
-                    $current = Get-ADAnalyzerOperationCurrentObject $entry.ObjectGuid $connection $plan $commands.Read
+                    $current = Get-ADAnalyzerOperationCurrentObject $account $connection $plan $commands.Read
                     $state = $guard.AssertPreconditions($entry.After, $current, $false)
                     $guard.AssertPrivilege($current, $entry, $plan, $Server, $Credential)
                     $this.PrepareUndoEntry($entry, $state)
                     $owner.WriteExisting($journal)
 
                     $mutation = @{
-                        Identity = [guid]$entry.ObjectGuid
+                        Identity = $account
                         WhatIf = $false
                         Confirm = $false
                     }
                     $enable = $commands.Enable
+                    $reservation.BeginDispatch()
                     $null = & $enable @mutation @connection
-                    $after = Get-ADAnalyzerOperationCurrentObject $entry.ObjectGuid $connection $plan $commands.Read
+                    $after = Get-ADAnalyzerOperationCurrentObject $account $connection $plan $commands.Read
                     $entry.Undo.After = $guard.ReadState($after)
                     if (-not $this.IsVerifiedEnabled($entry.Before, $entry.Undo.After)) {
                         throw 'Unable to verify the account enable result'
@@ -3626,6 +3695,9 @@ class ADAnalyzerRemediationExecutor {
                     $owner.WriteExisting($journal)
                 }
                 catch {
+                    if ($admitting) {
+                        throw
+                    }
                     $failure = $_
                     $this.RecordUndoFailure($entry, $failure.Exception.Message)
                     try {
@@ -3634,8 +3706,10 @@ class ADAnalyzerRemediationExecutor {
                     catch {
                         throw $this.UndoPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
                     }
+                    $this.ReleaseIfNotDispatched($reservation, $failure)
                     throw $failure
                 }
+                $reservation.ReleaseAfterRecordedCompletion()
                 $rows.Add([ADAnalyzerEvidenceProjector]::new().Project($entry))
             }
         }
@@ -3881,13 +3955,23 @@ class ADAnalyzerRemediationExecutor {
                         }).Count) {
                     throw 'This plan action has already been applied; create a fresh assessment and plan'
                 }
-                if ($null -eq $commands) {
-                    $commands = $this.GetApplyDirectoryCommands()
+                $objectGuid = $action.ObjectGuid
+                $account = [guid]$objectGuid
+                $reservation = $this.ReserveAccount($account, $false)
+                try {
+                    if ($null -eq $commands) {
+                        $commands = $this.GetApplyDirectoryCommands()
+                    }
                 }
+                catch {
+                    $this.ReleaseIfNotDispatched($reservation, $_)
+                    throw
+                }
+
                 $header = $this.NewEntryHeader()
                 $fields = @{
                     ActionId = $action.ActionId
-                    ObjectGuid = $action.ObjectGuid
+                    ObjectGuid = $objectGuid
                     SID = $action.SID
                     DistinguishedName = $action.DistinguishedName
                     ObjectClass = $action.ObjectClass
@@ -3899,7 +3983,7 @@ class ADAnalyzerRemediationExecutor {
                 $connection = $target.Connection
                 $added = $false
                 try {
-                    $current = Get-ADAnalyzerOperationCurrentObject $action.ObjectGuid $connection $target.Plan $commands.Read
+                    $current = Get-ADAnalyzerOperationCurrentObject $account $connection $target.Plan $commands.Read
                     $entry.Before = $guard.AssertPreconditions($action.Preconditions, $current, $true)
                     $guard.AssertPrivilege($current, $action, $target.Plan, $target.Server, $target.Credential)
                     $guard.AssertInactivity($current, $action)
@@ -3908,13 +3992,14 @@ class ADAnalyzerRemediationExecutor {
                     $owner.Write($journal)
 
                     $mutation = @{
-                        Identity = [guid]$action.ObjectGuid
+                        Identity = $account
                         WhatIf = $false
                         Confirm = $false
                     }
                     $disable = $commands.Disable
+                    $reservation.BeginDispatch()
                     $null = & $disable @mutation @connection
-                    $after = Get-ADAnalyzerOperationCurrentObject $action.ObjectGuid $connection $target.Plan $commands.Read
+                    $after = Get-ADAnalyzerOperationCurrentObject $account $connection $target.Plan $commands.Read
                     $entry.After = $guard.ReadState($after)
                     if (-not $this.IsVerifiedDisabled($entry.Before, $entry.After)) {
                         throw 'Unable to verify the account disable result'
@@ -3931,8 +4016,10 @@ class ADAnalyzerRemediationExecutor {
                     catch {
                         throw $this.ApplyPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
                     }
+                    $this.ReleaseIfNotDispatched($reservation, $failure)
                     throw $failure
                 }
+                $reservation.ReleaseAfterRecordedCompletion()
                 $rows.Add([ADAnalyzerEvidenceProjector]::new().Project($entry))
             }
         }
@@ -4111,10 +4198,12 @@ function Invoke-ADAnalyzerRemediationPlan {
             if ($null -eq $action) {
                 continue
             }
-            if (-not $PSCmdlet.ShouldProcess($action.DistinguishedName, 'Disable account from explicit reviewed plan')) {
+            $objectGuid = $action.ObjectGuid
+            $distinguishedName = $action.DistinguishedName
+            if (-not $PSCmdlet.ShouldProcess($distinguishedName, 'Disable account from explicit reviewed plan')) {
                 $skipped = @{
                     ActionId = $action.ActionId
-                    ObjectGuid = $action.ObjectGuid
+                    ObjectGuid = $objectGuid
                 }
                 $executor.SkippedAction($skipped.ActionId, $skipped.ObjectGuid)
                 continue
@@ -4131,17 +4220,19 @@ function Invoke-ADAnalyzerRemediationPlan {
             $header = $executor.NewEntryHeader()
             $fields = @{
                 ActionId = $action.ActionId
-                ObjectGuid = $action.ObjectGuid
+                ObjectGuid = $objectGuid
                 SID = $action.SID
-                DistinguishedName = $action.DistinguishedName
+                DistinguishedName = $distinguishedName
                 ObjectClass = $action.ObjectClass
                 AccountType = $action.AccountType
                 InactivityDays = $action.InactivityDays
             }
             $entry = $executor.BuildEntry($header, $fields)
+            $account = [guid]$objectGuid
+            $reservation = $executor.ReserveAccount($account, $false)
             $added = $false
             try {
-                $current = Get-ADAnalyzerOperationCurrentObject $action.ObjectGuid $connection $planObject
+                $current = Get-ADAnalyzerOperationCurrentObject $account $connection $planObject
                 $entry.Before = Assert-ADAnalyzerOperationPreconditions $action.Preconditions $current $true
                 Assert-ADAnalyzerOperationPrivilege $current $action $planObject $connection
                 Assert-ADAnalyzerOperationInactivity $current $action
@@ -4149,8 +4240,9 @@ function Invoke-ADAnalyzerRemediationPlan {
                 $added = $true
                 # Durable intent precedes the mutation. A failed journal write aborts.
                 Save-ADAnalyzerOperationJournal $journal $JournalPath
-                Disable-ADAccount -Identity ([guid]$action.ObjectGuid) @connection -WhatIf:$false -Confirm:$false
-                $after = Get-ADAnalyzerOperationCurrentObject $action.ObjectGuid $connection $planObject
+                $reservation.BeginDispatch()
+                Disable-ADAccount -Identity $account @connection -WhatIf:$false -Confirm:$false
+                $after = Get-ADAnalyzerOperationCurrentObject $account $connection $planObject
                 $entry.After = Get-ADAnalyzerOperationState $after
                 if (-not $executor.IsVerifiedDisabled($entry.Before, $entry.After)) {
                     throw 'Unable to verify the account disable result'
@@ -4167,8 +4259,10 @@ function Invoke-ADAnalyzerRemediationPlan {
                 catch {
                     throw $executor.ApplyPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
                 }
+                $executor.ReleaseIfNotDispatched($reservation, $failure)
                 throw $failure
             }
+            $reservation.ReleaseAfterRecordedCompletion()
             ConvertTo-ADAnalyzerSafeData $entry
         }
     }
@@ -4236,6 +4330,8 @@ function Undo-ADAnalyzerRemediation {
                     throw 'Journal entry identity changed after undo review'
                 }
             }
+            $reservation = $null
+            $admitting = $false
             try {
                 if (-not $executor.IsReversibleDisable($entry)) {
                     throw 'Journal does not contain a reversible enabled-to-disabled transition'
@@ -4246,13 +4342,18 @@ function Undo-ADAnalyzerRemediation {
                 if (-not $executor.IsApprovedUndoEntry($entry, $approved)) {
                     throw 'Journal entry identity is not bound to an approved reversible action'
                 }
-                $current = Get-ADAnalyzerOperationCurrentObject $entry.ObjectGuid $connection $plan
+                $account = [guid]$entry.ObjectGuid
+                $admitting = $true
+                $reservation = $executor.ReserveAccount($account, $true)
+                $admitting = $false
+                $current = Get-ADAnalyzerOperationCurrentObject $account $connection $plan
                 $state = Assert-ADAnalyzerOperationPreconditions $entry.After $current $false
                 Assert-ADAnalyzerOperationPrivilege $current $entry $plan $connection
                 $executor.PrepareUndoEntry($entry, $state)
                 Save-ADAnalyzerOperationJournal $journal $JournalPath
-                Enable-ADAccount -Identity ([guid]$entry.ObjectGuid) @connection -WhatIf:$false -Confirm:$false
-                $after = Get-ADAnalyzerOperationCurrentObject $entry.ObjectGuid $connection $plan
+                $reservation.BeginDispatch()
+                Enable-ADAccount -Identity $account @connection -WhatIf:$false -Confirm:$false
+                $after = Get-ADAnalyzerOperationCurrentObject $account $connection $plan
                 $entry.Undo.After = Get-ADAnalyzerOperationState $after
                 if (-not $executor.IsVerifiedEnabled($entry.Before, $entry.Undo.After)) {
                     throw 'Unable to verify the account enable result'
@@ -4261,6 +4362,9 @@ function Undo-ADAnalyzerRemediation {
                 Save-ADAnalyzerOperationJournal $journal $JournalPath
             }
             catch {
+                if ($admitting) {
+                    throw
+                }
                 $failure = $_
                 $executor.RecordUndoFailure($entry, $failure.Exception.Message)
                 try {
@@ -4269,8 +4373,10 @@ function Undo-ADAnalyzerRemediation {
                 catch {
                     throw $executor.UndoPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
                 }
+                $executor.ReleaseIfNotDispatched($reservation, $failure)
                 throw $failure
             }
+            $reservation.ReleaseAfterRecordedCompletion()
             ConvertTo-ADAnalyzerSafeData $entry
         }
     }

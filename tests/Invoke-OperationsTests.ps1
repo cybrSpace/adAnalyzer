@@ -10,6 +10,15 @@ $script:Passed = 0
 $script:Failed = 0
 $script:Temporary = Join-Path ([IO.Path]::GetTempPath()) ('ad-operations-tests-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -Path $script:Temporary -ItemType Directory
+$script:RemediationAuthorityDirectory = $null
+
+function Get-ADAnalyzerRemediationAuthorityDirectory {
+    if ([string]::IsNullOrEmpty($script:RemediationAuthorityDirectory) -or
+        -not [IO.Directory]::Exists($script:RemediationAuthorityDirectory)) {
+        throw 'The fixture has no disposable remediation authority.'
+    }
+    return $script:RemediationAuthorityDirectory
+}
 
 function Assert-Equal($Expected, $Actual) {
     if ($Expected -ne $Actual) {
@@ -48,9 +57,12 @@ function Assert-ThrowsMessage([scriptblock]$Body, [string]$Message) {
 }
 
 function Reset-Fixture {
+    $script:RemediationAuthorityDirectory = Join-Path $script:Temporary ('authority-' + [guid]::NewGuid().ToString('N'))
+    $null = [IO.Directory]::CreateDirectory($script:RemediationAuthorityDirectory)
     $script:Reads = 0
     $script:GroupReads = 0
     $script:Disables = 0
+    $script:DisableDispatches = 0
     $script:Enables = 0
     $script:FreshPrivileged = $false
     $script:FreshAccountType = 'User'
@@ -417,6 +429,7 @@ function Disable-ADAccount {
     if ($persisted.Entries[-1].Status -ne 'Prepared') {
         throw 'Mutation intent was not journaled'
     }
+    $script:DisableDispatches++
     if ($script:FailMutation) {
         throw 'Fixture mutation failure'
     }
@@ -843,17 +856,27 @@ try {
             [Environment]::CurrentDirectory = $dotnet
         }
     }
-    Invoke-Test 'journal ownership is released after a failed mutation and a successful retry' {
+    Invoke-Test 'journal ownership releases after a failed mutation but Uncertain blocks the same-plan retry' {
         $plan = New-FixturePlan
         $script:FailMutation = $true
         Assert-Throws { Apply-FixturePlan $plan }
         $lease = [IO.File]::Open(($script:Journal + '.lock'), [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
         $lease.Dispose()
+        $dispatches = $script:DisableDispatches
+        Assert-Equal 1 $dispatches
         $script:FailMutation = $false
-        $null = Apply-FixturePlan $plan
+        $retryFailure = $null
+        try {
+            $null = Apply-FixturePlan $plan
+        }
+        catch {
+            $retryFailure = $_
+        }
+        Assert-True ($null -ne $retryFailure -and $retryFailure.Exception.Message -match '\bUncertain\b') 'The uncertain provider mutation did not block retry.'
         $lease = [IO.File]::Open(($script:Journal + '.lock'), [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
         $lease.Dispose()
-        Assert-Equal 1 $script:Disables
+        Assert-Equal $dispatches $script:DisableDispatches
+        Assert-Equal 0 $script:Disables
     }
     Invoke-Test 'early result selection preserves successful evidence and releases journal ownership' {
         $plan = New-FixturePlan
@@ -3311,6 +3334,57 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
             }
 
             $marker = 'PASS remediation journal ' + $case + ' ' + $remediationJournalCases[$case]
+            Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+        }
+    }
+
+    Invoke-Test 'shared account reservation blocks cross-journal retries and undo' {
+        $engine = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'UncertainRemediationFixture.ps1'
+        $output = @(& $engine -NoLogo -NoProfile -NonInteractive -File $fixture -RepositoryRoot $RepositoryRoot)
+        if ($LASTEXITCODE -ne 0) {
+            throw 'The shared account reservation fixture failed.'
+        }
+
+        $expected = @(
+            'PASS isolated uncertainty Native to Direct'
+            'PASS isolated uncertainty Direct to Native'
+            'PASS isolated uncertainty Native Apply to Direct Undo'
+            'PASS isolated uncertainty Direct Apply to Native Undo'
+            'PASS account reservation storage failure and known no-send'
+        )
+        foreach ($marker in $expected) {
+            Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+        }
+    }
+
+    Invoke-Test 'account reservation survives interruption and a new PowerShell process' {
+        $engine = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'UncertainRemediationRestartFixture.ps1'
+        foreach ($route in 'Native', 'Direct') {
+            $arguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                $fixture
+                '-RepositoryRoot'
+                $RepositoryRoot
+                '-Route'
+                $route
+            )
+            $output = @(& $engine @arguments)
+            if ($LASTEXITCODE -ne 0) {
+                throw ('The account reservation restart fixture failed for ' + $route)
+            }
+
+            $next = if ($route -eq 'Native') {
+                'Direct'
+            }
+            else {
+                'Native'
+            }
+            $marker = "PASS synthetic restart $route to $next"
             Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
         }
     }
