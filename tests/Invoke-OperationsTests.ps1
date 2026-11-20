@@ -3338,6 +3338,17 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
         }
     }
 
+    Invoke-Test 'read-only reservation inspection reports local state' {
+        $engine = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'ReservationInspectionFixture.ps1'
+        $output = @(& $engine -NoLogo -NoProfile -NonInteractive -File $fixture -RepositoryRoot $RepositoryRoot)
+        if ($LASTEXITCODE -ne 0) {
+            throw 'The reservation inspection fixture failed.'
+        }
+        $marker = 'PASS remediation reservation inspection 8'
+        Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+    }
+
     Invoke-Test 'shared account reservation blocks cross-journal retries and undo' {
         $engine = (Get-Process -Id $PID).Path
         $fixture = Join-Path $PSScriptRoot 'UncertainRemediationFixture.ps1'

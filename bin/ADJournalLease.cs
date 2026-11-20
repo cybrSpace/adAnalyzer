@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
@@ -176,16 +177,7 @@ namespace ADAnalyzer
 
         public static AccountEffectReservation Acquire(string directory, Guid account, bool undo)
         {
-            if (account == Guid.Empty)
-            {
-                throw new ArgumentException("A canonical account GUID is required.", "account");
-            }
-            if (String.IsNullOrEmpty(directory) || !Path.IsPathRooted(directory))
-            {
-                throw new ArgumentException("The remediation authority must use a local absolute path.", "directory");
-            }
-
-            string path = Path.Combine(directory, account.ToString("N") + ".hold");
+            string path = ReservationPath(directory, account);
             string record = "Status=Uncertain\n"
                 + "AttemptId=" + Guid.NewGuid().ToString("D") + "\n"
                 + "Account=" + account.ToString("D") + "\n"
@@ -227,6 +219,115 @@ namespace ADAnalyzer
                 stream.Flush(true);
             }
             return new AccountEffectReservation(path, record);
+        }
+
+        public static Dictionary<string, object> Inspect(string directory, Guid account)
+        {
+            string path = ReservationPath(directory, account);
+            Dictionary<string, object> observation = new Dictionary<string, object>
+            {
+                { "Status", "Indeterminate" },
+                { "AttemptId", null },
+                { "Operation", null },
+                { "CreatedUtc", null },
+                { "LastConfirmedStep", null }
+            };
+            try
+            {
+                if (Environment.OSVersion.Platform == PlatformID.Win32NT
+                    && !IsFixedInspectionDirectory(directory))
+                {
+                    return observation;
+                }
+                File.GetAttributes(path);
+            }
+            catch (FileNotFoundException)
+            {
+                if (Directory.Exists(directory))
+                {
+                    observation["Status"] = "NotObserved";
+                }
+                return observation;
+            }
+            catch (IOException)
+            {
+                return observation;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return observation;
+            }
+
+            // A record observed here can disappear or become unreadable before
+            // the bounded read. Preserve Indeterminate in that case.
+            string record = ReadRecord(path);
+            if (record == null)
+            {
+                return observation;
+            }
+
+            string[] lines = record.Split('\n');
+            Guid attempt;
+            DateTimeOffset created;
+            if (lines.Length == 7
+                && lines[0] == "Status=Uncertain"
+                && lines[1].StartsWith("AttemptId=", StringComparison.Ordinal)
+                && Guid.TryParseExact(lines[1].Substring("AttemptId=".Length), "D", out attempt)
+                && attempt != Guid.Empty
+                && lines[2] == "Account=" + account.ToString("D")
+                && (lines[3] == "Operation=Apply" || lines[3] == "Operation=Undo")
+                && lines[4].StartsWith("CreatedUtc=", StringComparison.Ordinal)
+                && DateTimeOffset.TryParseExact(lines[4].Substring("CreatedUtc=".Length), "o",
+                    CultureInfo.InvariantCulture, DateTimeStyles.None, out created)
+                && created.Offset == TimeSpan.Zero
+                && lines[5] == "LastConfirmedStep=AccountReserved"
+                && lines[6] == String.Empty)
+            {
+                observation["Status"] = "Held";
+                observation["AttemptId"] = attempt;
+                observation["Operation"] = lines[3].Substring("Operation=".Length);
+                observation["CreatedUtc"] = created;
+                observation["LastConfirmedStep"] = "AccountReserved";
+            }
+            return observation;
+        }
+
+        private static bool IsFixedInspectionDirectory(string directory)
+        {
+            string root = Path.GetPathRoot(directory);
+            if (root == null || root.Length != 3 || root[1] != ':' || new DriveInfo(root).DriveType != DriveType.Fixed)
+            {
+                return false;
+            }
+
+            // Inspect ancestors before descendants so a redirected path cannot
+            // lead this low-level read into a different authority or drive.
+            Stack<DirectoryInfo> components = new Stack<DirectoryInfo>();
+            for (DirectoryInfo component = new DirectoryInfo(directory); component != null; component = component.Parent)
+            {
+                components.Push(component);
+            }
+            foreach (DirectoryInfo component in components)
+            {
+                if ((component.Attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static string ReservationPath(string directory, Guid account)
+        {
+            if (account == Guid.Empty)
+            {
+                throw new ArgumentException("A canonical account GUID is required.", "account");
+            }
+            if (String.IsNullOrEmpty(directory) || !Path.IsPathRooted(directory))
+            {
+                throw new ArgumentException("The remediation authority must use a local absolute path.", "directory");
+            }
+            return Path.Combine(directory, account.ToString("N") + ".hold");
         }
 
         public void BeginDispatch()

@@ -3558,6 +3558,51 @@ function Get-ADAnalyzerRemediationAuthorityDirectory {
     return $directory.FullName
 }
 
+class ADAnalyzerRemediationReservationInspector {
+    ADAnalyzerRemediationReservationInspector() {
+    }
+
+    [pscustomobject] Inspect([guid]$ObjectGuid) {
+        if ($ObjectGuid -eq [guid]::Empty) {
+            throw 'A canonical account GUID is required.'
+        }
+
+        $directory = Get-ADAnalyzerRemediationAuthorityDirectory
+        Initialize-ADAnalyzerJournalTypes
+        $reservationType = 'ADAnalyzer.AccountEffectReservation' -as [type]
+        if ($null -eq $reservationType -or $null -eq $reservationType.GetMethod('Inspect')) {
+            throw 'Start a fresh PowerShell process to load the remediation account inspection support.'
+        }
+        $observation = $reservationType::Inspect($directory, $ObjectGuid)
+
+        return [pscustomobject][ordered]@{
+            ObjectGuid = $ObjectGuid
+            Status = $observation['Status']
+            AttemptId = $observation['AttemptId']
+            Operation = $observation['Operation']
+            CreatedUtc = $observation['CreatedUtc']
+            LastConfirmedStep = $observation['LastConfirmedStep']
+        }
+    }
+}
+
+function Get-ADAnalyzerRemediationReservation {
+    <#
+    .SYNOPSIS
+    Reads one account reservation from the local remediation authority.
+    .DESCRIPTION
+    Reports a point-in-time observation for the specified account GUID.
+    Use the result to locate evidence for manual reconciliation.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][guid]$ObjectGuid
+    )
+
+    $inspector = [ADAnalyzerRemediationReservationInspector]::new()
+    $inspector.Inspect($ObjectGuid)
+}
+
 class ADAnalyzerRemediationExecutor {
     ADAnalyzerRemediationExecutor() {
     }

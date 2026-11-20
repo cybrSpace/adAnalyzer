@@ -363,11 +363,28 @@ The `New-ADAnalyzerRemediationPlan` compatibility command preserves native param
 
 ### Account remediation reservations
 
-Apply and Undo share a persistent reservation per AD object GUID across journals and PowerShell processes on one designated Windows host. The reservation is created before the directory write. If a write may have been dispatched and the command or its verification fails, the reservation survives the failure and process restart. A later Apply or Undo for that account reports `Uncertain` before contacting AD. A matching read alone cannot clear a reservation. Planning, previews, and declined prompts leave the authority untouched.
+Apply and Undo share a persistent reservation per AD object GUID across journals and PowerShell processes on one designated Windows host. The reservation is created before the directory write. If a write may have been dispatched and the command or its verification fails, the reservation survives the failure and process restart. A later Apply or Undo for that account that reaches reservation admission reports `Uncertain` before contacting AD. A matching read alone cannot clear a reservation. Planning, previews, and declined prompts leave the authority untouched.
 
 Before enabling writes, a Windows administrator must provision a stable local `ADAnalyzer.Remediation` directory underneath the system's Common Application Data folder, normally `C:\ProgramData\ADAnalyzer.Remediation`. Restrict its ownership and write access to the authorized remediation service or administrators. Keep journal and report output outside that directory. Use one current-build writer host and stop older writers before cutover. Reconcile unsettled attempts from older versions and other hosts before provisioning or restoring this authority. The application does not initialize or migrate the authority automatically. If it is unavailable, the write fails closed.
 
 The account GUID identifies the `.hold` file. Its text records the attempt ID, operation, creation time, and last confirmed step. Preserve that file and its journal when escalating a timeout or interruption. The application offers no automatic retry, Undo, or clear operation for an uncertain reservation. Require independent evidence of settlement and fresh approval before any later write. Synthetic tests qualify the control flow. Native provider settlement, distributed writers, and power-loss or host-restore recovery require separate qualification.
+
+To inspect the local authority by account object GUID through the class API, load the analyzer and call the inspector.
+
+```powershell
+. ./bin/ADAnalyzer.ps1
+$inspector = [ADAnalyzerRemediationReservationInspector]::new()
+$inspector.Inspect([guid]'20000000-0000-4000-8000-000000000001')
+```
+
+The packaged PowerShell command exposes the same observation.
+
+```powershell
+Import-Module ./ADEnvironment.psd1
+Get-ADAnalyzerRemediationReservation -ObjectGuid '20000000-0000-4000-8000-000000000001'
+```
+
+A `Held` result shows the validated attempt ID, operation, recorded UTC time, and last confirmed step. It covers both an active reservation and a retained uncertain attempt. `NotObserved` means the record was absent from the local authority at the time of the check. `Indeterminate` means the record could not be read and validated. The operation reports an error if the local authority is unavailable. Apply and Undo still need fresh approval and their own reservation. Inspection reads only local reservation metadata.
 
 `ADAnalyzerRemediationJournal` manages a local journal. Its constructor is inert. `Open(plan, server, path)` validates the reviewed plan, resolves one PowerShell FileSystem path, and holds that path's exclusive lock. A newly opened journal stays in memory until the first write. `Read()` returns a detached record. `Write(journal)` checks the bound journal identity, persists the supplied entries with the bound settings, and sets the update time. Call `Dispose()` in a `finally` block to release the lease. Disposal is safe to repeat, preserves the empty lock marker, and allows the instance to be opened again.
 
