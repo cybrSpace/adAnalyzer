@@ -1203,6 +1203,7 @@ class ADAnalyzerAssessmentComparer {
                     $oldGood = @($old | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                     $newGood = @($new | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                     $observation.Change = $this.ClassifyStatus(($oldJson -cne $newJson), $oldFail, $newFail, $oldGood, $newGood)
+                    $this.QualifyGpoRuleTransition($key, $old, $new, $observation)
                 }
 
                 $sample = $this.SelectSample($old, $new)
@@ -1349,6 +1350,68 @@ class ADAnalyzerAssessmentComparer {
             return 'Changed'
         }
         return 'Unchanged'
+    }
+
+    hidden [void] QualifyGpoRuleTransition(
+        [string]$Key,
+        [object[]]$Before,
+        [object[]]$After,
+        [hashtable]$Observation
+    ) {
+        if ($Observation.Change -notin 'Resolved', 'New' -or
+            -not $Key.StartsWith('GPO.EXPECTED.', [StringComparison]::Ordinal) -or
+            $Before.Count -ne 1 -or $After.Count -ne 1) {
+            return
+        }
+
+        $projector = [ADAnalyzerEvidenceProjector]::new()
+        $oldEvidence = $projector.GetValue($Before[0], @('Evidence'))
+        $newEvidence = $projector.GetValue($After[0], @('Evidence'))
+        $oldOperator = $projector.GetValue($oldEvidence, @('Operator'))
+        $newOperator = $projector.GetValue($newEvidence, @('Operator'))
+        $operators = @('Equals', 'NotEquals', 'In', 'NotIn', 'Minimum', 'Maximum')
+        if ($oldOperator -isnot [string] -or $newOperator -isnot [string] -or
+            $oldOperator -notin $operators -or $newOperator -notin $operators) {
+            return
+        }
+
+        # Read projected fields without flattening arrays or conflating null with absence.
+        $missing = [object]::new()
+        $oldExpected = $projector.GetValue($Before[0], @('Expected'), $missing)
+        $newExpected = $projector.GetValue($After[0], @('Expected'), $missing)
+        if ([object]::ReferenceEquals($oldExpected, $missing) -or
+            [object]::ReferenceEquals($newExpected, $missing)) {
+            return
+        }
+
+        if ($oldOperator -ine $newOperator -or
+            ($oldOperator -in 'Minimum', 'Maximum' -and
+                $this.IsRecordedIntegerBound($oldExpected) -and
+                $this.IsRecordedIntegerBound($newExpected) -and
+                [decimal]$oldExpected -ne [decimal]$newExpected)) {
+            $Observation.Change = 'Changed'
+            $Observation.Reason = 'RulePredicateChanged'
+        }
+    }
+
+    hidden [bool] IsRecordedIntegerBound([object]$Value) {
+        if ($null -eq $Value -or $Value -is [Enum]) {
+            return $false
+        }
+        $code = [Type]::GetTypeCode($Value.GetType())
+        if ($code -notin @(
+                [TypeCode]::SByte,
+                [TypeCode]::Byte,
+                [TypeCode]::Int16,
+                [TypeCode]::UInt16,
+                [TypeCode]::Int32,
+                [TypeCode]::UInt32,
+                [TypeCode]::Int64,
+                [TypeCode]::UInt64
+            )) {
+            return $false
+        }
+        return [decimal]$Value -le [long]::MaxValue
     }
 
     hidden [object] SelectSample([object[]]$Before, [object[]]$After) {
@@ -1643,6 +1706,7 @@ function Compare-ADAnalyzerAssessment {
                 $oldGood = @($old | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                 $newGood = @($new | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                 $observation.Change = $comparer.ClassifyStatus(($oldJson -cne $newJson), $oldFail, $newFail, $oldGood, $newGood)
+                $comparer.QualifyGpoRuleTransition($key, $old, $new, $observation)
             }
 
             $sample = $comparer.SelectSample($old, $new)

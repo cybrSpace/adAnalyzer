@@ -712,6 +712,175 @@ try {
         Assert-Equal 1 $gap.Observed
         Assert-True ($json -notmatch '<Groups') 'Raw XML escaped through the assessment'
     }
+    Test-Assessment 'custom GPO comparison distinguishes changed predicates from observed resolution' {
+        $ruleId = 'GPO.Expected.FixtureLevel'
+        $key = 'Software\Fixture'
+        $gpo = [pscustomobject]@{
+            Id = [guid]'11111111-1111-1111-1111-111111111111'
+            Version = 1
+            Flags = 0
+            Links = @()
+        }
+        $directory = New-AssessmentFixture
+        $inputs = [ordered]@{
+            Strict = @{
+                Observed = 1
+                Operator = 'Minimum'
+                Expected = 2
+                Status = 'Fail'
+            }
+            Inverted = @{
+                Observed = 1
+                Operator = 'Maximum'
+                Expected = 2
+                Status = 'Pass'
+            }
+            Relaxed = @{
+                Observed = 1
+                Operator = 'Minimum'
+                Expected = 1
+                Status = 'Pass'
+            }
+            Improved = @{
+                Observed = 3
+                Operator = 'Minimum'
+                Expected = 2
+                Status = 'Pass'
+            }
+            AggregateLow = @{
+                Observed = 1
+                Operator = 'Equals'
+                Expected = @([uint32]3)
+                Status = 'Fail'
+                Aggregate = $true
+            }
+            AggregateHigh = @{
+                Observed = 3
+                Operator = 'Equals'
+                Expected = @([uint32]3)
+                Status = 'Pass'
+                Aggregate = $true
+            }
+        }
+        $assessments = @{}
+        $checks = @{}
+        $paths = @{}
+        foreach ($name in $inputs.Keys) {
+            $inputCase = $inputs[$name]
+            $policy = New-PolicyFixture
+            $policy.RegistrySettings = @([pscustomobject]@{
+                    Hive = 'HKLM'
+                    Scope = 'Computer'
+                    Key = $key
+                    ValueName = 'Level'
+                    Value = [uint32]$inputCase.Observed
+                    Type = 4
+                    Source = 'Machine/Registry.pol'
+                    KeyOnly = $false
+                })
+            $rule = @{
+                Id = 'FixtureLevel'
+                Hive = 'HKLM'
+                Key = $key
+                ValueName = 'Level'
+                Operator = $inputCase.Operator
+                Expected = $inputCase.Expected
+                Type = 4
+            }
+            if ($inputCase.ContainsKey('Aggregate')) {
+                $rule.Aggregate = $true
+            }
+            $arguments = @{
+                DirectoryData = $directory
+                GpoData = @([pscustomobject]@{
+                        Gpo = $gpo
+                        Policy = $policy
+                    })
+                Profile = @{ RegistryRules = @($rule) }
+            }
+            $assessments[$name] = Invoke-ADAnalyzerAssessment @arguments
+            $ruleChecks = @($assessments[$name].Checks | Where-Object RuleId -eq $ruleId)
+            Assert-Equal 1 $ruleChecks.Count
+            $checks[$name] = $ruleChecks[0]
+            Assert-Equal $inputCase.Status $ruleChecks[0].Status
+            Assert-Equal $inputCase.Observed (@($ruleChecks[0].Observed)[0])
+            Assert-Equal $inputCase.Operator $ruleChecks[0].Evidence.Operator
+        }
+        foreach ($name in @('Inverted', 'Relaxed', 'Improved')) {
+            Assert-Equal $checks.Strict.CheckId $checks[$name].CheckId
+        }
+        Assert-Equal $checks.AggregateLow.CheckId $checks.AggregateHigh.CheckId
+
+        $assessments.Legacy = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $assessments.Strict.Target
+            Checks = @([pscustomobject]@{
+                    RuleId = $ruleId
+                    Target = $checks.Relaxed.Target
+                    Status = $checks.Relaxed.Status
+                    Observed = $checks.Relaxed.Observed
+                    Expected = $checks.Relaxed.Expected
+                })
+        }
+        $unknown = $checks.Relaxed.PSObject.Copy()
+        $unknown.Status = 'Unknown'
+        $assessments.Unknown = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $assessments.Strict.Target
+            Checks = @($unknown)
+        }
+        $assessments.Unobserved = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $assessments.Strict.Target
+            Checks = @()
+        }
+
+        foreach ($name in $assessments.Keys) {
+            $paths[$name] = Join-Path $temp ('gpo-compare-predicate-' + $name + '.json')
+            $null = Export-ADAnalyzerAssessment -Assessment $assessments[$name] -Path $paths[$name] -Format Json -Confirm:$false
+        }
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $cases = @(
+            @('Strict', 'Inverted', 'Changed', 'RulePredicateChanged'),
+            @('Strict', 'Relaxed', 'Changed', 'RulePredicateChanged'),
+            @('Relaxed', 'Strict', 'Changed', 'RulePredicateChanged'),
+            @('Strict', 'Improved', 'Resolved', $null),
+            @('AggregateLow', 'AggregateHigh', 'Resolved', $null),
+            @('Strict', 'Legacy', 'Resolved', $null),
+            @('Strict', 'Unknown', 'Changed', $null),
+            @('Strict', 'Unobserved', 'Changed', 'NotObservedInDifference'),
+            @('Unobserved', 'Strict', 'New', $null)
+        )
+        foreach ($documents in @($assessments, $paths)) {
+            foreach ($case in $cases) {
+                $before, $after, $expectedChange, $expectedReason = $case
+                $arguments = @{
+                    Reference = $documents[$before]
+                    Difference = $documents[$after]
+                }
+                $commandResult = Compare-ADAnalyzerAssessment @arguments
+                $classResult = $comparer.Compare($arguments.Reference, $arguments.Difference)
+                foreach ($result in @($commandResult, $classResult)) {
+                    $changes = @($result.Changes | Where-Object RuleId -eq $ruleId)
+                    Assert-Equal 1 $changes.Count
+                    Assert-Equal $expectedChange $changes[0].Change
+                    Assert-Equal $expectedReason $changes[0].Reason
+                    if ($before -eq 'Unobserved') {
+                        Assert-Equal 0 $changes[0].Reference.Count
+                    }
+                    else {
+                        Assert-Equal $checks[$before].Status $changes[0].Reference[0].Status
+                    }
+                    if ($after -eq 'Unobserved') {
+                        Assert-Equal 0 $changes[0].Difference.Count
+                    }
+                    else {
+                        Assert-Equal 1 $changes[0].Difference.Count
+                    }
+                }
+            }
+        }
+    }
     Test-Assessment 'SYSVOL version mismatch and policy read errors remain explicit' {
         $policy = New-PolicyFixture
         $policy.SysvolVersion = 2
