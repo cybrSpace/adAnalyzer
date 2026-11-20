@@ -3338,6 +3338,17 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
         }
     }
 
+    Invoke-Test 'compound journal failures identify the dispatched reservation' {
+        $engine = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'RemediationPersistenceContextFixture.ps1'
+        $output = @(& $engine -NoLogo -NoProfile -NonInteractive -File $fixture -RepositoryRoot $RepositoryRoot)
+        if ($LASTEXITCODE -ne 0) {
+            throw 'The compound remediation failure fixture failed.'
+        }
+        $marker = 'PASS remediation persistence context 8'
+        Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+    }
+
     Invoke-Test 'ambiguous remediation errors identify the held account attempt' {
         $engine = (Get-Process -Id $PID).Path
         $fixture = Join-Path $PSScriptRoot 'RemediationFailureContextFixture.ps1'

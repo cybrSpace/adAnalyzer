@@ -3628,12 +3628,29 @@ class ADAnalyzerRemediationExecutor {
                 throw [InvalidOperationException]::new($message, $Failure.Exception)
             }
 
-            # A previously loaded helper type can still preserve its original
-            # failure contract until the process is restarted.
-            if ($null -ne $Reservation.GetType().GetMethod('TryAttachFailureContext')) {
-                $Reservation.TryAttachFailureContext($Failure.Exception)
-            }
+            $this.AddReservationFailureContext($Reservation, $Failure.Exception)
         }
+    }
+
+    hidden [void] AddReservationFailureContext([object]$Reservation, [Exception]$Failure) {
+        # A previously loaded helper type can still preserve its original
+        # failure contract until the process is restarted.
+        if ($null -ne $Reservation -and $null -ne $Reservation.GetType().GetMethod('TryAttachFailureContext')) {
+            $Reservation.TryAttachFailureContext($Failure)
+        }
+    }
+
+    hidden [object] NewReservationPersistenceFailure([object]$Reservation, [string]$Message) {
+        $failure = [Management.Automation.RuntimeException]::new($Message, $null)
+        $this.AddReservationFailureContext($Reservation, $failure)
+        if ($failure.Data.Count -eq 0) {
+            return $Message
+        }
+
+        # Match the original string throw's message, error ID, category and target.
+        return [Management.Automation.ErrorRecord]::new(
+            $failure, $Message, [Management.Automation.ErrorCategory]::OperationStopped, $Message
+        )
     }
 
     [object[]] PreviewUndo([string]$JournalPath, [string]$Server) {
@@ -3755,7 +3772,8 @@ class ADAnalyzerRemediationExecutor {
                         $owner.WriteExisting($journal)
                     }
                     catch {
-                        throw $this.UndoPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                        $message = $this.UndoPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                        throw $this.NewReservationPersistenceFailure($reservation, $message)
                     }
                     $this.ReleaseIfNotDispatched($reservation, $failure)
                     throw $failure
@@ -4065,7 +4083,8 @@ class ADAnalyzerRemediationExecutor {
                         $owner.Write($journal)
                     }
                     catch {
-                        throw $this.ApplyPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                        $message = $this.ApplyPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                        throw $this.NewReservationPersistenceFailure($reservation, $message)
                     }
                     $this.ReleaseIfNotDispatched($reservation, $failure)
                     throw $failure
@@ -4308,7 +4327,8 @@ function Invoke-ADAnalyzerRemediationPlan {
                     Save-ADAnalyzerOperationJournal $journal $JournalPath
                 }
                 catch {
-                    throw $executor.ApplyPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                    $message = $executor.ApplyPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                    throw $executor.NewReservationPersistenceFailure($reservation, $message)
                 }
                 $executor.ReleaseIfNotDispatched($reservation, $failure)
                 throw $failure
@@ -4422,7 +4442,8 @@ function Undo-ADAnalyzerRemediation {
                     Save-ADAnalyzerOperationJournal $journal $JournalPath
                 }
                 catch {
-                    throw $executor.UndoPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                    $message = $executor.UndoPersistenceFailure($failure.Exception.Message, $_.Exception.Message)
+                    throw $executor.NewReservationPersistenceFailure($reservation, $message)
                 }
                 $executor.ReleaseIfNotDispatched($reservation, $failure)
                 throw $failure
