@@ -963,6 +963,9 @@ class ADAnalyzerAssessmentReport {
                     'RulePredicateChanged' {
                         $explanation = ' Review the recorded rule requirements before interpreting the status change.'
                     }
+                    'PolicyVersionMismatch' {
+                        $explanation = ' Check the recorded directory and SYSVOL versions for this policy side.'
+                    }
                 }
             }
             $null = $Builder.Append(
@@ -1299,6 +1302,7 @@ class ADAnalyzerAssessmentComparer {
                     $newGood = @($new | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                     $observation.Change = $this.ClassifyStatus(($oldJson -cne $newJson), $oldFail, $newFail, $oldGood, $newGood)
                     $this.QualifyGpoRuleTransition($key, $old, $new, $observation)
+                    $this.QualifyGpoVersionTransition($key, $oldMap, $newMap, $observation, $projector)
                 }
 
                 $sample = $this.SelectSample($old, $new)
@@ -1501,6 +1505,107 @@ class ADAnalyzerAssessmentComparer {
             $Observation.Change = 'Changed'
             $Observation.Reason = 'RulePredicateChanged'
         }
+    }
+
+    hidden [void] QualifyGpoVersionTransition(
+        [string]$Key,
+        [hashtable]$Reference,
+        [hashtable]$Difference,
+        [hashtable]$Observation,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        if ($Observation.Change -notin 'New', 'Resolved' -or
+            -not $Key.StartsWith('GPO.EXPECTED.', [StringComparison]::Ordinal) -or
+            $Reference[$Key].Count -ne 1 -or $Difference[$Key].Count -ne 1) {
+            return
+        }
+
+        $first = $Reference[$Key][0]
+        $second = $Difference[$Key][0]
+        $rule = $Projector.GetValue($first, @('RuleId'))
+        $otherRule = $Projector.GetValue($second, @('RuleId'))
+        $target = $Projector.GetValue($first, @('Target'))
+        $otherTarget = $Projector.GetValue($second, @('Target'))
+        if ($rule -isnot [string] -or $otherRule -isnot [string] -or
+            -not $rule.StartsWith('GPO.Expected.', [StringComparison]::OrdinalIgnoreCase) -or
+            $rule.IndexOf([char]0) -ge 0 -or
+            -not $rule.Equals($otherRule, [StringComparison]::OrdinalIgnoreCase) -or
+            $target -isnot [string] -or $otherTarget -isnot [string] -or
+            -not $target.Equals($otherTarget, [StringComparison]::OrdinalIgnoreCase)) {
+            return
+        }
+
+        $identity = [regex]::Match(
+            $target.ToUpperInvariant(),
+            '\AGPO:([0-9A-F]{8}-(?:[0-9A-F]{4}-){3}[0-9A-F]{12})/EXPECTED/'
+        )
+        if (-not $identity.Success) {
+            return
+        }
+
+        $before = $Projector.GetValue($first, @('Evidence'))
+        $after = $Projector.GetValue($second, @('Evidence'))
+        $scope = $Projector.GetValue($before, @('Scope'))
+        $otherScope = $Projector.GetValue($after, @('Scope'))
+        if ($scope -isnot [string] -or $otherScope -isnot [string] -or $scope -ne $otherScope) {
+            return
+        }
+
+        # Group Policy versions store the User version above the Computer version.
+        if ($scope -eq 'Computer') {
+            $path = 'Machine/Registry.pol'
+            $mask = [long]65535
+        }
+        elseif ($scope -eq 'User') {
+            $path = 'User/Registry.pol'
+            $mask = [long]4294901760
+        }
+        else {
+            return
+        }
+
+        $beforePath = $Projector.GetValue($before, @('Path'))
+        $afterPath = $Projector.GetValue($after, @('Path'))
+        if ($beforePath -isnot [string] -or $afterPath -isnot [string] -or
+            $beforePath -ne $path -or $afterPath -ne $path) {
+            return
+        }
+
+        $versionKey = 'GPO.VERSION_CONSISTENCY' + [char]0 + $identity.Groups[1].Value + '/VERSION'
+        if ($this.HasRecordedGpoVersionMismatch($Reference[$versionKey], $mask, $Projector) -or
+            $this.HasRecordedGpoVersionMismatch($Difference[$versionKey], $mask, $Projector)) {
+            $Observation.Change = 'Changed'
+            $Observation.Reason = 'PolicyVersionMismatch'
+        }
+    }
+
+    hidden [bool] HasRecordedGpoVersionMismatch(
+        [object[]]$Rows,
+        [long]$Mask,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        if ($null -eq $Rows -or $Rows.Count -ne 1) {
+            return $false
+        }
+        $status = $Projector.GetValue($Rows[0], @('Status'))
+        if ($status -isnot [string] -or $status -ne 'Fail') {
+            return $false
+        }
+
+        $observed = $Projector.GetValue($Rows[0], @('Observed'))
+        $expected = $Projector.GetValue($Rows[0], @('Expected'))
+        if (-not $this.IsRecordedInteger($observed) -or -not $this.IsRecordedInteger($expected)) {
+            return $false
+        }
+
+        $observedVersion = [long]$observed
+        $expectedVersion = [long]$expected
+        if ($observedVersion -lt 0 -or $observedVersion -gt [uint32]::MaxValue -or
+            $expectedVersion -lt [int]::MinValue -or $expectedVersion -gt [uint32]::MaxValue) {
+            return $false
+        }
+
+        return ($observedVersion -band $Mask) -ne ($expectedVersion -band $Mask)
     }
 
     hidden [object[]] GetComparableChecks(
@@ -1947,6 +2052,7 @@ function Compare-ADAnalyzerAssessment {
                 $newGood = @($new | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                 $observation.Change = $comparer.ClassifyStatus(($oldJson -cne $newJson), $oldFail, $newFail, $oldGood, $newGood)
                 $comparer.QualifyGpoRuleTransition($key, $old, $new, $observation)
+                $comparer.QualifyGpoVersionTransition($key, $maps[0], $maps[1], $observation, $projector)
             }
 
             $sample = $comparer.SelectSample($old, $new)

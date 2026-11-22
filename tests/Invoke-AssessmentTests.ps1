@@ -1049,6 +1049,182 @@ try {
             Assert-Equal $pathHashes[$name] (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
         }
     }
+    Test-Assessment 'comparison qualifies changes only on the recorded mismatched Registry.pol side' {
+        $gpoId = [guid]'11111111-1111-1111-1111-111111111111'
+        $otherId = [guid]'22222222-2222-2222-2222-222222222222'
+        # Directory encodes 0x80010002 as a signed DWORD. User and Computer occupy different halves.
+        $directoryVersion = [int]-2147418110
+        $consistentVersion = [uint32]2147549186
+        $computerMismatch = [uint32]2147549187
+        $userMismatch = [uint32]2147614722
+        $key = 'Software\Fixture'
+        $directory = New-AssessmentFixture
+        $versionRule = 'GPO.VERSION_CONSISTENCY'
+
+        $makeSnapshot = {
+            param(
+                [uint32]$Value,
+                $SysvolVersion,
+                [uint32]$Expected = 2,
+                [switch]$OtherMismatch,
+                $Identity = $gpoId
+            )
+
+            $gpo = [pscustomobject]@{
+                Id = $Identity
+                Flags = 0
+                Version = $directoryVersion
+                Links = @()
+            }
+            $policy = New-PolicyFixture
+            $policy.SysvolVersion = $SysvolVersion
+            $policy.RegistrySettings = @(
+                [pscustomobject]@{
+                    Hive = 'HKLM'
+                    Scope = 'Computer'
+                    Key = $key
+                    ValueName = 'Level'
+                    Value = $Value
+                    Type = 4
+                    Source = 'Machine/Registry.pol'
+                }
+                [pscustomobject]@{
+                    Hive = 'HKCU'
+                    Scope = 'User'
+                    Key = $key
+                    ValueName = 'Level'
+                    Value = $Value
+                    Type = 4
+                    Source = 'User/Registry.pol'
+                }
+            )
+            $policies = @([pscustomobject]@{ Gpo = $gpo; Policy = $policy })
+            if ($OtherMismatch) {
+                $other = [pscustomobject]@{ Id = $otherId; Flags = 0; Version = 1; Links = @() }
+                $otherPolicy = New-PolicyFixture
+                $otherPolicy.SysvolVersion = [uint32]2
+                $policies += [pscustomobject]@{ Gpo = $other; Policy = $otherPolicy }
+            }
+            $rules = @(
+                @{ Id = 'FixtureComputerVersion'; Hive = 'HKLM'; Key = $key; ValueName = 'Level'; Expected = $Expected }
+                @{ Id = 'FixtureUserVersion'; Hive = 'HKCU'; Key = $key; ValueName = 'Level'; Expected = $Expected }
+            )
+            Invoke-ADAnalyzerAssessment -DirectoryData $directory -GpoData $policies -Profile @{ RegistryRules = $rules }
+        }
+
+        $snapshots = [ordered]@{
+            Before = & $makeSnapshot 1 $consistentVersion
+            Healthy = & $makeSnapshot 2 $consistentVersion
+            ComputerMismatch = & $makeSnapshot 2 $computerMismatch
+            UserMismatch = & $makeSnapshot 2 $userMismatch
+            EarlierMismatch = & $makeSnapshot 1 $computerMismatch
+            UnrelatedMismatch = & $makeSnapshot 2 $consistentVersion -OtherMismatch
+            UnknownVersion = & $makeSnapshot 2 $null
+            ChangedPredicate = & $makeSnapshot 1 $computerMismatch -Expected 1
+        }
+        $gpoVersionTarget = [string]$gpoId + '/Version'
+        foreach ($entry in $snapshots.GetEnumerator()) {
+            $version = @($entry.Value.Checks | Where-Object {
+                    $_.RuleId -eq $versionRule -and $_.Target -eq $gpoVersionTarget
+                })
+            Assert-Equal 1 $version.Count
+            Assert-Equal $directoryVersion $version[0].Expected
+            $expectedVersionStatus = switch ($entry.Key) {
+                { $_ -in 'Before', 'Healthy', 'UnrelatedMismatch' } { 'Pass' }
+                'UnknownVersion' { 'Unknown' }
+                default { 'Fail' }
+            }
+            Assert-Equal $expectedVersionStatus $version[0].Status
+        }
+        Assert-Equal 'Fail' ($snapshots.UnrelatedMismatch.Checks | Where-Object {
+                $_.RuleId -eq $versionRule -and $_.Target -eq ([string]$otherId + '/Version')
+            }).Status
+
+        $snapshots.DisplayNameBefore = & $makeSnapshot 1 $consistentVersion -Identity 'Fixture GPO'
+        $snapshots.DisplayNameAfter = & $makeSnapshot 2 $computerMismatch -Identity 'Fixture GPO'
+        $mismatchedVersionRow = $snapshots.ComputerMismatch.Checks | Where-Object RuleId -eq $versionRule
+        $snapshots.Legacy = $snapshots.ComputerMismatch.PSObject.Copy()
+        $snapshots.Legacy.Checks = @($snapshots.ComputerMismatch.Checks | Where-Object RuleId -ne $versionRule)
+        $snapshots.Ambiguous = $snapshots.ComputerMismatch.PSObject.Copy()
+        $snapshots.Ambiguous.Checks = @($snapshots.ComputerMismatch.Checks) + @($mismatchedVersionRow)
+        $malformedVersion = $mismatchedVersionRow.PSObject.Copy()
+        $malformedVersion.Observed = [string]$malformedVersion.Observed
+        $snapshots.Malformed = $snapshots.Legacy.PSObject.Copy()
+        $snapshots.Malformed.Checks = @($snapshots.Legacy.Checks) + @($malformedVersion)
+
+        $paths = @{}
+        $hashes = @{}
+        $originals = @{}
+        foreach ($name in $snapshots.Keys) {
+            $originals[$name] = ConvertTo-Json -InputObject $snapshots[$name] -Depth 100 -Compress
+            $paths[$name] = Join-Path $temp ('gpo-version-comparison-' + $name + '.json')
+            $null = Export-ADAnalyzerAssessment -Assessment $snapshots[$name] -Path $paths[$name] -Format Json -Confirm:$false
+            $hashes[$name] = (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $cases = @(
+            @('Before', 'ComputerMismatch', 'Computer', 'Fail', 'Pass', 'Changed', 'PolicyVersionMismatch'),
+            @('ComputerMismatch', 'Before', 'Computer', 'Pass', 'Fail', 'Changed', 'PolicyVersionMismatch'),
+            @('EarlierMismatch', 'Healthy', 'Computer', 'Fail', 'Pass', 'Changed', 'PolicyVersionMismatch'),
+            @('Before', 'UserMismatch', 'User', 'Fail', 'Pass', 'Changed', 'PolicyVersionMismatch'),
+            @('Before', 'ComputerMismatch', 'User', 'Fail', 'Pass', 'Resolved', $null),
+            @('Before', 'UserMismatch', 'Computer', 'Fail', 'Pass', 'Resolved', $null),
+            @('Before', 'Healthy', 'Computer', 'Fail', 'Pass', 'Resolved', $null),
+            @('Healthy', 'Before', 'Computer', 'Pass', 'Fail', 'New', $null),
+            @('Before', 'UnrelatedMismatch', 'Computer', 'Fail', 'Pass', 'Resolved', $null),
+            @('Before', 'UnknownVersion', 'Computer', 'Fail', 'Pass', 'Resolved', $null),
+            @('Before', 'Legacy', 'Computer', 'Fail', 'Pass', 'Resolved', $null),
+            @('Before', 'Ambiguous', 'Computer', 'Fail', 'Pass', 'Resolved', $null),
+            @('Before', 'Malformed', 'Computer', 'Fail', 'Pass', 'Resolved', $null),
+            @('DisplayNameBefore', 'DisplayNameAfter', 'Computer', 'Fail', 'Pass', 'Resolved', $null),
+            @('Before', 'ChangedPredicate', 'Computer', 'Fail', 'Pass', 'Changed', 'RulePredicateChanged')
+        )
+        foreach ($documents in @($snapshots, $paths)) {
+            foreach ($case in $cases) {
+                $before, $after, $side, $beforeStatus, $afterStatus, $expectedChange, $expectedReason = $case
+                $ruleId = 'GPO.Expected.Fixture' + $side + 'Version'
+                $reference = $snapshots[$before].Checks | Where-Object RuleId -eq $ruleId
+                $difference = $snapshots[$after].Checks | Where-Object {
+                    $_.RuleId -eq $ruleId -and $_.Target -eq $reference.Target
+                }
+                Assert-Equal $reference.CheckId $difference.CheckId
+                Assert-Equal $beforeStatus $reference.Status
+                Assert-Equal $afterStatus $difference.Status
+                $command = Compare-ADAnalyzerAssessment -Reference $documents[$before] -Difference $documents[$after]
+                $direct = $comparer.Compare($documents[$before], $documents[$after])
+                foreach ($result in @($command, $direct)) {
+                    $changes = @($result.Changes | Where-Object {
+                            $_.RuleId -eq $ruleId -and $_.Target -eq $reference.Target
+                        })
+                    Assert-Equal 1 $changes.Count
+                    $change = $changes[0]
+                    Assert-True ($change.Change -eq $expectedChange -and $change.Reason -eq $expectedReason) (
+                        "Comparison $before to $after ($side) expected $expectedChange/$expectedReason, received $($change.Change)/$($change.Reason)"
+                    )
+                    Assert-Equal $beforeStatus $change.Reference[0].Status
+                    Assert-Equal $afterStatus $change.Difference[0].Status
+                    Assert-Equal $reference.Observed $change.Reference[0].Observed
+                    Assert-Equal $difference.Observed $change.Difference[0].Observed
+                }
+            }
+        }
+
+        $report = $snapshots.ComputerMismatch.PSObject.Copy()
+        $report | Add-Member -NotePropertyName Comparison -NotePropertyValue (
+            Compare-ADAnalyzerAssessment -Reference $paths.Before -Difference $paths.ComputerMismatch
+        )
+        $htmlPath = Join-Path $temp 'gpo-version-comparison.html'
+        $null = Export-ADAnalyzerAssessment -Assessment $report -Path $htmlPath -Format Html -Confirm:$false
+        $html = Get-Content -LiteralPath $htmlPath -Raw
+        Assert-True ($html.Contains('PolicyVersionMismatch Check the recorded directory and SYSVOL versions for this policy side.')) (
+            'HTML did not explain the recorded policy-side version mismatch'
+        )
+        foreach ($name in $snapshots.Keys) {
+            Assert-Equal $originals[$name] (ConvertTo-Json -InputObject $snapshots[$name] -Depth 100 -Compress)
+            Assert-Equal $hashes[$name] (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+    }
     Test-Assessment 'SYSVOL version mismatch and policy read errors remain explicit' {
         $policy = New-PolicyFixture
         $policy.SysvolVersion = 2
