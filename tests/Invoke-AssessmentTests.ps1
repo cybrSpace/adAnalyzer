@@ -1225,6 +1225,139 @@ try {
             Assert-Equal $hashes[$name] (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
         }
     }
+    Test-Assessment 'report exports preserve the selected saved assessment source' {
+        $directory = Join-Path $temp 'report source preservation'
+        $null = [IO.Directory]::CreateDirectory($directory)
+        $null = [IO.Directory]::CreateDirectory((Join-Path $directory 'subfolder'))
+        $leaf = 'source [literal].json'
+        $source = Join-Path $directory $leaf
+        $content = '{"SchemaVersion":1,"Target":"artifact.example.invalid","Checks":[],"Findings":[]}'
+        $encoding = [Text.UTF8Encoding]::new($false)
+        [IO.File]::WriteAllText($source, $content, $encoding)
+        $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+
+        # The reader accepts JSON by content regardless of the extension.
+        $prefix = Join-Path $directory 'report [literal]'
+        $priorOutput = $prefix + '.json'
+        $laterSource = $prefix + '.html'
+        $laterOutput = $prefix + '.csv'
+        [IO.File]::WriteAllText($priorOutput, 'prior report bytes', $encoding)
+        [IO.File]::WriteAllText($laterSource, $content, $encoding)
+        $priorHash = (Get-FileHash -LiteralPath $priorOutput -Algorithm SHA256).Hash
+        $laterHash = (Get-FileHash -LiteralPath $laterSource -Algorithm SHA256).Hash
+
+        $report = [ADAnalyzerAssessmentReport]::new()
+        $routes = [ordered]@{
+            Command = {
+                param($InputFile, $OutputPath, $Format, $Preview, $ErrorMode = 'Stop')
+
+                $exportParameters = @{
+                    Assessment = $InputFile
+                    Path = $OutputPath
+                    Format = $Format
+                    Confirm = $false
+                    WhatIf = $Preview
+                    ErrorAction = $ErrorMode
+                }
+                Export-ADAnalyzerAssessment @exportParameters
+            }
+            Direct = {
+                param($InputFile, $OutputPath, $Format, $Preview)
+                $report.Write($InputFile, $OutputPath, $Format, $Preview)
+            }
+        }
+        $assertCollision = {
+            param($InvokeExport, $InputFile, $OutputPath, $Format, $Case, $ErrorMode = 'Stop')
+
+            $failure = $null
+            $paths = [Collections.Generic.List[object]]::new()
+            try {
+                & $InvokeExport $InputFile $OutputPath $Format $false $ErrorMode | ForEach-Object {
+                    $paths.Add($_)
+                }
+            }
+            catch {
+                $failure = $_
+            }
+            Assert-True ($null -ne $failure -and
+                $failure.Exception.GetBaseException().Message -ceq 'A report destination matches the saved assessment source.') (
+                "Expected report source collision rejection for $Case"
+            )
+            Assert-Equal 0 $paths.Count
+        }
+
+        $driveName = 'ADReportSourceFixture'
+        $null = New-PSDrive -Name $driveName -PSProvider FileSystem -Root $directory -Scope Script -ErrorAction Stop
+        try {
+            Push-Location -LiteralPath $directory
+            try {
+                $separator = [IO.Path]::DirectorySeparatorChar
+                $relative = 'subfolder' + $separator + '..' + $separator + $leaf
+                $mapped = $driveName + ':' + $separator + $leaf
+                $qualified = 'FileSystem::' + $source
+                $aliases = @(
+                    @('literal', $source, $source),
+                    @('relative destination', $source, $relative),
+                    @('mapped input', $mapped, $source),
+                    @('qualified destination', $source, $qualified)
+                )
+                if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                    $aliases += , @('Windows case alias', $source, (Join-Path $directory $leaf.ToUpperInvariant()))
+                }
+
+                foreach ($entry in $routes.GetEnumerator()) {
+                    foreach ($case in $aliases) {
+                        $label, $inputFile, $outputPath = $case
+                        & $assertCollision $entry.Value $inputFile $outputPath 'Json' ($entry.Key + ' ' + $label)
+                        Assert-Equal $sourceHash (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+                    }
+                    & $assertCollision $entry.Value $laterSource $prefix 'All' ($entry.Key + ' later format')
+                    if ($entry.Key -eq 'Command') {
+                        & $assertCollision $entry.Value $laterSource $prefix 'All' 'Command later format under Continue' 'Continue'
+                    }
+                    Assert-Equal $laterHash (Get-FileHash -LiteralPath $laterSource -Algorithm SHA256).Hash
+                    Assert-Equal $priorHash (Get-FileHash -LiteralPath $priorOutput -Algorithm SHA256).Hash
+                    Assert-True (-not [IO.File]::Exists($laterOutput)) 'The rejected All export wrote a later sibling.'
+
+                    $preview = @(& $entry.Value $laterSource $prefix 'All' $true)
+                    Assert-Equal 0 $preview.Count
+                    Assert-Equal $laterHash (Get-FileHash -LiteralPath $laterSource -Algorithm SHA256).Hash
+                    Assert-Equal $priorHash (Get-FileHash -LiteralPath $priorOutput -Algorithm SHA256).Hash
+                    Assert-True (-not [IO.File]::Exists($laterOutput)) 'The All preview wrote a later sibling.'
+
+                    $unsupported = Join-Path $directory 'unsupported.json'
+                    [IO.File]::WriteAllText($unsupported, '{"SchemaVersion":2}', $encoding)
+                    Assert-Throws { & $entry.Value $unsupported $prefix 'All' $true }
+
+                    $distinct = Join-Path $directory ($entry.Key + ' destination.json')
+                    [IO.File]::WriteAllText($distinct, 'old destination bytes', $encoding)
+                    $written = @(& $entry.Value $source $distinct 'Json' $false)
+                    Assert-Equal 1 $written.Count
+                    $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($distinct))
+                    Assert-Equal 'artifact.example.invalid' $saved.Target
+                    Assert-Equal $sourceHash (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+                }
+
+                $invalidDestinationFailure = $null
+                try {
+                    $null = & $routes.Command $source 'Variable:ADReportSourceFixtureInvalid' 'Json' $false
+                }
+                catch {
+                    $invalidDestinationFailure = $_
+                }
+                Assert-True ($null -ne $invalidDestinationFailure -and
+                    $invalidDestinationFailure.Exception.GetBaseException().Message -ceq
+                    'Report paths must use the FileSystem provider') 'Expected the existing non-FileSystem destination error.'
+                Assert-Equal $sourceHash (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+            }
+            finally {
+                Pop-Location
+            }
+        }
+        finally {
+            Remove-PSDrive -Name $driveName -Scope Script -Force -ErrorAction Stop
+        }
+    }
     Test-Assessment 'SYSVOL version mismatch and policy read errors remain explicit' {
         $policy = New-PolicyFixture
         $policy.SysvolVersion = 2

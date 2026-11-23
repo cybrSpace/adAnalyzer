@@ -784,6 +784,56 @@ class ADAnalyzerAssessmentReport {
         return $Path
     }
 
+    hidden [string] GetReportFileSystemPath([string]$Path) {
+        $provider = $null
+        $fullPath = ''
+        $context = Get-Variable -Name ExecutionContext -ValueOnly -ErrorAction Stop
+        $drive = $null
+        try {
+            $fullPath = $context.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
+                $Path,
+                [ref]$provider,
+                [ref]$drive
+            )
+        }
+        catch [Management.Automation.DriveNotFoundException],
+            [Management.Automation.ProviderNotFoundException],
+            [Management.Automation.ProviderInvocationException],
+            [ArgumentException],
+            [InvalidOperationException],
+            [NotSupportedException] {
+            # Keep normal destination diagnostics with the writer.
+            return ''
+        }
+        if ($null -eq $provider -or $provider.Name -ne 'FileSystem') {
+            return ''
+        }
+        return $fullPath
+    }
+
+    hidden [bool] HasSavedSourceDestination(
+        [string]$SourcePath,
+        [string]$Path,
+        [string]$Format,
+        [string[]]$Items
+    ) {
+        if ([string]::IsNullOrEmpty($SourcePath)) {
+            return $false
+        }
+
+        $comparison = [StringComparison]::Ordinal
+        if ([IO.Path]::DirectorySeparatorChar -eq [char]92) {
+            $comparison = [StringComparison]::OrdinalIgnoreCase
+        }
+        foreach ($item in $Items) {
+            $destination = $this.GetReportFileSystemPath($this.GetOutputPath($Path, $Format, $item))
+            if ($SourcePath.Equals($destination, $comparison)) {
+                return $true
+            }
+        }
+        return $false
+    }
+
     hidden [string[]] FindingNames() {
         return @('Findings', 'Checks')
     }
@@ -1024,6 +1074,12 @@ class ADAnalyzerAssessmentReport {
         if ($DryRun) {
             return [string[]]@()
         }
+        if ($Assessment -is [string]) {
+            $sourcePath = $this.GetReportFileSystemPath($Assessment)
+            if ($this.HasSavedSourceDestination($sourcePath, $Path, $Format, $formats)) {
+                throw 'A report destination matches the saved assessment source.'
+            }
+        }
 
         $outputs = @(
             foreach ($item in $formats) {
@@ -1213,10 +1269,28 @@ function Export-ADAnalyzerAssessment {
     $report = [ADAnalyzerAssessmentReport]::new()
     $findings = @(Get-ADAnalyzerOperationValue $safe ($report.FindingNames()) @())
     $formats = $report.GetFormats($Format, $true)
+    $sourcePath = ''
+    if ($Assessment -is [string] -and -not $WhatIfPreference) {
+        $sourcePath = $report.GetReportFileSystemPath($Assessment)
+    }
+    $checkedOutputs = $false
     foreach ($item in $formats) {
         $outputPath = $report.GetOutputPath($Path, $Format, $item)
         if (-not $PSCmdlet.ShouldProcess($outputPath, 'Export assessment projection')) {
             continue
+        }
+        if ($sourcePath) {
+            # Guard the whole export before publishing its first file. Later approvals may change path resolution.
+            $itemsToCheck = if ($checkedOutputs) {
+                @($item)
+            }
+            else {
+                $formats
+            }
+            if ($report.HasSavedSourceDestination($sourcePath, $Path, $Format, $itemsToCheck)) {
+                throw 'A report destination matches the saved assessment source.'
+            }
+            $checkedOutputs = $true
         }
 
         switch ($item) {
