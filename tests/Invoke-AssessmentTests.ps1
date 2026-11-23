@@ -687,6 +687,103 @@ try {
         Assert-Equal 0 $unexpectedCalls.Count
         Assert-True ($statusDifferences.Count -eq 0) ($statusDifferences -join '; ')
     }
+    Test-Assessment 'password expiry allowance changes are not recorded as account flag changes' {
+        $ruleId = 'ACCOUNT.PASSWORD_NEVER_EXPIRES'
+        $accountDn = 'CN=Expiry Test,DC=example,DC=invalid'
+        $makeSnapshot = {
+            param([bool]$NeverExpires, [bool]$Allowed)
+
+            $directory = New-AssessmentFixture
+            $directory.Objects = @([pscustomobject]@{
+                    ObjectClass = 'User'
+                    AccountType = 'User'
+                    Enabled = $true
+                    DistinguishedName = $accountDn
+                    ObjectGuid = [guid]'4bba9958-e7c0-4102-9ad8-ddba376b91f7'
+                    SID = 'S-1-5-21-1-2-3-3201'
+                    PasswordNeverExpires = $NeverExpires
+                })
+            $profile = @{ Policy = @{ AllowPasswordNeverExpires = $Allowed } }
+            Invoke-ADAnalyzerAssessment -DirectoryData $directory -Profile $profile -Target 'example.invalid'
+        }
+
+        $snapshots = [ordered]@{}
+        $checks = @{}
+        foreach ($fixture in @(
+                @('Disallowed', $true, $false, 'Fail'),
+                @('Allowed', $true, $true, 'Pass'),
+                @('FlagCleared', $false, $false, 'Pass'),
+                @('BothChanged', $false, $true, 'Pass')
+            )) {
+            $name, $flag, $allowance, $status = $fixture
+            $snapshot = & $makeSnapshot $flag $allowance
+            $rows = @($snapshot.Checks | Where-Object RuleId -eq $ruleId)
+            Assert-Equal 1 $rows.Count
+            $row = $rows[0]
+            Assert-Equal $accountDn $row.Target
+            Assert-Equal $status $row.Status
+            Assert-True ($row.Observed -is [bool] -and $row.Observed -eq $flag -and
+                $row.Expected -is [bool] -and $row.Expected -eq $allowance) 'Assessment lost the typed Boolean evidence'
+            $snapshots[$name] = $snapshot
+            $checks[$name] = $row
+        }
+
+        $snapshots.LegacyAllowance = & $makeSnapshot $true $true
+        $checks.LegacyAllowance = $snapshots.LegacyAllowance.Checks | Where-Object RuleId -eq $ruleId
+        $checks.LegacyAllowance.Expected = 'True'
+        $snapshots.CaseFoldedAllowance = & $makeSnapshot $true $true
+        $checks.CaseFoldedAllowance = $snapshots.CaseFoldedAllowance.Checks | Where-Object RuleId -eq $ruleId
+        $checks.CaseFoldedAllowance.RuleId = $ruleId.ToLowerInvariant()
+        $snapshots.ArrayRuleId = & $makeSnapshot $true $true
+        $checks.ArrayRuleId = $snapshots.ArrayRuleId.Checks | Where-Object RuleId -eq $ruleId
+        $checks.ArrayRuleId.RuleId = @($ruleId)
+
+        $paths = @{}
+        $hashes = @{}
+        foreach ($name in $snapshots.Keys) {
+            Assert-Equal $checks.Disallowed.CheckId $checks[$name].CheckId
+            $paths[$name] = Join-Path $temp ('password-expiry-comparison-' + $name + '.json')
+            $null = Export-ADAnalyzerAssessment -Assessment $snapshots[$name] -Path $paths[$name] -Format Json -Confirm:$false
+            $hashes[$name] = (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $cases = @(
+            @('Disallowed', 'FlagCleared', 'Resolved', $null),
+            @('FlagCleared', 'Disallowed', 'New', $null),
+            @('Disallowed', 'BothChanged', 'Resolved', $null),
+            @('Disallowed', 'LegacyAllowance', 'Resolved', $null),
+            @('Disallowed', 'Allowed', 'Changed', 'RulePredicateChanged'),
+            @('Allowed', 'Disallowed', 'Changed', 'RulePredicateChanged'),
+            @('Disallowed', 'CaseFoldedAllowance', 'Changed', 'RulePredicateChanged'),
+            @('Disallowed', 'ArrayRuleId', 'Resolved', $null)
+        )
+        foreach ($documents in @($snapshots, $paths)) {
+            foreach ($case in $cases) {
+                $before, $after, $expectedChange, $expectedReason = $case
+                $reference = $documents[$before]
+                $difference = $documents[$after]
+                $command = Compare-ADAnalyzerAssessment -Reference $reference -Difference $difference
+                $direct = $comparer.Compare($reference, $difference)
+                foreach ($result in @($command, $direct)) {
+                    $changes = @($result.Changes | Where-Object RuleId -eq $ruleId)
+                    Assert-Equal 1 $changes.Count
+                    $change = $changes[0]
+                    Assert-True ($change.Change -eq $expectedChange -and $change.Reason -eq $expectedReason) (
+                        "Comparison $before to $after expected $expectedChange/$expectedReason, received $($change.Change)/$($change.Reason)"
+                    )
+                    Assert-Equal $accountDn $change.Target
+                    foreach ($field in @('Status', 'Observed', 'Expected')) {
+                        Assert-Equal $checks[$before].$field $change.Reference[0].$field
+                        Assert-Equal $checks[$after].$field $change.Difference[0].$field
+                    }
+                }
+            }
+        }
+        foreach ($name in $paths.Keys) {
+            Assert-Equal $hashes[$name] (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+    }
     Test-Assessment 'unreadable collectors produce partial coverage and preserve errors' {
         $data = New-AssessmentFixture
         $data.Coverage.Users = 'Unreadable'

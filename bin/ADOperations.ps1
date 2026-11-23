@@ -1375,6 +1375,7 @@ class ADAnalyzerAssessmentComparer {
                     $oldGood = @($old | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                     $newGood = @($new | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                     $observation.Change = $this.ClassifyStatus(($oldJson -cne $newJson), $oldFail, $newFail, $oldGood, $newGood)
+                    $this.QualifyPasswordExpirationTransition($key, $old, $new, $observation, $projector)
                     $this.QualifyGpoRuleTransition($key, $old, $new, $observation)
                     $this.QualifyGpoVersionTransition($key, $oldMap, $newMap, $observation, $projector)
                 }
@@ -1523,6 +1524,53 @@ class ADAnalyzerAssessmentComparer {
             return 'Changed'
         }
         return 'Unchanged'
+    }
+
+    hidden [void] QualifyPasswordExpirationTransition(
+        [string]$Key,
+        [object[]]$Before,
+        [object[]]$After,
+        [hashtable]$Observation,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        $rule = 'ACCOUNT.PASSWORD_NEVER_EXPIRES'
+        if ($Observation.Change -notin 'Resolved', 'New' -or
+            -not $Key.StartsWith(($rule + [char]0), [StringComparison]::Ordinal) -or
+            $Before.Count -ne 1 -or $After.Count -ne 1) {
+            return
+        }
+        $oldRule = $Projector.GetValue($Before[0], @('RuleId'))
+        $newRule = $Projector.GetValue($After[0], @('RuleId'))
+        if ($oldRule -isnot [string] -or $newRule -isnot [string] -or
+            -not $oldRule.Equals($rule, [StringComparison]::OrdinalIgnoreCase) -or
+            -not $newRule.Equals($rule, [StringComparison]::OrdinalIgnoreCase)) {
+            return
+        }
+
+        $oldFlag = $Projector.GetValue($Before[0], @('Observed'))
+        $newFlag = $Projector.GetValue($After[0], @('Observed'))
+        $oldAllowance = $Projector.GetValue($Before[0], @('Expected'))
+        $newAllowance = $Projector.GetValue($After[0], @('Expected'))
+        if ($oldFlag -isnot [bool] -or $newFlag -isnot [bool] -or -not $oldFlag -or -not $newFlag -or
+            $oldAllowance -isnot [bool] -or $newAllowance -isnot [bool] -or $oldAllowance -eq $newAllowance) {
+            return
+        }
+
+        $oldStatus = $Projector.GetValue($Before[0], @('Status'))
+        $newStatus = $Projector.GetValue($After[0], @('Status'))
+        if ($oldStatus -isnot [string] -or $newStatus -isnot [string]) {
+            return
+        }
+        $matchesAllowance = if ($oldAllowance) {
+            $oldStatus -eq 'Pass' -and $newStatus -eq 'Fail'
+        }
+        else {
+            $oldStatus -eq 'Fail' -and $newStatus -eq 'Pass'
+        }
+        if ($matchesAllowance) {
+            $Observation.Change = 'Changed'
+            $Observation.Reason = 'RulePredicateChanged'
+        }
     }
 
     hidden [void] QualifyGpoRuleTransition(
@@ -2125,6 +2173,7 @@ function Compare-ADAnalyzerAssessment {
                 $oldGood = @($old | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                 $newGood = @($new | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                 $observation.Change = $comparer.ClassifyStatus(($oldJson -cne $newJson), $oldFail, $newFail, $oldGood, $newGood)
+                $comparer.QualifyPasswordExpirationTransition($key, $old, $new, $observation, $projector)
                 $comparer.QualifyGpoRuleTransition($key, $old, $new, $observation)
                 $comparer.QualifyGpoVersionTransition($key, $maps[0], $maps[1], $observation, $projector)
             }
