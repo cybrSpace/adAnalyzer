@@ -1148,13 +1148,28 @@ class ADAnalyzerHostCollector {
         return 'uValue'
     }
 
+    hidden [bool] RegistryReturnCodeIs([object]$Value, [uint32]$Expected) {
+        if ($Value -isnot [ValueType] -or $Value -is [Enum] -or [type]::GetTypeCode($Value.GetType()) -notin @(
+                [TypeCode]::SByte,
+                [TypeCode]::Byte,
+                [TypeCode]::Int16,
+                [TypeCode]::UInt16,
+                [TypeCode]::Int32,
+                [TypeCode]::UInt32,
+                [TypeCode]::Int64,
+                [TypeCode]::UInt64
+            )) {
+            return $false
+        }
+        return [decimal]$Value -eq $Expected
+    }
+
     hidden [pscustomobject] RegistryObservation(
         [hashtable]$Setting,
         [object]$Type,
-        [object]$StatusCode,
         [object]$ReturnCode
     ) {
-        $status = if ($StatusCode -eq 0) {
+        $status = if ($this.RegistryReturnCodeIs($ReturnCode, 0)) {
             'Observed'
         }
         else {
@@ -1293,7 +1308,8 @@ class ADAnalyzerHostCollector {
                         $Timing.CompleteOperation()
                     }
                     $metadata = $typeCache[$setting.Path]
-                    if ($metadata.ReturnValue -ne 0) {
+                    $metadataCode = Get-ADAnalyzerDirectoryObservationField $metadata 'ReturnValue'
+                    if (-not $this.RegistryReturnCodeIs($metadataCode, 0)) {
                         throw 'Registry value type metadata is unavailable'
                     }
                     $names = @($metadata.sNames)
@@ -1315,8 +1331,9 @@ class ADAnalyzerHostCollector {
                 $Timing.StartOperation('Registry', $method)
                 $value = Invoke-CimMethod @arguments
                 $Timing.CompleteOperation()
-                $record = $this.RegistryObservation($setting, $type, $value.ReturnValue, $value.ReturnValue)
-                if ($value.ReturnValue -eq 0) {
+                $returnCode = Get-ADAnalyzerDirectoryObservationField $value 'ReturnValue'
+                $record = $this.RegistryObservation($setting, $type, $returnCode)
+                if ($record.Status -eq 'Observed') {
                     $property = $this.RegistryValueProperty($type)
                     $record.Value = $value.$property
                 }
@@ -1382,7 +1399,8 @@ function Get-ADAnalyzerHostData {
                             $timing.CompleteOperation()
                         }
                         $metadata = $typeCache[$setting.Path]
-                        if ($metadata.ReturnValue -ne 0) {
+                        $metadataCode = Get-ADAnalyzerDirectoryObservationField $metadata 'ReturnValue'
+                        if (-not $collector.RegistryReturnCodeIs($metadataCode, 0)) {
                             throw 'Registry value type metadata is unavailable'
                         }
                         $names = @($metadata.sNames)
@@ -1404,8 +1422,9 @@ function Get-ADAnalyzerHostData {
                     $timing.StartOperation('Registry', $method)
                     $value = Invoke-CimMethod @splat
                     $timing.CompleteOperation()
-                    $record = $collector.RegistryObservation($setting, $type, $value.ReturnValue, $value.ReturnValue)
-                    if ($value.ReturnValue -eq 0) {
+                    $returnCode = Get-ADAnalyzerDirectoryObservationField $value 'ReturnValue'
+                    $record = $collector.RegistryObservation($setting, $type, $returnCode)
+                    if ($record.Status -eq 'Observed') {
                         $property = $collector.RegistryValueProperty($type)
                         $record.Value = $value.$property
                     }
@@ -2251,6 +2270,7 @@ class ADAnalyzerDirectoryCollector {
         }
 
         $status = 'Collected'
+        $hostCollector = [ADAnalyzerHostCollector]::new()
         :scanHosts foreach ($hostRecord in $Hosts) {
             if ($hostRecord.Status -ne 'Observed') {
                 $status = 'Partial'
@@ -2262,14 +2282,24 @@ class ADAnalyzerDirectoryCollector {
                 continue
             }
             foreach ($record in $registry.Value) {
-                if ($null -ne $record -and
-                    $null -ne $record.PSObject.Properties['Message'] -and
-                    $null -eq $record.PSObject.Properties['ReturnValue'] -and
-                    $record.Status -eq 'Unknown') {
-                    # Caught read failures carry a diagnostic in place of a provider return code.
-                    $status = 'Partial'
-                    break scanHosts
+                if ($null -eq $record -or $record.Status -ne 'Unknown') {
+                    continue
                 }
+
+                $members = $record.PSObject.Properties
+                $returnCode = $members['ReturnValue']
+                if ($null -ne $returnCode) {
+                    # Win32 code 2 is the established missing-value observation.
+                    if ($hostCollector.RegistryReturnCodeIs($returnCode.Value, 2)) {
+                        continue
+                    }
+                }
+                elseif ($null -eq $members['Message']) {
+                    continue
+                }
+
+                $status = 'Partial'
+                break scanHosts
             }
         }
 
