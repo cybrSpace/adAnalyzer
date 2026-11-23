@@ -3749,21 +3749,26 @@ class ADAnalyzerDirectoryPolicyEvaluator {
         $coverage = $Evaluation.Coverage
 
         foreach ($trust in @(Get-ADAnalyzerDirectoryField $Data 'Trusts' @())) {
-            $intraForest = Get-ADAnalyzerDirectoryField $trust 'IntraForest'
-            $forestTrust = Get-ADAnalyzerDirectoryField $trust 'ForestTransitive'
-            $filtering = if ($forestTrust) {
-                Get-ADAnalyzerDirectoryField $trust 'SIDFilteringForestAware'
+            $intraForest = Get-ADAnalyzerDirectoryObservationField $trust 'IntraForest'
+            $forestTrust = Get-ADAnalyzerDirectoryObservationField $trust 'ForestTransitive'
+            $filtering = $null
+            if ($forestTrust -is [bool]) {
+                $flagName = if ($forestTrust) {
+                    'SIDFilteringForestAware'
+                }
+                else {
+                    'SIDFilteringQuarantined'
+                }
+                $filtering = Get-ADAnalyzerDirectoryObservationField $trust $flagName
             }
-            else {
-                Get-ADAnalyzerDirectoryField $trust 'SIDFilteringQuarantined'
-            }
-            $status = if ($intraForest -eq $true) {
+
+            $status = if ($intraForest -is [bool] -and $intraForest) {
                 'NotApplicable'
             }
-            elseif ($null -eq $intraForest -or $null -eq $forestTrust -or $null -eq $filtering) {
+            elseif ($intraForest -isnot [bool] -or $forestTrust -isnot [bool] -or $filtering -isnot [bool]) {
                 'Unknown'
             }
-            elseif ([bool]$filtering) {
+            elseif ($filtering) {
                 'Pass'
             }
             else {

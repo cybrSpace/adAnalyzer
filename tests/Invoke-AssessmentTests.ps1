@@ -687,6 +687,157 @@ try {
         Assert-Equal 0 $unexpectedCalls.Count
         Assert-True ($statusDifferences.Count -eq 0) ($statusDifferences -join '; ')
     }
+    Test-Assessment 'offline trust SID filtering requires typed Boolean evidence' {
+        $acquisition = [Collections.Generic.List[string]]::new()
+        $denyAcquisition = {
+            $acquisition.Add($MyInvocation.InvocationName)
+            throw 'Unexpected provider call from the offline trust fixture.'
+        }
+        foreach ($commandName in 'Get-ADTrust', 'Get-ADRootDSE', 'Get-ADAnalyzerDirectoryData', 'New-CimSession') {
+            Set-Item -LiteralPath ('Function:local:' + $commandName) -Value $denyAcquisition
+        }
+        Assert-Throws { Get-ADTrust }
+        Assert-Equal 1 $acquisition.Count
+        $acquisition.Clear()
+
+        $base = @{
+            IntraForest = $false
+            ForestTransitive = $false
+            SIDFilteringQuarantined = $false
+            SIDFilteringForestAware = $true
+        }
+        $cases = [ordered]@{
+            ExternalFail = @{}
+            ExternalPass = @{ SIDFilteringQuarantined = $true }
+            ForestPass = @{ ForestTransitive = $true }
+            ForestFail = @{
+                ForestTransitive = $true
+                SIDFilteringForestAware = $false
+            }
+            IntraForest = @{ IntraForest = $true }
+            ExternalText = @{ SIDFilteringQuarantined = 'False' }
+            ForestText = @{
+                ForestTransitive = $true
+                SIDFilteringForestAware = 'False'
+            }
+            NumericFlag = @{ SIDFilteringQuarantined = 0 }
+            ArrayFlag = @{ SIDFilteringQuarantined = @($true) }
+            EmptyFlag = @{ SIDFilteringQuarantined = @() }
+            NullFlag = @{ SIDFilteringQuarantined = $null }
+            MissingFlag = @{}
+            TextIntraForest = @{ IntraForest = 'True' }
+            ArrayIntraForest = @{ IntraForest = @($true) }
+            MissingIntraForest = @{}
+            TextMode = @{ ForestTransitive = 'False' }
+            ArrayMode = @{ ForestTransitive = @($false) }
+            MissingMode = @{}
+        }
+        $valid = @{
+            ExternalFail = 'Fail'
+            ExternalPass = 'Pass'
+            ForestPass = 'Pass'
+            ForestFail = 'Fail'
+            IntraForest = 'NotApplicable'
+        }
+        $engine = [ADAnalyzerAssessmentEngine]::new()
+        $reporter = [ADAnalyzerAssessmentReport]::new()
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $makeAssessment = {
+            param($Method, $Directory)
+
+            if ($Method -ceq 'Command') {
+                Invoke-ADAnalyzerAssessment -DirectoryData $Directory -Target 'example.invalid'
+            }
+            else {
+                $engine.Evaluate($Directory, @(), 'example.invalid')
+            }
+        }
+        $records = @{
+            ExternalFail = $false
+            ExternalPass = $true
+            ForestPass = $true
+            ForestFail = $false
+            IntraForest = $false
+        }
+        $failures = [Collections.Generic.List[string]]::new()
+        foreach ($route in 'Command', 'Class') {
+            $directory = New-AssessmentFixture
+            $directory.Trusts = @(
+                foreach ($name in $cases.Keys) {
+                    $trust = $base.Clone()
+                    foreach ($key in $cases[$name].Keys) {
+                        $trust[$key] = $cases[$name][$key]
+                    }
+                    switch ($name) {
+                        'MissingFlag' { $trust.Remove('SIDFilteringQuarantined') }
+                        'MissingIntraForest' { $trust.Remove('IntraForest') }
+                        'MissingMode' { $trust.Remove('ForestTransitive') }
+                    }
+                    $trust.Target = $name + '.example.invalid'
+                    [pscustomobject]$trust
+                }
+            )
+
+            $assessment = & $makeAssessment $route $directory
+            $saved = Join-Path $temp ('trust-shapes-' + $route + '.json')
+            $null = $reporter.Write($assessment, $saved, 'Json')
+            $loaded = Get-Content -LiteralPath $saved -Raw | ConvertFrom-Json
+            foreach ($result in $assessment, $loaded) {
+                $checks = @($result.Checks | Where-Object RuleId -CEQ 'TRUST.SID_FILTERING')
+                Assert-Equal $cases.Count $checks.Count
+                for ($index = 0; $index -lt $checks.Count; $index++) {
+                    $name = @($cases.Keys)[$index]
+                    $check = $checks[$index]
+                    Assert-Equal ($name + '.example.invalid') $check.Target
+                    $expected = if ($valid.ContainsKey($name)) {
+                        $valid[$name]
+                    }
+                    else {
+                        'Unknown'
+                    }
+                    if ($check.Status -cne $expected -or
+                        ($valid.ContainsKey($name) -and
+                            ($check.Observed -isnot [bool] -or $check.Observed -ne $records[$name]))) {
+                        $failures.Add(('{0}/{1}: expected {2}, got {3}.' -f $route, $name, $expected, $check.Status))
+                    }
+                }
+            }
+
+            $comparisonPaths = @{}
+            foreach ($name in 'ExternalFail', 'ExternalText', 'ExternalPass') {
+                $one = New-AssessmentFixture
+                $trust = $directory.Trusts[[array]::IndexOf(@($cases.Keys), $name)].PSObject.Copy()
+                $trust.Target = 'partner.example.invalid'
+                $one.Trusts = @($trust)
+                $comparisonPaths[$name] = Join-Path $temp ($route + '-' + $name + '.json')
+                $null = $reporter.Write((& $makeAssessment $route $one), $comparisonPaths[$name], 'Json')
+            }
+            $previous = $comparisonPaths.ExternalFail
+            foreach ($nextCase in 'ExternalText', 'ExternalPass') {
+                $next = $comparisonPaths[$nextCase]
+                $expectedChange = if ($nextCase -ceq 'ExternalText') {
+                    'Changed'
+                }
+                else {
+                    'Resolved'
+                }
+                $comparisons = @(
+                    Compare-ADAnalyzerAssessment -Reference $previous -Difference $next
+                    $comparer.Compare($previous, $next)
+                )
+                foreach ($comparison in $comparisons) {
+                    $rows = @($comparison.Changes | Where-Object RuleId -CEQ 'TRUST.SID_FILTERING')
+                    Assert-Equal 1 $rows.Count
+                    if ($rows[0].Change -cne $expectedChange) {
+                        $failures.Add(('{0}/{1} comparison: expected {2}, got {3}.' -f
+                                $route, $nextCase, $expectedChange, $rows[0].Change))
+                    }
+                }
+            }
+        }
+        Assert-Equal 0 $acquisition.Count
+        Assert-True ($failures.Count -eq 0) ($failures -join [Environment]::NewLine)
+    }
     Test-Assessment 'scoped password expiration uses one typed account-control observation' {
         $ruleId = 'ACCOUNT.PASSWORD_NEVER_EXPIRES'
         $scope = 'OU=Selected,DC=example,DC=invalid'
