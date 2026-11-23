@@ -584,6 +584,8 @@ Directory checks include MachineAccountQuota, Recycle Bin, default/fine-grained/
 
 The trust SID-filtering check requires scalar Boolean evidence to identify a boundary trust and evaluate its selected filtering flag. A confirmed intra-forest trust is `NotApplicable`. Missing or malformed evidence for a boundary decision is `Unknown`.
 
+When OU discovery is unreadable during ACL collection, the assessment reports `Partial` ACL coverage and retains the descriptors it could collect. Successful OU discovery can return an empty set with complete coverage.
+
 Membership traversal is iterative and includes direct, primary, and transitive group SIDs. Cycle diagnostics record representative back-edge witnesses, including when multiple direct memberships enter the same cycle; shared ancestors are not cycles. These witnesses do not enumerate every possible cycle. Unreadable memberships remain explicit unresolved evidence.
 
 Modern bulk directory collection defaults to `Analysis.DirectoryConnection: "PSDrive"`. It creates an owned drive through the bundled ActiveDirectory provider, runs the existing typed AD queries against the pinned DC with drive-associated credentials, restores the caller location, and removes the drive before returning the snapshot. Explicit property lists and OU/domain/schema search bases are preserved. The scan records its connection mode and status. A failed drive context is reported as unreadable coverage rather than switching transports. Set `DirectoryConnection: "Direct"` for an explicit direct-query run, including comparable lab measurements. Live AD throughput was not measured by the fixture tests.

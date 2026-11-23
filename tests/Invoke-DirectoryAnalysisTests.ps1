@@ -2828,6 +2828,7 @@ $directoryCollectorCases = [ordered]@{
     Direct = 8
     Isolation = 2
     UsersCoverage = 15
+    AclCoverage = 6
 }
 foreach ($case in $directoryCollectorCases.Keys) {
     Invoke-DirectoryTest ('directory collector: ' + $case) {

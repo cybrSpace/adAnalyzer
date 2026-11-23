@@ -2196,7 +2196,8 @@ class ADAnalyzerDirectoryCollector {
 
     hidden [void] CompleteAclCoverage([Collections.IDictionary]$Coverage, [pscustomobject]$Plan) {
         $Coverage['Acl'] = if ($Plan.Enabled) {
-            if (@($Plan.Observations | Where-Object Status -ne 'Collected').Count) {
+            if ($Coverage['AclOUs'] -eq 'Unreadable' -or
+                @($Plan.Observations | Where-Object Status -ne 'Collected').Count) {
                 'Partial'
             }
             else {

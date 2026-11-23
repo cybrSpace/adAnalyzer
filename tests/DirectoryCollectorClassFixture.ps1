@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Native', 'Construction', 'Direct', 'Isolation', 'UsersCoverage')]
+    [ValidateSet('Native', 'Construction', 'Direct', 'Isolation', 'UsersCoverage', 'AclCoverage')]
     [string]$Case,
     [Parameter(Mandatory)][string]$RepositoryRoot
 )
@@ -326,18 +326,30 @@ function Invoke-FixtureProvider([string]$Command, [Collections.IDictionary]$Boun
             [pscustomobject]@{ FeatureGUID = '766ddcd8-acd0-445e-f3b9-a7f9b6744f2a' }
         }
         'Get-ADOrganizationalUnit' {
+            if ($script:Fault -ceq 'AclDenied') {
+                Write-Error -Message 'Fixture OU ACL discovery denied.' -ErrorId 'Fixture.AclOuDenied' `
+                    -Category PermissionDenied -ErrorAction Stop
+            }
+            if ($script:Fault -ceq 'AclEmpty') {
+                return
+            }
             [pscustomobject]@{ DistinguishedName = $script:SearchBase }
         }
         'Get-ADObject' {
             if ('nTSecurityDescriptor' -in $Bound['Properties']) {
+                $ace = [pscustomobject][ordered]@{
+                    IdentitySid = 'S-1-5-21-1-2-3-9000'
+                    Rights = 'ExtendedRight'
+                    AccessControlType = 'Allow'
+                    ObjectType = '1131f6aa-9c07-11d1-f79f-00c04fc2dcd2'
+                }
+                if ($script:Fault -clike 'Acl*' -and $Bound['Identity'] -like 'CN=AdminSDHolder,*') {
+                    $ace.Rights = 'WriteDacl'
+                    $ace.ObjectType = [guid]::Empty.ToString()
+                }
                 [pscustomobject]@{
                     nTSecurityDescriptor = [pscustomobject]@{
-                        Access = @([pscustomobject][ordered]@{
-                            IdentitySid = 'S-1-5-21-1-2-3-9000'
-                            Rights = 'ExtendedRight'
-                            AccessControlType = 'Allow'
-                            ObjectType = '1131f6aa-9c07-11d1-f79f-00c04fc2dcd2'
-                        })
+                        Access = @($ace)
                     }
                 }
             }
@@ -914,12 +926,125 @@ function Assert-FixtureDirectTrace([string]$Server, [bool]$Drive, [bool]$Credent
     }).Count -eq 0) 'Directory collection requested a managed-password value.'
 }
 
+function Assert-FixtureAclCoverage($Snapshot, [string]$Scenario) {
+    $expectedOuStatus = 'Collected'
+    $expectedAggregate = 'Collected'
+    $expectedCount = 0
+    if ($Scenario -ceq 'Denied') {
+        $expectedOuStatus = 'Unreadable'
+        $expectedAggregate = 'Partial'
+        $expectedCount = 1
+    }
+    $ouErrors = @($Snapshot.Errors | Where-Object Collector -CEQ 'AclOUs')
+    Assert-DirectoryCollector ($Snapshot.Coverage.AclOUs -ceq $expectedOuStatus -and
+        $ouErrors.Count -eq $expectedCount) 'The scoped OU observation or its diagnostic changed.'
+    if ($Scenario -ceq 'Denied') {
+        Assert-DirectoryCollector ($ouErrors[0].Target -ceq $script:SelectedServer -and
+            $ouErrors[0].Status -ceq 'Unreadable' -and
+            $ouErrors[0].Message -ceq 'Fixture OU ACL discovery denied.') 'Missing or altered OU denial diagnostic.'
+    }
+
+    $expectedTargets = @($script:DomainDn, ('CN=AdminSDHolder,CN=System,' + $script:DomainDn))
+    if ($Scenario -ceq 'Observed') {
+        $expectedTargets += $script:SearchBase
+    }
+    Assert-DirectoryCollector (($Snapshot.Acl.Targets.Target -join '|') -ceq ($expectedTargets -join '|') -and
+        @($Snapshot.Acl.Targets | Where-Object Status -CNE 'Collected').Count -eq 0 -and
+        ($Snapshot.Acl.Entries.Target -join '|') -ceq ($expectedTargets -join '|') -and
+        -not $Snapshot.Acl.EffectiveAccessCalculated) 'Successful ACL descriptors, ACEs or evidence limits changed.'
+
+    $assessment = Invoke-ADAnalyzerAssessment -DirectoryData $Snapshot
+    $report = [ADAnalyzerAssessmentReport]::new().Render($assessment, 'Json') | ConvertFrom-Json
+    foreach ($result in $assessment, $report) {
+        $findings = @($result.Findings | Where-Object RuleId -CEQ 'ACL.DELEGATED_CONTROL')
+        Assert-DirectoryCollector ($findings.Count -eq 1 -and $findings[0].Status -ceq 'Fail' -and
+            $findings[0].Observed.Target -ceq $expectedTargets[1]) 'A positively observed ACL finding was lost.'
+    }
+
+    $coverage = @($assessment.Checks | Where-Object RuleId -CEQ 'COLLECTION.ACL')
+    $reportCoverage = @($report.Checks | Where-Object RuleId -CEQ 'COLLECTION.ACL')
+    Assert-DirectoryCollector (
+        $Snapshot.Coverage.Acl -ceq $expectedAggregate -and
+        $report.Data.Directory.Coverage.Acl -ceq $expectedAggregate -and
+        $coverage.Count -eq $expectedCount -and $reportCoverage.Count -eq $expectedCount
+    ) ('Expected ACL={0} and {1} coverage checks, observed ACL={2}/{3} and {4}/{5} checks (memory/report).' -f
+        $expectedAggregate, $expectedCount, $Snapshot.Coverage.Acl, $report.Data.Directory.Coverage.Acl,
+        $coverage.Count, $reportCoverage.Count)
+    foreach ($check in ($coverage + $reportCoverage)) {
+        Assert-DirectoryCollector ($check.Status -ceq 'Unknown' -and $check.Observed -ceq 'Partial' -and
+            $check.Expected -ceq 'Collected') 'Incomplete coverage was not visible in the assessment.'
+    }
+}
+
+function Invoke-FixtureAclCoverage($Collector) {
+    $failures = [Collections.Generic.List[string]]::new()
+    foreach ($transport in 'PSDrive', 'Direct') {
+        foreach ($scenario in 'Denied', 'Empty', 'Observed') {
+            $previousFailures = $failures.Count
+            foreach ($route in 'Native', 'Class') {
+                Clear-FixtureObservations
+                $script:Fault = 'Acl' + $scenario
+                $context = New-FixtureContext
+                $profile = New-FixtureProfile $transport
+                $caseName = '{0}/{1}/{2}' -f $transport, $route, $scenario
+                try {
+                    if ($route -ceq 'Native') {
+                        $native = Invoke-FixtureNative $context $profile
+                        Assert-DirectoryCollector ($native.Rows.Count -eq 1 -and $native.Restored -and
+                            $null -eq $native.Failure -and $script:Imports.Count -eq 0) 'Native collection did not complete.'
+                        if ($scenario -ceq 'Denied') {
+                            $diagnostics = @(Get-FixtureCapturedError $native.Errors |
+                                Where-Object Id -like 'Fixture.AclOuDenied*')
+                            Assert-DirectoryCollector ($diagnostics.Count -gt 0) 'Native collection lost its original OU error ID.'
+                        }
+                        $snapshot = $native.Rows[0]
+                    }
+                    else {
+                        $direct = @(Invoke-FixtureDirect $Collector $context $profile)
+                        Assert-DirectoryCollector ($direct.Count -eq 1) 'The class did not produce one snapshot.'
+                        Assert-FixtureDirectTrace $script:SelectedServer ($transport -ceq 'PSDrive')
+                        $snapshot = $direct[0]
+                    }
+                    $lookup = @($script:Trace | Where-Object Step -CEQ 'Get-ADOrganizationalUnit')
+                    Assert-DirectoryCollector ($lookup.Count -eq 1 -and $lookup[0].Base -ceq $script:SearchBase -and
+                        $lookup[0].Server -ceq $script:SelectedServer -and $lookup[0].SameCredential -and
+                        $lookup[0].Owned -eq ($transport -ceq 'PSDrive')) 'Scoped OU lookup binding changed.'
+                    if ($transport -ceq 'PSDrive') {
+                        Assert-DirectoryCollector ($script:Trace[-2].Step -ceq 'Restore' -and
+                            $script:Trace[-1].Step -ceq 'Remove') 'The owned drive was not cleaned up.'
+                    }
+                    else {
+                        Assert-DirectoryCollector (@($script:Trace | Where-Object Step -in 'Create', 'Remove').Count -eq 0) `
+                            'Explicit Direct mounted a drive.'
+                    }
+                    Assert-FixtureAclCoverage $snapshot $scenario
+                    Write-Host ('PASS AclCoverage {0}' -f $caseName)
+                }
+                catch {
+                    $failures.Add($_.Exception.Message)
+                    Write-Host ('FAIL AclCoverage {0} {1}' -f $caseName, $_.Exception.Message)
+                }
+            }
+            if ($failures.Count -eq $previousFailures) {
+                $script:Checks++
+            }
+        }
+    }
+    if ($failures.Count) {
+        throw ('AclCoverage failed {0} of 12 route checks.' -f $failures.Count)
+    }
+}
+
 $collector = [ADAnalyzerDirectoryCollector]::new()
 Assert-DirectoryCollector ($script:Imports.Count -eq 0 -and $script:Ambient.Count -eq 0 -and $script:Trace.Count -eq 0) `
     'Loading or construction performed integration calls.'
 
 if ($Case -eq 'UsersCoverage') {
     Invoke-FixtureUsersCoverage $collector
+}
+
+if ($Case -eq 'AclCoverage') {
+    Invoke-FixtureAclCoverage $collector
 }
 
 if ($Case -eq 'Construction') {
