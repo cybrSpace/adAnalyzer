@@ -384,7 +384,8 @@ class ADAnalyzerAssessmentCollector {
         }
 
         $policies = [Collections.ArrayList]::new()
-        if ($this.ShouldCollectGpo([bool]$Options['SkipGpo'], $configuration)) {
+        $includeGpo = $this.ShouldCollectGpo([bool]$Options['SkipGpo'], $configuration)
+        if ($includeGpo) {
             $catalog = [ADAnalyzerGpoCatalog]::new()
             $reportService = [ADAnalyzerGpoReportService]::new()
             try {
@@ -406,7 +407,7 @@ class ADAnalyzerAssessmentCollector {
 
         $engine = [ADAnalyzerAssessmentEngine]::new($configuration)
         $result = $engine.Evaluate($directory, $policies.ToArray(), $resolvedDomain)
-        $resultContext = $this.NewResultContext($resolvedDomain, $domain, $searchBase, $context)
+        $resultContext = $this.NewResultContext($resolvedDomain, $domain, $searchBase, $context, $includeGpo)
         $result | Add-Member -NotePropertyName Context -NotePropertyValue $resultContext
         return $result
     }
@@ -502,7 +503,8 @@ class ADAnalyzerAssessmentCollector {
         [string]$ResolvedDomain,
         [string]$RequestedDomain,
         [string]$SearchBase,
-        [object]$Context
+        [object]$Context,
+        [bool]$IncludeGpo
     ) {
         return [pscustomobject]@{
             Domain = $ResolvedDomain
@@ -511,6 +513,7 @@ class ADAnalyzerAssessmentCollector {
             SearchBase = $SearchBase
             IncludeAcl = $Context.IncludeAcl
             IncludeHostChecks = $Context.IncludeHostChecks
+            IncludeGpo = $IncludeGpo
         }
     }
 }
@@ -589,7 +592,8 @@ function Get-ADAnalyzerAssessment {
         $directory | Add-Member -NotePropertyName HostChecks -NotePropertyValue $hostChecks -Force
     }
     $policies = [Collections.ArrayList]::new()
-    if ($collector.ShouldCollectGpo([bool]$SkipGpo, $configuration)) {
+    $includeGpo = $collector.ShouldCollectGpo([bool]$SkipGpo, $configuration)
+    if ($includeGpo) {
         try {
             $gpos = @(Get-ADAnalyzerGpo -All -Domain $resolvedDomain -Server $context.Server -Credential $Credential)
             foreach ($gpo in $gpos) {
@@ -612,7 +616,7 @@ function Get-ADAnalyzerAssessment {
         -GpoData $policies.ToArray() `
         -Profile $configuration `
         -Target $resolvedDomain
-    $resultContext = $collector.NewResultContext($resolvedDomain, $Domain, $SearchBase, $context)
+    $resultContext = $collector.NewResultContext($resolvedDomain, $Domain, $SearchBase, $context, $includeGpo)
     $result | Add-Member -NotePropertyName Context -NotePropertyValue $resultContext
     $result
 }

@@ -768,6 +768,16 @@ function Assert-NativeAssessment(
     }
     $trace = $script:Trace.ToArray()
     if ($Observe) {
+        # Compare preexisting output with the frozen implementation. Successful
+        # native scenarios assert the new Boolean separately.
+        foreach ($item in $output) {
+            if ($null -ne $item) {
+                $contextProperty = $item.PSObject.Properties['Context']
+                if ($null -ne $contextProperty -and $null -ne $contextProperty.Value) {
+                    $contextProperty.Value.PSObject.Properties.Remove('IncludeGpo')
+                }
+            }
+        }
         return (ConvertTo-FixtureNativeOutcome $output $caught $seen @($Error) $trace $continued)
     }
     if ($null -ne $caught) {
@@ -787,8 +797,14 @@ function Assert-NativeAssessment(
     Assert-Fixture ($null -eq $caught -and $output.Count -gt 0) ('Assessment did not return: ' + $caught)
     $result = $output[-1]
     $context = $result.Context
+    $includeGpo = $context.PSObject.Properties['IncludeGpo']
+    $catalogCalled = 'Catalog' -cin $trace.Stage
     Assert-Fixture (
-        ($context.PSObject.Properties.Name -join ',') -ceq 'Domain,RequestedDomain,Server,SearchBase,IncludeAcl,IncludeHostChecks'
+        $null -ne $includeGpo -and $includeGpo.Value -is [bool] -and $includeGpo.Value -eq $catalogCalled
+    ) 'The native result did not record the effective GPO collection selection.'
+    Assert-Fixture (
+        ($context.PSObject.Properties.Name -join ',') -ceq
+        'Domain,RequestedDomain,Server,SearchBase,IncludeAcl,IncludeHostChecks,IncludeGpo'
     ) 'The public context changed.'
     Assert-Fixture ($result.Target -ceq $context.Domain) 'The published target differs from the resolved context.'
     $bootstrap = $trace[0].Values
@@ -1787,7 +1803,9 @@ function Invoke-AssessmentCompositionFixture {
         [object]$Collector,
         [switch]$FailEvaluation,
         [switch]$CimCleanupError,
-        [switch]$CimRegistryTimeout
+        [switch]$CimRegistryTimeout,
+        [switch]$SkipGpo,
+        [switch]$DisableGpoInProfile
     )
 
     $script:CompositionImports = 0
@@ -1881,11 +1899,13 @@ function Invoke-AssessmentCompositionFixture {
                 }
             }
         }
-        if ($CimRegistryTimeout) {
+        if ($FailEvaluation -or $SkipGpo) {
             $options.SkipGpo = $true
         }
+        if ($DisableGpoInProfile) {
+            $options.Profile.Analysis.IncludeGpo = $false
+        }
         if ($FailEvaluation) {
-            $options.SkipGpo = $true
             $caught = $null
             try {
                 $null = $Collector.Collect($options, $script:CompositionCredential)
@@ -1904,6 +1924,16 @@ function Invoke-AssessmentCompositionFixture {
             return
         }
         $result = $Collector.Collect($options, $script:CompositionCredential)
+        $expectedIncludeGpo = -not ($SkipGpo -or $DisableGpoInProfile)
+        $includeGpo = $result.Context.PSObject.Properties['IncludeGpo']
+        Assert-Fixture (
+            $null -ne $includeGpo -and $includeGpo.Value -is [bool] -and $includeGpo.Value -eq $expectedIncludeGpo
+        ) 'The direct result did not record the effective GPO collection selection.'
+        $json = [ADAnalyzerAssessmentReport]::new().Render($result, 'JSON')
+        $reported = (ConvertFrom-Json -InputObject $json).Context.IncludeGpo
+        Assert-Fixture (
+            $reported -is [bool] -and $reported -eq $expectedIncludeGpo
+        ) 'The JSON report did not preserve the GPO collection selection as a Boolean.'
         Assert-Fixture (
             $result.Context.Server -ceq $script:CompositionPinnedServer -and
             $result.Context.Domain -ceq $script:CompositionDomain -and
@@ -1926,6 +1956,10 @@ function Invoke-AssessmentCompositionFixture {
         ) 'Composed directory, host, or transport data changed.'
         if ($CimRegistryTimeout) {
             Assert-CompositionRegistryTimeout $result
+            Assert-Fixture (
+                @($result.Data.Policies).Count -eq 0 -and
+                @($script:CompositionTrace | Where-Object { $_ -match '^(AD3/|Sysvol)' }).Count -eq 0
+            ) 'The host timeout scenario acquired policies despite SkipGpo.'
             return
         }
         Assert-Fixture (
@@ -1969,6 +2003,16 @@ function Invoke-AssessmentCompositionFixture {
             $directoryService.State -ceq 'Running' -and $script:CompositionService.State -ceq 'Running'
         ) 'A projected check reused another result or disposed the original service observation.'
         $policies = @($result.Data.Policies)
+        if (-not $expectedIncludeGpo) {
+            Assert-Fixture (
+                $policies.Count -eq 0 -and $script:CompositionImports -eq 2 -and
+                @($script:CompositionTrace | Where-Object { $_ -match '^(AD3/|Sysvol)' }).Count -eq 0 -and
+                $script:CompositionOwned.Count -eq 0 -and $script:CompositionForeignCalls -eq 0 -and
+                $null -eq $script:CompositionSession -and
+                (Microsoft.PowerShell.Management\Get-Location).Path -ceq $script:CompositionCallerPath
+            ) 'Omitting GPO collection performed policy work or left owned resources.'
+            return
+        }
         $readFailure = @($result.Checks | Where-Object RuleId -CEQ 'GPO.READ')
         $version = @($result.Checks | Where-Object RuleId -CEQ 'GPO.VERSION_CONSISTENCY')
         $collectionErrors = @($result.Errors | Where-Object Collection -CEQ 'GroupPolicy')
@@ -2068,11 +2112,17 @@ if ($Case -eq 'Composition') {
         Invoke-AssessmentCompositionFixture Direct $compositionCollector -CimCleanupError
     }
     Test-Fixture 'composed assessment and JSON retain incomplete CIM timing' {
-        Invoke-AssessmentCompositionFixture PSDrive $compositionCollector -CimRegistryTimeout
+        Invoke-AssessmentCompositionFixture PSDrive $compositionCollector -CimRegistryTimeout -SkipGpo
     }
     Test-Fixture 'actual strict composition retains unreadable and healthy GPOs' {
         Set-StrictMode -Version Latest
         Invoke-AssessmentCompositionFixture Direct $compositionCollector
+    }
+    Test-Fixture 'explicit SkipGpo omits policy acquisition and records that decision' {
+        Invoke-AssessmentCompositionFixture PSDrive $compositionCollector -SkipGpo
+    }
+    Test-Fixture 'a profile can disable GPO acquisition and record that decision' {
+        Invoke-AssessmentCompositionFixture Direct $compositionCollector -DisableGpoInProfile
     }
     Test-Fixture 'SkipGpo and terminal evaluation preserve the borrowed host observation' {
         function script:Test-ADAnalyzerDirectoryPolicy {
