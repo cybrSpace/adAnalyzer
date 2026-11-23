@@ -553,6 +553,8 @@ Resolution returns the existing ordered raw and metadata fields, including expli
 
 User/service classification uses configured OUs, group identities, explicit attributes, or managed-service-account schema classes. An unclassified account remains Unknown. Privileged membership uses SIDs, transitive membership and primary groups, with cycle and unresolved-membership evidence. Password age does not prove password strength.
 
+The account password expiration check uses an observed Boolean `PasswordNeverExpires` value. Missing or malformed observations report `Unknown`.
+
 Checks expose Pass, Fail, Unknown, Unreadable, NotConfigured, Invalid, and NotApplicable. Applicability is separate: GPO checks describe stored risk and normally leave target applicability Unknown. WMI filters, disabled links/sides, and preference targeting are retained; a complete inheritance/security-filter/RSoP engine is not provided. Missing settings in one GPO do not prove effective noncompliance. A retained cpassword remains a credential exposure even when its item is disabled.
 
 When a GPO snapshot lists XML without a matching payload for the same scope and relative path, the assessment reports `GPO.Coverage.MissingXml` with a count. Credential absence stays `Unknown` until the listed XML is available and readable. Confirmed presence remains a Boolean finding even if other XML is missing.

@@ -562,6 +562,131 @@ try {
         Assert-Equal 'NotConfigured' ($result.Checks | Where-Object RuleId -eq COLLECTION.ACL).Status
         Assert-Equal 1 $result.SchemaVersion
     }
+    Test-Assessment 'offline password expiration requires a Boolean account observation' {
+        $unexpectedCalls = [Collections.Generic.List[string]]::new()
+        $denyAcquisition = {
+            $unexpectedCalls.Add($MyInvocation.InvocationName)
+            throw 'Unexpected acquisition in the offline password expiration fixture.'
+        }
+        foreach ($commandName in @(
+                'Import-Module'
+                'Get-ADRootDSE'
+                'Get-ADAnalyzerDirectoryData'
+                'Get-ADAnalyzerHostData'
+                'Get-ADAnalyzerGpo'
+                'Get-ADAnalyzerGpoReport'
+                'Invoke-Command'
+                'New-CimSession'
+            )) {
+            Set-Item -LiteralPath ('Function:local:' + $commandName) -Value $denyAcquisition
+        }
+        Assert-Throws { Get-ADRootDSE }
+        Assert-Equal 1 $unexpectedCalls.Count
+        $unexpectedCalls.Clear()
+
+        $flags = [ordered]@{
+            BooleanTrue = $true
+            BooleanFalse = $false
+            DisabledBooleanTrue = $true
+            Null = $null
+            EmptyString = ''
+            TextFalse = 'false'
+            NumericZero = 0
+            EmptyArray = @()
+            SingletonBooleanArray = @($false)
+        }
+        $caseNames = @($flags.Keys) + 'Missing'
+        $statusWhenDisallowed = @{
+            BooleanTrue = 'Fail'
+            BooleanFalse = 'Pass'
+            DisabledBooleanTrue = 'Fail'
+        }
+        $projector = [ADAnalyzerDirectoryObjectProjector]::new()
+        $identities = @{}
+        $statusDifferences = [Collections.Generic.List[string]]::new()
+        foreach ($projection in 'Snapshot', 'Class', 'Command') {
+            $directory = New-AssessmentFixture
+            $directory.Users = @(
+                for ($index = 0; $index -lt $caseNames.Count; $index++) {
+                    $caseName = $caseNames[$index]
+                    $fields = [ordered]@{
+                        DistinguishedName = 'CN=' + $caseName + ',DC=example,DC=invalid'
+                        SID = 'S-1-5-21-1-2-3-' + (2300 + $index)
+                        ObjectClass = 'User'
+                        Enabled = $caseName -ne 'DisabledBooleanTrue'
+                    }
+                    if ($flags.Contains($caseName)) {
+                        $fields['PasswordNeverExpires'] = $flags[$caseName]
+                    }
+                    $record = [pscustomobject]$fields
+                    switch ($projection) {
+                        'Snapshot' {
+                            $record
+                        }
+                        'Class' {
+                            $projector.Project($record, 'User')
+                        }
+                        'Command' {
+                            ConvertTo-ADAnalyzerDirectoryObject -Record $record -Kind User
+                        }
+                    }
+                }
+            )
+
+            foreach ($allowNeverExpires in $false, $true) {
+                $profile = @{
+                    Analysis = @{
+                        IncludeGpo = $false
+                        IncludeHostChecks = $false
+                    }
+                    Policy = @{
+                        AllowPasswordNeverExpires = $allowNeverExpires
+                    }
+                }
+                $result = Invoke-ADAnalyzerAssessment -DirectoryData $directory -Profile $profile
+                $checks = @($result.Checks | Where-Object RuleId -CEQ 'ACCOUNT.PASSWORD_NEVER_EXPIRES')
+                Assert-Equal $caseNames.Count $checks.Count
+                for ($index = 0; $index -lt $caseNames.Count; $index++) {
+                    $caseName = $caseNames[$index]
+                    $row = $checks[$index]
+                    $userRecord = $directory.Users[$index]
+                    $expectedStatus = $statusWhenDisallowed[$caseName]
+                    if ($null -eq $expectedStatus) {
+                        $expectedStatus = 'Unknown'
+                    }
+                    elseif ($allowNeverExpires) {
+                        $expectedStatus = 'Pass'
+                    }
+                    if ($row.Status -cne $expectedStatus) {
+                        $statusDifferences.Add(('{0}/{1} (allow={2}): expected {3}, got {4}' -f
+                                $projection, $caseName, $allowNeverExpires, $expectedStatus, $row.Status))
+                    }
+                    Assert-True (
+                        $row.Target -ceq $userRecord.DistinguishedName -and
+                        $row.DistinguishedName -ceq $userRecord.DistinguishedName -and
+                        $row.SID -ceq $userRecord.SID -and
+                        $row.CheckId -cmatch '^[0-9a-f]{64}$' -and
+                        $row.Applicability -ceq 'Configured' -and
+                        $row.Expected -is [bool] -and $row.Expected -eq $allowNeverExpires -and
+                        $null -ne $row.PSObject.Properties['Observed']
+                    ) ('The password expiration check lost its identity or result shape for ' + $caseName)
+                    if ($identities.ContainsKey($caseName)) {
+                        Assert-Equal $identities[$caseName] $row.CheckId
+                    }
+                    else {
+                        $identities[$caseName] = $row.CheckId
+                    }
+                    if ($flags[$caseName] -is [bool]) {
+                        Assert-True ($row.Observed -is [bool] -and $row.Observed -eq $flags[$caseName]) (
+                            'The password expiration check lost its Boolean observation for ' + $caseName
+                        )
+                    }
+                }
+            }
+        }
+        Assert-Equal 0 $unexpectedCalls.Count
+        Assert-True ($statusDifferences.Count -eq 0) ($statusDifferences -join '; ')
+    }
     Test-Assessment 'unreadable collectors produce partial coverage and preserve errors' {
         $data = New-AssessmentFixture
         $data.Coverage.Users = 'Unreadable'
