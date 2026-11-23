@@ -48,6 +48,10 @@ if ($Mode -in 'Regression', 'All') {
         'Invoke-HostAnalysisTests.ps1'
         'Invoke-AuxiliaryTests.ps1'
     )
+    if ($Mode -eq 'All') {
+        # Package verification uses the committed tree from this Git checkout.
+        $suites = @('Invoke-PackagedDistributionTests.ps1') + $suites
+    }
     foreach ($suite in $suites) {
         Write-Host ('Running ' + $suite)
         & $engine -NoLogo -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot $suite) -RepositoryRoot $RepositoryRoot
