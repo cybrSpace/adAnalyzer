@@ -113,7 +113,7 @@ function Get-CimInstance {
     }
     Add-FixtureEvent Class $computer $ClassName
     if ($ClassName -eq 'Win32_OperatingSystem' -and $computer -clike 'a.*') {
-        if ($script:Mode -eq 'QueryFails') {
+        if ($script:Mode -in 'QueryFails', 'QueryCleanupErrors') {
             throw 'Fixture class query failure.'
         }
         if ($script:Mode -eq 'Warning') {
@@ -202,8 +202,11 @@ function Remove-CimSession {
     Add-FixtureEvent Close $computer
     $null = $script:Sessions.Remove($computer)
     if ($computer -clike 'a.*') {
-        if ($script:Mode -eq 'CleanupError') {
+        if ($script:Mode -in 'CleanupError', 'QueryCleanupErrors') {
             Write-Error -Message 'Fixture cleanup diagnostic.' -ErrorId 'Fixture.HostCleanup'
+            if ($script:Mode -eq 'QueryCleanupErrors') {
+                Write-Error -Message 'Fixture second cleanup diagnostic.' -ErrorId 'Fixture.HostCleanupSecond'
+            }
         }
         elseif ($script:Mode -eq 'CleanupThrow') {
             throw 'Fixture terminating cleanup failure.'
@@ -270,6 +273,45 @@ function ConvertTo-HostFixtureDiagnostic($Diagnostic) {
         return ('{0}|{1}' -f $Diagnostic.ErrorRecord.FullyQualifiedErrorId, $Diagnostic.Message)
     }
     [string]$Diagnostic
+}
+
+function Assert-FixtureCleanupError([object]$ErrorRow, [string]$ExpectedMessage) {
+    Assert-HostCollector (
+        $ErrorRow.Collector -ceq 'Host.Cleanup' -and
+        $ErrorRow.Target -ceq 'a.fixture.invalid' -and
+        $ErrorRow.Status -ceq 'Unknown' -and
+        $ErrorRow.Message -ceq $ExpectedMessage
+    ) 'The CIM cleanup diagnostic lost its collector, target, status, or message.'
+}
+
+function Assert-FixtureCleanupContinued([object[]]$Hosts, [object[]]$Events, [string]$FirstHostStatus) {
+    Assert-HostCollector (
+        ($Hosts.ComputerName -join '|') -ceq 'a.fixture.invalid|A.fixture.invalid|b.fixture.invalid|c.fixture.invalid' -and
+        ($Hosts.Status -join '|') -ceq ($FirstHostStatus + '|Observed|Observed|Observed') -and
+        $Hosts[0].Services[0].State -ceq 'Running' -and
+        $Hosts[0].Registry.Count -gt 0
+    ) 'A recoverable cleanup diagnostic changed observed evidence or later host processing.'
+
+    $ownership = @(
+        foreach ($event in $Events) {
+            if ($event.Step -in 'Open', 'Close') {
+                $event.Step + ':' + $event.Computer
+            }
+        }
+    )
+    $expectedOwnership = @(
+        'Open:a.fixture.invalid'
+        'Close:a.fixture.invalid'
+        'Open:A.fixture.invalid'
+        'Close:A.fixture.invalid'
+        'Open:b.fixture.invalid'
+        'Close:b.fixture.invalid'
+        'Open:c.fixture.invalid'
+        'Close:c.fixture.invalid'
+    )
+    Assert-HostCollector (
+        ($ownership -join '|') -ceq ($expectedOwnership -join '|')
+    ) 'A recoverable cleanup diagnostic changed owned-session attempt counts or order.'
 }
 
 function Invoke-NativeHostFixture([string]$Mode, [switch]$First, [switch]$Plain) {
@@ -401,8 +443,30 @@ if ($Case -eq 'Native') {
     }
     Test-HostCollector {
         $result = Invoke-NativeHostFixture CleanupError
-        Assert-HostCollector ($result.Hosts.Count -eq 4 -and $result.Errors.Count -eq 1 -and
-            ($result.History -join '|') -match 'Fixture.HostCleanup' -and $result.Observed.Count -gt 0) 'Recoverable cleanup changed host output or lost diagnostics.'
+        Assert-FixtureCleanupContinued $result.Hosts $result.Events 'Observed'
+        Assert-HostCollector (
+            $null -eq $result.Caught -and
+            $result.Hosts[0].OperatingSystem.Count -eq 1 -and
+            $result.Streams.Count -eq $result.Hosts.Count -and
+            ($result.History -join '|') -match 'Fixture.HostCleanup' -and
+            ($result.Observed -join '|') -match 'Fixture.HostCleanup'
+        ) 'Recoverable cleanup changed host output or existing PowerShell diagnostics.'
+        Assert-HostCollector (
+            $result.Errors.Count -eq 2 -and $result.Errors[0].Collector -ceq 'Earlier'
+        ) 'The native collector omitted or duplicated the recoverable CIM cleanup error.'
+        Assert-FixtureCleanupError $result.Errors[1] 'Fixture cleanup diagnostic.'
+    }
+    Test-HostCollector {
+        $result = Invoke-NativeHostFixture QueryCleanupErrors
+        Assert-FixtureCleanupContinued $result.Hosts $result.Events 'Partial'
+        Assert-HostCollector (
+            $null -eq $result.Hosts[0].OperatingSystem -and
+            ($result.Errors.Collector -join '|') -ceq 'Earlier|Host.OperatingSystem|Host.Cleanup|Host.Cleanup' -and
+            $result.Errors[1].Target -ceq 'a.fixture.invalid' -and
+            $result.Errors[1].Message -ceq 'Fixture class query failure.'
+        ) 'The native collector lost or reordered query and CIM cleanup errors.'
+        Assert-FixtureCleanupError $result.Errors[2] 'Fixture cleanup diagnostic.'
+        Assert-FixtureCleanupError $result.Errors[3] 'Fixture second cleanup diagnostic.'
     }
     Test-HostCollector {
         $result = Invoke-NativeHostFixture CleanupThrow
@@ -422,8 +486,17 @@ if ($Case -eq 'Native') {
     }
     Test-HostCollector {
         $result = Invoke-NativeHostFixture CleanupError -Plain
-        Assert-HostCollector ($result.Hosts.Count -eq 4 -and $result.Observed.Count -eq 0 -and
-            ($result.History -join '|') -match 'Fixture.HostCleanup') 'Plain helper binding or ambient error history changed.'
+        Assert-FixtureCleanupContinued $result.Hosts $result.Events 'Observed'
+        Assert-HostCollector (
+            $null -eq $result.Caught -and
+            $result.Observed.Count -eq 0 -and
+            $result.Streams.Count -eq $result.Hosts.Count -and
+            ($result.History -join '|') -match 'Fixture.HostCleanup'
+        ) 'Plain helper binding or ambient error history changed.'
+        Assert-HostCollector (
+            $result.Errors.Count -eq 2 -and $result.Errors[0].Collector -ceq 'Earlier'
+        ) 'The plain helper omitted or duplicated the recoverable CIM cleanup error.'
+        Assert-FixtureCleanupError $result.Errors[1] 'Fixture cleanup diagnostic.'
     }
     Write-Host ('PASS host collector Native {0}' -f $script:Checks)
 }
@@ -520,6 +593,47 @@ if ($Case -eq 'Direct') {
         Assert-HostCollector ($result.Hosts[0].Status -ceq 'Observed' -and $result.Errors.Count -eq 0 -and
             $value.Status -ceq 'Unknown' -and $null -eq $value.Value -and
             $value.Message -ceq 'Fixture registry getter failure.') 'Direct registry failure changed host-level error semantics.'
+    }
+    Test-HostCollector {
+        Reset-HostFixture CleanupError
+        $result = $collector.Collect($hosts, $script:Credential, [uint32]17, $profile)
+        Assert-FixtureCleanupContinued $result.Hosts ($script:Events.ToArray()) 'Observed'
+        Assert-HostCollector (
+            $result.Hosts[0].OperatingSystem.Count -eq 1 -and
+            $result.Errors -is [array] -and
+            $result.Errors.Count -eq 1
+        ) 'The direct collector omitted or duplicated the recoverable CIM cleanup error.'
+        Assert-FixtureCleanupError $result.Errors[0] 'Fixture cleanup diagnostic.'
+    }
+    Test-HostCollector {
+        Reset-HostFixture QueryCleanupErrors
+        $result = $collector.Collect($hosts, $script:Credential, [uint32]17, $profile)
+        Assert-FixtureCleanupContinued $result.Hosts ($script:Events.ToArray()) 'Partial'
+        Assert-HostCollector (
+            $null -eq $result.Hosts[0].OperatingSystem -and
+            ($result.Errors.Collector -join '|') -ceq 'Host.OperatingSystem|Host.Cleanup|Host.Cleanup' -and
+            $result.Errors[0].Target -ceq 'a.fixture.invalid' -and
+            $result.Errors[0].Message -ceq 'Fixture class query failure.'
+        ) 'The direct collector lost or reordered query and CIM cleanup errors.'
+        Assert-FixtureCleanupError $result.Errors[1] 'Fixture cleanup diagnostic.'
+        Assert-FixtureCleanupError $result.Errors[2] 'Fixture second cleanup diagnostic.'
+    }
+    Test-HostCollector {
+        Reset-HostFixture CleanupThrow
+        $failure = $null
+        try {
+            $null = $collector.Collect($hosts, $script:Credential, [uint32]17, $profile)
+        }
+        catch {
+            $failure = $_
+        }
+        Assert-HostCollector (
+            $null -ne $failure -and
+            $failure.Exception.GetBaseException().Message -ceq 'Fixture terminating cleanup failure.' -and
+            $script:Events[-1].Step -ceq 'Close' -and
+            @($script:Events | Where-Object Step -eq Open).Count -eq 1 -and
+            $script:Sessions.Count -eq 0
+        ) 'Terminating direct cleanup stopped preserving the existing collection cutoff.'
     }
     Test-HostCollector {
         Reset-HostFixture Healthy

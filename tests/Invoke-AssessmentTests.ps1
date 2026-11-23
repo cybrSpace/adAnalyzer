@@ -2801,7 +2801,7 @@ $assessmentCollectorCases = [ordered]@{
     Construction = 2
     Direct = 11
     Isolation = 2
-    Composition = 4
+    Composition = 5
 }
 foreach ($case in $assessmentCollectorCases.Keys) {
     Test-Assessment ('assessment collector API: ' + $case) {

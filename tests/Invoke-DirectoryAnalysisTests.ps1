@@ -2791,9 +2791,9 @@ foreach ($case in $projectorCases.Keys) {
 }
 
 $hostCollectorCases = [ordered]@{
-    Native = 10
+    Native = 11
     Construction = 3
-    Direct = 4
+    Direct = 7
     Reuse = 2
     Runspace = 2
 }

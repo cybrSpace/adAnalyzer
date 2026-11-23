@@ -1060,6 +1060,21 @@ class ADAnalyzerHostCollector {
         }
     }
 
+    hidden [void] RecordCleanupFailures(
+        [object]$Errors,
+        [string]$ComputerName,
+        [Management.Automation.ErrorRecord[]]$CleanupErrors
+    ) {
+        if ($null -eq $Errors) {
+            return
+        }
+
+        foreach ($cleanupError in $CleanupErrors) {
+            $failure = $this.CollectorFailure('Host.Cleanup', $ComputerName, $cleanupError.Exception.Message)
+            [void]$Errors.Add($failure)
+        }
+    }
+
     hidden [void] CompleteReport(
         [Collections.Specialized.OrderedDictionary]$Report,
         [object[]]$Registry,
@@ -1104,7 +1119,11 @@ class ADAnalyzerHostCollector {
         }
         finally {
             if ($null -ne $session) {
-                Remove-CimSession -CimSession $session -ErrorAction SilentlyContinue
+                $cleanupErrors = $null
+                Remove-CimSession -CimSession $session -ErrorAction SilentlyContinue -ErrorVariable cleanupErrors
+                if ($cleanupErrors) {
+                    $this.RecordCleanupFailures($Errors, $ComputerName, $cleanupErrors)
+                }
             }
         }
         return [pscustomobject]$report
@@ -1239,7 +1258,11 @@ function Get-ADAnalyzerHostData {
         }
         finally {
             if ($null -ne $session) {
-                Remove-CimSession -CimSession $session -ErrorAction SilentlyContinue
+                $cleanupErrors = $null
+                Remove-CimSession -CimSession $session -ErrorAction SilentlyContinue -ErrorVariable cleanupErrors
+                if ($cleanupErrors) {
+                    $collector.RecordCleanupFailures($Errors, $computer, $cleanupErrors)
+                }
             }
         }
         [pscustomobject]$data

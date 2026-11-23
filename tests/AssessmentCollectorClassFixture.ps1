@@ -1617,6 +1617,9 @@ Invoke-CompositionProvider 'COMPOSITION_COMMAND' $PSBoundParameters
             $PSBoundParameters['ErrorAction'] -eq 'SilentlyContinue') 'CIM cleanup used the wrong session or preference.'
         Add-CompositionEvent CimClose
         $script:CompositionSession = $null
+        if ($script:CompositionCimCleanupError) {
+            Write-Error -Message 'Fixture composed CIM cleanup diagnostic.' -ErrorId 'Fixture.AssessmentHostCleanup'
+        }
     }
 
     function script:Get-ADAnalyzerAuditPolicy {
@@ -1708,12 +1711,20 @@ function Invoke-CompositionProvider([string]$Command, [Collections.IDictionary]$
     }
 }
 
-function Invoke-AssessmentCompositionFixture([string]$Transport, [object]$Collector, [switch]$FailEvaluation) {
+function Invoke-AssessmentCompositionFixture {
+    param(
+        [string]$Transport,
+        [object]$Collector,
+        [switch]$FailEvaluation,
+        [switch]$CimCleanupError
+    )
+
     $script:CompositionImports = 0
     $script:CompositionTrace.Clear()
     $script:CompositionForeignCalls = 0
     $script:CompositionCallerPath = (Microsoft.PowerShell.Management\Get-Location).Path
     $script:CompositionSession = $null
+    $script:CompositionCimCleanupError = [bool]$CimCleanupError
     $script:CompositionTemp = [IO.Path]::Combine([IO.Path]::GetTempPath(), ('assessment-composition-' + [guid]::NewGuid().ToString('N')))
     $nativeService = $null
     try {
@@ -1839,6 +1850,24 @@ function Invoke-AssessmentCompositionFixture([string]$Transport, [object]$Collec
             $directory.Coverage.Hosts -ceq 'Collected' -and
             @($directory.Hosts).Count -eq 1
         ) 'Composed directory, host, or transport data changed.'
+        $isCleanupError = {
+            $collectorField = $_.PSObject.Properties['Collector']
+            $null -ne $collectorField -and $collectorField.Value -ceq 'Host.Cleanup'
+        }
+        $directoryCleanupErrors = @($directory.Errors | Where-Object $isCleanupError)
+        $assessmentCleanupErrors = @($result.Errors | Where-Object $isCleanupError)
+        $expectedCleanupCount = [int]$CimCleanupError.IsPresent
+        Assert-Fixture (
+            $directoryCleanupErrors.Count -eq $expectedCleanupCount -and
+            $assessmentCleanupErrors.Count -eq $expectedCleanupCount
+        ) 'CIM cleanup observations were omitted, duplicated, or retained from a prior assessment.'
+        foreach ($cleanup in ($directoryCleanupErrors + $assessmentCleanupErrors)) {
+            Assert-Fixture (
+                $cleanup.Target -ceq $script:CompositionPinnedServer -and
+                $cleanup.Status -ceq 'Unknown' -and
+                $cleanup.Message -ceq 'Fixture composed CIM cleanup diagnostic.'
+            ) 'Assessment composition changed the CIM cleanup diagnostic.'
+        }
         $services = @($result.Checks | Where-Object RuleId -CEQ 'HOST.SERVICE')
         $audit = @($result.Checks | Where-Object RuleId -CEQ 'HOST.AUDIT_POLICY')
         Assert-Fixture (
@@ -1952,6 +1981,9 @@ if ($Case -eq 'Composition') {
         Test-Fixture ('actual composition with ' + $transport) {
             Invoke-AssessmentCompositionFixture $transport $compositionCollector
         }
+    }
+    Test-Fixture 'actual composition retains recoverable CIM cleanup evidence' {
+        Invoke-AssessmentCompositionFixture Direct $compositionCollector -CimCleanupError
     }
     Test-Fixture 'actual strict composition retains unreadable and healthy GPOs' {
         Set-StrictMode -Version Latest
