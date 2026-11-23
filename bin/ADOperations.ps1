@@ -1447,6 +1447,7 @@ class ADAnalyzerAssessmentComparer {
                     $this.QualifyDirectoryPasswordExpirationResolution(
                         $key, $old, $new, $observation, $directoryEvidence, $projector
                     )
+                    $this.QualifyHostServiceTransition($key, $old, $new, $observation, $projector)
                     $this.QualifyGpoRuleTransition($key, $old, $new, $observation)
                     $this.QualifyGpoVersionTransition($key, $oldMap, $newMap, $observation, $projector)
                 }
@@ -1926,6 +1927,108 @@ class ADAnalyzerAssessmentComparer {
             $this.MatchesObservedPasswordFlag($After[0], $newUser, $false, 'Pass', $newEvidence.Scope, $Projector)) {
             $Observation.Change = 'Resolved'
             $Observation.Reason = $null
+        }
+    }
+
+    hidden [void] QualifyHostServiceTransition(
+        [string]$Key,
+        [object[]]$Before,
+        [object[]]$After,
+        [hashtable]$Observation,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        if ($Observation.Change -notin 'Resolved', 'New' -or
+            -not $Key.StartsWith(('HOST.SERVICE' + [char]0), [StringComparison]::Ordinal) -or
+            $Before.Count -ne 1 -or $After.Count -ne 1) {
+            return
+        }
+
+        $previous = $this.ReadHostServiceDecision($Before[0], $Key, $Projector)
+        $current = $this.ReadHostServiceDecision($After[0], $Key, $Projector)
+        if ($null -eq $previous -or $null -eq $current -or $previous.Status -ceq $current.Status -or
+            $previous.ObservedState -ine $current.ObservedState) {
+            return
+        }
+        if (($previous.ExpectedMode -or $current.ExpectedMode) -and
+            ($previous.ObservedMode -isnot [string] -or $current.ObservedMode -isnot [string] -or
+                $previous.ObservedMode -ine $current.ObservedMode)) {
+            return
+        }
+
+        if ($previous.ExpectedState -ine $current.ExpectedState -or $previous.ExpectedMode -ine $current.ExpectedMode) {
+            $Observation.Change = 'Changed'
+            $Observation.Reason = 'RulePredicateChanged'
+        }
+    }
+
+    hidden [hashtable] ReadHostServiceDecision(
+        [object]$Row,
+        [string]$Key,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        $rule = $this.GetRecordedEvidenceMember($Row, 'RuleId', $Projector, $null)
+        $status = $this.GetRecordedEvidenceMember($Row, 'Status', $Projector, $null)
+        $observed = $this.GetRecordedEvidenceMember($Row, 'Observed', $Projector, $null)
+        if ($rule -isnot [string] -or $rule -ine 'HOST.SERVICE' -or
+            $status -isnot [string] -or $status -cnotin 'Pass', 'Fail' -or
+            $observed -isnot [object[]] -or $observed.Length -ne 1) {
+            return $null
+        }
+
+        $expected = $this.GetRecordedEvidenceMember($Row, 'Expected', $Projector, $null)
+        $evidence = $this.GetRecordedEvidenceMember($Row, 'Evidence', $Projector, $null)
+        $service = $observed[0]
+        foreach ($record in $expected, $evidence, $service) {
+            if ($null -eq $record -or $record.PSObject.BaseObject.GetType() -ne [Management.Automation.PSCustomObject]) {
+                return $null
+            }
+        }
+
+        $id = $Projector.GetValue($evidence, @('ProfileRuleId'))
+        $expectedId = $Projector.GetValue($expected, @('Id'))
+        $expectedName = $Projector.GetValue($expected, @('Name'))
+        $serviceName = $Projector.GetValue($service, @('Name'))
+        $target = $this.GetRecordedEvidenceMember($Row, 'Target', $Projector, $null)
+        if ($id -isnot [string] -or [string]::IsNullOrWhiteSpace($id) -or $id.IndexOf([char]0) -ge 0 -or
+            $expectedId -isnot [string] -or $id -ine $expectedId -or
+            $expectedName -isnot [string] -or [string]::IsNullOrWhiteSpace($expectedName) -or
+            $expectedName.IndexOf([char]0) -ge 0 -or $serviceName -isnot [string] -or $serviceName -ine $expectedName -or
+            $target -isnot [string]) {
+            return $null
+        }
+
+        $suffix = '/Service/' + $expectedName
+        if ($target.Length -le $suffix.Length -or -not $target.EndsWith($suffix, [StringComparison]::OrdinalIgnoreCase)) {
+            return $null
+        }
+        # Retain the bucket's identity even when a legacy getter supplied its raw target.
+        $identity = Get-ADAnalyzerHostRuleIdentity -Rule @{ Id = $id } -Target $target
+        $recordedKey = 'HOST.SERVICE' + [char]0 + $identity.ToUpperInvariant()
+        if (-not $Key.Equals($recordedKey, [StringComparison]::Ordinal)) {
+            return $null
+        }
+
+        $expectedState = $Projector.GetValue($expected, @('State'))
+        $expectedMode = $Projector.GetValue($expected, @('StartMode'))
+        $observedState = $Projector.GetValue($service, @('State'))
+        $observedMode = $Projector.GetValue($service, @('StartMode'))
+        if ($expectedState -isnot [string] -or [string]::IsNullOrWhiteSpace($expectedState) -or
+            $observedState -isnot [string] -or
+            ($null -ne $expectedMode -and $expectedMode -isnot [string]) -or
+            ($expectedMode -and $observedMode -isnot [string])) {
+            return $null
+        }
+
+        $passes = $observedState -ieq $expectedState -and (-not $expectedMode -or $observedMode -ieq $expectedMode)
+        if ($passes -ne ($status -ceq 'Pass')) {
+            return $null
+        }
+        return @{
+            Status = $status
+            ExpectedState = $expectedState
+            ExpectedMode = [string]$expectedMode
+            ObservedState = $observedState
+            ObservedMode = $observedMode
         }
     }
 
@@ -2544,6 +2647,7 @@ function Compare-ADAnalyzerAssessment {
                 $comparer.QualifyDirectoryPasswordExpirationResolution(
                     $key, $old, $new, $observation, $directoryEvidence, $projector
                 )
+                $comparer.QualifyHostServiceTransition($key, $old, $new, $observation, $projector)
                 $comparer.QualifyGpoRuleTransition($key, $old, $new, $observation)
                 $comparer.QualifyGpoVersionTransition($key, $maps[0], $maps[1], $observation, $projector)
             }

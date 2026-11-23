@@ -2410,7 +2410,7 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
         $b.Checks[0].Status = 'Unknown'
         Assert-Equal Changed (Compare-ADAnalyzerAssessment $a $b).Changes[0].Change
     }
-    Invoke-Test 'named host comparisons distinguish removal ordering expectation changes and observed resolution' {
+    Invoke-Test 'named host comparisons distinguish removal, ordering and expectation changes' {
         foreach ($file in @('ADGpo', 'ADPolicyAnalysis', 'ADHostAnalysis')) {
             . (Join-Path $RepositoryRoot ('bin/' + $file + '.ps1'))
         }
@@ -2470,8 +2470,145 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
             Checks = @(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile | Where-Object RuleId -eq HOST.SERVICE)
         }
         $comparison = Compare-ADAnalyzerAssessment $a $b
-        Assert-Equal 1 $comparison.Summary.Resolved
-        Assert-Equal 1 $comparison.Summary.Changed
+        Assert-Equal 0 $comparison.Summary.Resolved
+        Assert-Equal 2 $comparison.Summary.Changed
+        $relaxed = @($comparison.Changes | Where-Object { $_.Reference[0].Evidence.ProfileRuleId -ceq 'missing' })[0]
+        Assert-Equal 'RulePredicateChanged' $relaxed.Reason
+        $unchangedStatus = @($comparison.Changes | Where-Object { $_.Reference[0].Evidence.ProfileRuleId -ceq 'observed' })[0]
+        Assert-True ($null -eq $unchangedStatus.Reason) 'An unchanged status was misclassified as a predicate transition.'
+    }
+    Invoke-Test 'host service comparison distinguishes changed predicates from changed observations' {
+        foreach ($file in @('ADGpo', 'ADPolicyAnalysis', 'ADHostAnalysis')) {
+            . (Join-Path $RepositoryRoot ('bin/' + $file + '.ps1'))
+        }
+        $computer = 'service-comparison.fixture.invalid'
+        $makeSnapshot = {
+            param([string]$State, [string]$Mode, [hashtable]$Expected, [string]$Status)
+
+            $profile = Get-ADAnalyzerDefaultProfile
+            $profile.Host.Services = @(@{
+                    Id = 'spooler-control'
+                    Name = 'Spooler'
+                } + $Expected)
+            $hostRecord = [pscustomobject]@{
+                ComputerName = $computer
+                Services = @([pscustomobject]@{
+                        Name = 'Spooler'
+                        State = $State
+                        StartMode = $Mode
+                    })
+                Registry = @()
+            }
+            $checks = @(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile | Where-Object RuleId -CEQ 'HOST.SERVICE')
+            Assert-Equal 1 $checks.Count
+            Assert-Equal $Status $checks[0].Status
+            @{
+                Checks = $checks
+            }
+        }
+
+        $running = @{
+            State = 'Running'
+            StartMode = 'Disabled'
+        }
+        $stopped = @{
+            State = 'Stopped'
+            StartMode = 'Disabled'
+        }
+        $automatic = @{
+            State = 'Stopped'
+            StartMode = 'Auto'
+        }
+        $noStartMode = @{ State = 'Stopped' }
+        $caseFoldedRunning = @{
+            State = 'RUNNING'
+            StartMode = 'DISABLED'
+        }
+        $runningAndAutoStart = @{
+            State = 'Running'
+            StartMode = 'Auto'
+        }
+        $snapshots = [ordered]@{
+            RequireRunning = & $makeSnapshot 'Stopped' 'Disabled' $running 'Fail'
+            AcceptStopped = & $makeSnapshot 'Stopped' 'Disabled' $stopped 'Pass'
+            RequireAuto = & $makeSnapshot 'Stopped' 'Disabled' $automatic 'Fail'
+            NoStartMode = & $makeSnapshot 'Stopped' 'Disabled' $noStartMode 'Pass'
+            ActuallyRunning = & $makeSnapshot 'Running' 'Disabled' $running 'Pass'
+            CaseFolded = & $makeSnapshot 'Running' 'Disabled' $caseFoldedRunning 'Pass'
+            BothChanged = & $makeSnapshot 'Running' 'Auto' $runningAndAutoStart 'Pass'
+            ActuallyAuto = & $makeSnapshot 'Stopped' 'Auto' $automatic 'Pass'
+            ModeAndRequirementChanged = & $makeSnapshot 'Stopped' 'Auto' $noStartMode 'Pass'
+            Legacy = & $makeSnapshot 'Stopped' 'Disabled' $stopped 'Pass'
+            Contradictory = & $makeSnapshot 'Stopped' 'Disabled' $stopped 'Pass'
+            Ambiguous = & $makeSnapshot 'Stopped' 'Disabled' $stopped 'Pass'
+        }
+        $snapshots.Legacy.Checks[0].PSObject.Properties.Remove('Expected')
+        $snapshots.Contradictory.Checks[0].Expected.State = 'Paused'
+        $single = $snapshots.Ambiguous.Checks[0].Observed[0]
+        $snapshots.Ambiguous.Checks[0].Observed = @($single, $single)
+
+        $paths = @{}
+        $hashes = @{}
+        $exporter = [ADAnalyzerAssessmentReport]::new()
+        foreach ($name in $snapshots.Keys) {
+            Assert-Equal $snapshots.RequireRunning.Checks[0].CheckId $snapshots[$name].Checks[0].CheckId
+            $paths[$name] = Join-Path $script:Temporary ('host-service-predicate-' + $name + '.json')
+            $null = $exporter.Write($snapshots[$name], $paths[$name], 'Json')
+            $hashes[$name] = (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $differences = [Collections.Generic.List[string]]::new()
+        foreach ($representation in 'Object', 'Json') {
+            $documents = if ($representation -ceq 'Object') {
+                $snapshots
+            }
+            else {
+                $paths
+            }
+            foreach ($case in @(
+                    @('RequireRunning', 'AcceptStopped', 'Changed', 'RulePredicateChanged'),
+                    @('AcceptStopped', 'RequireRunning', 'Changed', 'RulePredicateChanged'),
+                    @('RequireAuto', 'NoStartMode', 'Changed', 'RulePredicateChanged'),
+                    @('NoStartMode', 'RequireAuto', 'Changed', 'RulePredicateChanged'),
+                    @('RequireAuto', 'AcceptStopped', 'Changed', 'RulePredicateChanged'),
+                    @('RequireRunning', 'ActuallyRunning', 'Resolved', $null),
+                    @('ActuallyRunning', 'RequireRunning', 'New', $null),
+                    @('RequireRunning', 'CaseFolded', 'Resolved', $null),
+                    @('RequireRunning', 'BothChanged', 'Resolved', $null),
+                    @('RequireAuto', 'ActuallyAuto', 'Resolved', $null),
+                    @('RequireAuto', 'ModeAndRequirementChanged', 'Resolved', $null),
+                    @('RequireRunning', 'Legacy', 'Resolved', $null),
+                    @('RequireRunning', 'Contradictory', 'Resolved', $null),
+                    @('RequireRunning', 'Ambiguous', 'Resolved', $null)
+                )) {
+                $before, $after, $change, $reason = $case
+                $reference = $documents[$before]
+                $difference = $documents[$after]
+                $results = [ordered]@{
+                    Native = Compare-ADAnalyzerAssessment -Reference $reference -Difference $difference
+                    Direct = $comparer.Compare($reference, $difference)
+                }
+                foreach ($api in $results.Keys) {
+                    Assert-Equal 1 $results[$api].Changes.Count
+                    $row = $results[$api].Changes[0]
+                    Assert-True (
+                        $row.RuleId -ceq 'HOST.SERVICE' -and $row.Target -ceq ($computer + '/Service/Spooler') -and
+                        $row.Reference.Count -eq 1 -and $row.Difference.Count -eq 1 -and
+                        $row.Reference[0].Status -ceq $snapshots[$before].Checks[0].Status -and
+                        $row.Difference[0].Status -ceq $snapshots[$after].Checks[0].Status
+                    ) 'Service identity, recorded outcomes or evidence cardinality changed.'
+                    if ($row.Change -cne $change -or $row.Reason -cne $reason) {
+                        $label = "$representation/$api/$before-$after"
+                        $differences.Add("$label expected $change/$reason, received $($row.Change)/$($row.Reason)")
+                    }
+                }
+            }
+        }
+        foreach ($name in $paths.Keys) {
+            Assert-Equal $hashes[$name] (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+        Assert-True ($differences.Count -eq 0) ($differences -join [Environment]::NewLine)
     }
     Invoke-Test 'named host registry comparison preserves literal key and value identity' {
         foreach ($file in @('ADGpo', 'ADPolicyAnalysis', 'ADHostAnalysis')) {
