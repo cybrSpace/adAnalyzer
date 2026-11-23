@@ -65,6 +65,7 @@ function New-UserRecord([string]$Guid, [string]$Name, [bool]$NeverExpires) {
         ObjectClass = 'User'
         Enabled = $true
         PasswordNeverExpires = $NeverExpires
+        UserAccountControl = if ($NeverExpires) { [int]66048 } else { [int]512 }
     }
 }
 
@@ -110,6 +111,7 @@ function New-ComparisonSnapshot([string]$Name, [string]$ObservedAt, [bool]$Viola
         )
         Data = [pscustomobject]@{
             Directory = [pscustomobject]@{
+                Domain = [pscustomobject]@{ SID = 'S-1-5-21-1-2-3' }
                 Server = $script:Server
                 DirectoryConnection = [pscustomobject]@{
                     Mode = 'PSDrive'
@@ -156,8 +158,13 @@ $cases = @(
         Name = 'LegacyPair'; Change = 'Resolved'
         ChangeInputs = {
             param($Old, $New)
-            $Old.Data.Directory.PSObject.Properties.Remove('UsersObservation')
-            $New.Data.Directory.PSObject.Properties.Remove('UsersObservation')
+            foreach ($snapshot in $Old, $New) {
+                $snapshot.Data.Directory.PSObject.Properties.Remove('UsersObservation')
+                $snapshot.Data.Directory.PSObject.Properties.Remove('Domain')
+                foreach ($user in $snapshot.Data.Directory.Users) {
+                    $user.PSObject.Properties.Remove('UserAccountControl')
+                }
+            }
         }
     }
     @{
@@ -319,6 +326,7 @@ $cases = @(
         ChangeInputs = {
             param($Old, $New)
             $New.Data.Directory.Users[0].Enabled = $false
+            $New.Data.Directory.Users[0].UserAccountControl = [int]514
         }
     }
     @{
@@ -344,10 +352,10 @@ $cases = @(
         }
     }
     @{
-        Name = 'MalformedFlag'; Change = 'Changed'
+        Name = 'MalformedAccountControl'; Change = 'Changed'
         ChangeInputs = {
             param($Old, $New)
-            $New.Data.Directory.Users[0].PasswordNeverExpires = 'False'
+            $New.Data.Directory.Users[0].UserAccountControl = @([int]512)
         }
     }
     @{
@@ -366,6 +374,7 @@ $cases = @(
             $New.Checks[0].Expected = $true
             $New.Checks[0].Observed = $true
             $New.Data.Directory.Users[0].PasswordNeverExpires = $true
+            $New.Data.Directory.Users[0].UserAccountControl = [int]66048
         }
     }
 )

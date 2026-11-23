@@ -1,5 +1,6 @@
 # Read-only directory assessment. No managed password values are requested.
 . (Join-Path $PSScriptRoot 'ADSecret.ps1')
+. (Join-Path $PSScriptRoot 'ADAccountControl.ps1')
 
 # Hidden PowerShell fields serialize; the private .NET capsule has no properties.
 if (-not ('ADAnalyzer.InternalState' -as [type])) {
@@ -515,7 +516,12 @@ class ADAnalyzerDirectoryObjectProjector {
         $ErrorActionPreference = 'Stop'
         $result = $this.BeginObject($Kind)
         foreach ($name in $this.StandardProperties()) {
-            $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+            if ($Kind -eq 'User' -and $name -eq 'UserAccountControl') {
+                $result[$name] = Get-ADAnalyzerDirectoryObservationField $Record $name
+            }
+            else {
+                $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+            }
         }
         $result['SID'] = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $Record 'SID')
         foreach ($name in @('BuildNumber', 'EsuStatus', 'EsuValidUntil') + $AdditionalProperties) {
@@ -523,7 +529,12 @@ class ADAnalyzerDirectoryObjectProjector {
                 continue
             }
             if ($name -notin 'ObjectClass', 'SID') {
-                $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+                if ($Kind -eq 'User' -and $name -eq 'UserAccountControl') {
+                    $result[$name] = Get-ADAnalyzerDirectoryObservationField $Record $name
+                }
+                else {
+                    $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+                }
                 continue
             }
             $null = Get-ADAnalyzerDirectoryField $Record $name
@@ -550,8 +561,13 @@ class ADAnalyzerDirectoryObjectProjector {
         else {
             [bool]$result['ProtectedFromAccidentalDeletion']
         }
-        $uac = if ($null -ne $result['UserAccountControl']) {
-            [long]$result['UserAccountControl']
+        $projectedControl = $result['UserAccountControl']
+        if ($Kind -eq 'User') {
+            # Preserve the legacy cast and error scope without discarding the raw User observation.
+            $projectedControl = $($projectedControl)
+        }
+        $uac = if ($null -ne $projectedControl) {
+            [long]$projectedControl
         }
         else {
             0
@@ -726,7 +742,12 @@ function ConvertTo-ADAnalyzerDirectoryObject {
     $projector = [ADAnalyzerDirectoryObjectProjector]::new()
     $result = $projector.BeginObject($Kind)
     foreach ($name in $projector.StandardProperties()) {
-        $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+        if ($Kind -eq 'User' -and $name -eq 'UserAccountControl') {
+            $result[$name] = Get-ADAnalyzerDirectoryObservationField $Record $name
+        }
+        else {
+            $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+        }
     }
     $result['SID'] = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $Record 'SID')
     $rawAttributes = $null
@@ -735,7 +756,12 @@ function ConvertTo-ADAnalyzerDirectoryObject {
             continue
         }
         if ($name -notin 'ObjectClass', 'SID') {
-            $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+            if ($Kind -eq 'User' -and $name -eq 'UserAccountControl') {
+                $result[$name] = Get-ADAnalyzerDirectoryObservationField $Record $name
+            }
+            else {
+                $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+            }
             continue
         }
         if ($PreserveClassificationInput) {
@@ -770,8 +796,13 @@ function ConvertTo-ADAnalyzerDirectoryObject {
     else {
         [bool]$result['ProtectedFromAccidentalDeletion']
     }
-    $uac = if ($null -ne $result['UserAccountControl']) {
-        [long]$result['UserAccountControl']
+    $projectedControl = $result['UserAccountControl']
+    if ($Kind -eq 'User') {
+        # Preserve the legacy cast and error scope without discarding the raw User observation.
+        $projectedControl = $($projectedControl)
+    }
+    $uac = if ($null -ne $projectedControl) {
+        [long]$projectedControl
     }
     else {
         0
@@ -3082,6 +3113,63 @@ class ADAnalyzerDirectoryPolicyEvaluator {
         })
     }
 
+    hidden [hashtable] GetScopedUserEvidence([object]$Data) {
+        $observation = Get-ADAnalyzerDirectoryObservationField $Data 'UsersObservation'
+        $version = Get-ADAnalyzerDirectoryObservationField $observation 'Version'
+        $outcome = Get-ADAnalyzerDirectoryObservationField $observation 'Status'
+        $scope = Get-ADAnalyzerDirectoryObservationField $observation 'SearchBase'
+        $requestedScope = Get-ADAnalyzerDirectoryObservationField $observation 'RequestedSearchBase'
+        $coverage = Get-ADAnalyzerDirectoryObservationField $Data 'Coverage'
+        $usersCoverage = Get-ADAnalyzerDirectoryObservationField $coverage 'Users'
+        $users = Get-ADAnalyzerDirectoryObservationField $Data 'Users'
+        if (($version -isnot [int] -and $version -isnot [long]) -or $version -ne 1 -or
+            $outcome -isnot [string] -or $outcome -cne 'Completed' -or
+            $usersCoverage -isnot [string] -or $usersCoverage -cne 'Collected' -or
+            $scope -isnot [string] -or [string]::IsNullOrWhiteSpace($scope) -or
+            $requestedScope -isnot [string] -or -not $scope.Equals($requestedScope, [StringComparison]::OrdinalIgnoreCase) -or
+            $users -isnot [Collections.IList]) {
+            return $null
+        }
+
+        $index = [Collections.Generic.Dictionary[guid, object]]::new()
+        foreach ($user in $users) {
+            $identity = ConvertTo-ADAnalyzerDirectorySubjectGuid (Get-ADAnalyzerDirectoryObservationField $user 'ObjectGuid')
+            if ($identity -eq [guid]::Empty) {
+                continue
+            }
+            if ($index.ContainsKey($identity)) {
+                $index[$identity] = $null
+                continue
+            }
+            $index.Add($identity, $user)
+        }
+        return @{
+            Scope = $scope
+            Users = $index
+        }
+    }
+
+    hidden [object] FindScopedUser([object]$Object, [hashtable]$Evidence) {
+        if ($null -eq $Evidence) {
+            return $null
+        }
+        $identity = ConvertTo-ADAnalyzerDirectorySubjectGuid (Get-ADAnalyzerDirectoryObservationField $Object 'ObjectGuid')
+        $user = $null
+        if ($identity -eq [guid]::Empty -or -not $Evidence.Users.TryGetValue($identity, [ref]$user) -or $null -eq $user) {
+            return $null
+        }
+
+        $dn = Get-ADAnalyzerDirectoryObservationField $Object 'DistinguishedName'
+        $userDn = Get-ADAnalyzerDirectoryObservationField $user 'DistinguishedName'
+        $kind = Get-ADAnalyzerDirectoryObservationField $user 'ObjectClass'
+        if ($kind -is [string] -and $kind -ieq 'User' -and $dn -is [string] -and $userDn -is [string] -and
+            $dn.Equals($userDn, [StringComparison]::OrdinalIgnoreCase) -and
+            (Test-ADAnalyzerDirectorySubjectInScope $dn $Evidence.Scope)) {
+            return $user
+        }
+        return $null
+    }
+
     hidden [void] EvaluateAccounts([hashtable]$Evaluation) {
         $Data = $Evaluation.Data
         $Profile = $Evaluation.Profile
@@ -3089,6 +3177,16 @@ class ADAnalyzerDirectoryPolicyEvaluator {
         $domain = $Evaluation.Domain
         $domainTarget = $Evaluation.DomainTarget
         $coverage = $Evaluation.Coverage
+        $scopedUsers = if ($Data -is [Collections.IDictionary]) {
+            ([Collections.IDictionary]$Data).Contains('UsersObservation')
+        }
+        else {
+            $null -ne $Data -and $null -ne $Data.PSObject.Properties['UsersObservation']
+        }
+        $scopedEvidence = $null
+        if ($scopedUsers) {
+            $scopedEvidence = $this.GetScopedUserEvidence($Data)
+        }
 
         $allObjects = @(Get-ADAnalyzerDirectoryField $Data 'Objects' @())
         if (-not $allObjects.Count) {
@@ -3107,6 +3205,9 @@ class ADAnalyzerDirectoryPolicyEvaluator {
         foreach ($object in $allObjects) {
             $target = Get-ADAnalyzerDirectoryTarget $object
             $kind = [string](Get-ADAnalyzerDirectoryField $object 'ObjectClass')
+            $scopedUser = $scopedUsers -and $kind -eq 'User'
+            $scopedControl = $null
+            $recordedEnabled = $null
             $classification = [string](Get-ADAnalyzerDirectoryField $object 'AccountType' 'Unknown')
             if ($kind -in @('User', 'ServiceAccount')) {
                 $classificationEvidence = Get-ADAnalyzerDirectoryField $object 'AccountClassification'
@@ -3151,7 +3252,13 @@ class ADAnalyzerDirectoryPolicyEvaluator {
                 else {
                     $null
                 }
-                $enabled = Get-ADAnalyzerDirectoryField $object 'Enabled'
+                $enabled = if ($scopedUser) {
+                    $recordedEnabled = Get-ADAnalyzerDirectoryObservationField $object 'Enabled'
+                    $recordedEnabled
+                }
+                else {
+                    Get-ADAnalyzerDirectoryField $object 'Enabled'
+                }
                 $status = if ($null -eq $enabled -or $null -eq $age) {
                     'Unknown'
                 }
@@ -3236,7 +3343,37 @@ class ADAnalyzerDirectoryPolicyEvaluator {
                 })
                 $never = Get-ADAnalyzerDirectoryObservationField $object 'PasswordNeverExpires'
                 $allowed = Get-ADAnalyzerDirectoryField $policy 'AllowPasswordNeverExpires'
-                $status = if ($never -isnot [bool] -or $null -eq $allowed) {
+                $disabled = $false
+                if ($scopedUser) {
+                    $observation = @{
+                        Value = Get-ADAnalyzerDirectoryObservationField $object 'UserAccountControl'
+                        Enabled = $recordedEnabled
+                        ExpirationFlag = $never
+                    }
+                    $scopedControl = Get-ADAnalyzerAccountControlObservation @observation
+                    $user = $this.FindScopedUser($object, $scopedEvidence)
+                    $subjectControl = $null
+                    if ($null -ne $user) {
+                        $subjectControl = $scopedControl
+                        if (-not [object]::ReferenceEquals($user, $object)) {
+                            $observed = @{
+                                Value = Get-ADAnalyzerDirectoryObservationField $user 'UserAccountControl'
+                                Enabled = Get-ADAnalyzerDirectoryObservationField $user 'Enabled'
+                                ExpirationFlag = Get-ADAnalyzerDirectoryObservationField $user 'PasswordNeverExpires'
+                            }
+                            $subjectControl = Get-ADAnalyzerAccountControlObservation @observed
+                        }
+                    }
+                    $never = $null
+                    if ($null -ne $subjectControl -and $subjectControl.Consistent) {
+                        $never = $subjectControl.PasswordNeverExpires
+                        $disabled = -not $subjectControl.Enabled
+                    }
+                }
+                $status = if ($disabled) {
+                    'NotApplicable'
+                }
+                elseif ($never -isnot [bool] -or $null -eq $allowed) {
                     'Unknown'
                 }
                 elseif ($never -and -not $allowed) {
@@ -3259,7 +3396,14 @@ class ADAnalyzerDirectoryPolicyEvaluator {
                     Applicability = 'Configured'
                 })
             }
-            $uac = Get-ADAnalyzerDirectoryField $object 'UserAccountControl'
+            $uac = if ($scopedUser) {
+                if ($null -ne $scopedControl) {
+                    $scopedControl.Flags
+                }
+            }
+            else {
+                Get-ADAnalyzerDirectoryField $object 'UserAccountControl'
+            }
             $unconstrained = Get-ADAnalyzerDirectoryField $object 'TrustedForDelegation'
             if ($null -ne $uac) {
                 $unconstrained = ([long]$uac -band 524288) -ne 0

@@ -2,6 +2,7 @@
 # performed by the exporter, comparer, or planner.
 . (Join-Path $PSScriptRoot 'ADSecret.ps1')
 . (Join-Path $PSScriptRoot 'ADFile.ps1')
+. (Join-Path $PSScriptRoot 'ADAccountControl.ps1')
 
 class ADAnalyzerEvidenceProjector {
     ADAnalyzerEvidenceProjector() {
@@ -1402,16 +1403,20 @@ class ADAnalyzerAssessmentComparer {
         if (-not $this.SearchBasesMatch($oldScope, $newScope)) {
             throw 'Cannot compare different search-base scopes as configuration drift'
         }
-        if (-not $this.DirectoryDomainSidsMatch($before, $after)) {
+        $projector = [ADAnalyzerEvidenceProjector]::new()
+        $referenceSid = $this.GetRecordedDomainSid($before, $projector)
+        $differenceSid = $this.GetRecordedDomainSid($after, $projector)
+        if (-not $this.DirectoryDomainSidsMatch($referenceSid, $differenceSid)) {
             throw 'Cannot compare different recorded directory domain SIDs as configuration drift'
         }
 
-        $projector = [ADAnalyzerEvidenceProjector]::new()
         $oldMap = $this.IndexSnapshot($before, $projector)
         $newMap = $this.IndexSnapshot($after, $projector)
         $directoryEvidence = @{
             Reference = $before
             Difference = $after
+            ReferenceDomainSid = $referenceSid
+            DifferenceDomainSid = $differenceSid
         }
         $changes = @(
             foreach ($key in @(@($oldMap.Keys) + @($newMap.Keys) | Sort-Object -Unique)) {
@@ -1514,18 +1519,15 @@ class ADAnalyzerAssessmentComparer {
         return $Before -ieq $After
     }
 
-    hidden [bool] DirectoryDomainSidsMatch([object]$Reference, [object]$Difference) {
-        $projector = [ADAnalyzerEvidenceProjector]::new()
-        $referenceSid = $this.GetRecordedDomainSid($Reference, $projector)
-        $differenceSid = $this.GetRecordedDomainSid($Difference, $projector)
-        return -not ($referenceSid -and $differenceSid -and $referenceSid -cne $differenceSid)
+    hidden [bool] DirectoryDomainSidsMatch([string]$ReferenceSid, [string]$DifferenceSid) {
+        return -not ($ReferenceSid -and $DifferenceSid -and $ReferenceSid -cne $DifferenceSid)
     }
 
     hidden [string] GetRecordedDomainSid([object]$Snapshot, [ADAnalyzerEvidenceProjector]$Projector) {
-        $data = $this.GetRecordedDomainMember($Snapshot, 'Data', $Projector)
-        $directory = $this.GetRecordedDomainMember($data, 'Directory', $Projector)
-        $domain = $this.GetRecordedDomainMember($directory, 'Domain', $Projector)
-        $sid = $this.GetRecordedDomainMember($domain, 'SID', $Projector)
+        $data = $this.GetRecordedEvidenceMember($Snapshot, 'Data', $Projector, $null)
+        $directory = $this.GetRecordedEvidenceMember($data, 'Directory', $Projector, $null)
+        $domain = $this.GetRecordedEvidenceMember($directory, 'Domain', $Projector, $null)
+        $sid = $this.GetRecordedEvidenceMember($domain, 'SID', $Projector, $null)
         if ($sid -isnot [string]) {
             return ''
         }
@@ -1551,13 +1553,14 @@ class ADAnalyzerAssessmentComparer {
         return ('S-1-5-21-{0}-{1}-{2}' -f $components[0], $components[1], $components[2])
     }
 
-    hidden [object] GetRecordedDomainMember(
+    hidden [object] GetRecordedEvidenceMember(
         [object]$Record,
         [string]$Name,
-        [ADAnalyzerEvidenceProjector]$Projector
+        [ADAnalyzerEvidenceProjector]$Projector,
+        [object]$Default
     ) {
         if ($null -eq $Record) {
-            return $null
+            return $Default
         }
 
         $wrapped = $Record.PSObject
@@ -1565,15 +1568,23 @@ class ADAnalyzerAssessmentComparer {
         $genericDictionary = ([Collections.Generic.Dictionary[object, object]]).GetGenericTypeDefinition()
         if ($type -eq [hashtable] -or $type -eq [Collections.Specialized.OrderedDictionary] -or
             ($type.IsGenericType -and $type.GetGenericTypeDefinition() -eq $genericDictionary)) {
-            return $Projector.GetValue($Record, @($Name))
+            return $Projector.GetValue($Record, @($Name), $Default)
         }
 
-        # This optional comparison guard reads captured fields without invoking legacy getters.
+        # Optional comparison qualifiers read captured fields without invoking legacy getters.
         $property = $wrapped.Properties[$Name]
         if ($property -is [Management.Automation.PSNoteProperty]) {
             return $property.Value
         }
-        return $null
+        return $Default
+    }
+
+    hidden [bool] HasRecordedUsersObservation([object]$Snapshot, [ADAnalyzerEvidenceProjector]$Projector) {
+        $data = $this.GetRecordedEvidenceMember($Snapshot, 'Data', $Projector, $null)
+        $directory = $this.GetRecordedEvidenceMember($data, 'Directory', $Projector, $null)
+        $missing = [object]::new()
+        $observation = $this.GetRecordedEvidenceMember($directory, 'UsersObservation', $Projector, $missing)
+        return -not [object]::ReferenceEquals($observation, $missing)
     }
 
     hidden [string[]] CheckNames() {
@@ -1722,17 +1733,6 @@ class ADAnalyzerAssessmentComparer {
         return $null
     }
 
-    hidden [guid] ReadDirectorySubjectGuid([object]$Value) {
-        if ($Value -is [guid]) {
-            return $Value
-        }
-        $identity = [guid]::Empty
-        if ($Value -is [string] -and [guid]::TryParseExact($Value, 'D', [ref]$identity)) {
-            return $identity
-        }
-        return [guid]::Empty
-    }
-
     hidden [hashtable] GetDirectoryUsersEvidence(
         [object]$Snapshot,
         [ADAnalyzerEvidenceProjector]$Projector
@@ -1803,7 +1803,7 @@ class ADAnalyzerAssessmentComparer {
 
         $index = [Collections.Generic.Dictionary[guid, object]]::new()
         foreach ($user in $users) {
-            $guid = $this.ReadDirectorySubjectGuid($Projector.GetValue($user, @('ObjectGuid')))
+            $guid = ConvertTo-ADAnalyzerDirectorySubjectGuid ($Projector.GetValue($user, @('ObjectGuid')))
             if ($guid -eq [guid]::Empty) {
                 continue
             }
@@ -1824,25 +1824,6 @@ class ADAnalyzerAssessmentComparer {
         }
     }
 
-    hidden [bool] IsDirectorySubjectInScope([string]$Dn, [string]$Scope) {
-        if ($Dn.Equals($Scope, [StringComparison]::OrdinalIgnoreCase)) {
-            return $true
-        }
-        $suffix = ',' + $Scope
-        if (-not $Dn.EndsWith($suffix, [StringComparison]::OrdinalIgnoreCase)) {
-            return $false
-        }
-
-        # The boundary comma must not be part of an escaped RDN value.
-        $escapes = 0
-        $index = $Dn.Length - $suffix.Length - 1
-        while ($index -ge 0 -and $Dn[$index] -eq [char]92) {
-            $escapes++
-            $index--
-        }
-        return ($escapes % 2 -eq 0)
-    }
-
     hidden [bool] MatchesObservedPasswordFlag(
         [object]$Row,
         [object]$User,
@@ -1858,17 +1839,22 @@ class ADAnalyzerAssessmentComparer {
         $allowed = $Projector.GetValue($Row, @('Expected'))
         $kind = $Projector.GetValue($User, @('ObjectClass'))
         $dn = $Projector.GetValue($User, @('DistinguishedName'))
-        $enabled = $Projector.GetValue($User, @('Enabled'))
-        $flagValue = $Projector.GetValue($User, @('PasswordNeverExpires'))
+        $recorded = @{
+            Value = $Projector.GetValue($User, @('UserAccountControl'))
+            Enabled = $Projector.GetValue($User, @('Enabled'))
+            ExpirationFlag = $Projector.GetValue($User, @('PasswordNeverExpires'))
+        }
+        $control = Get-ADAnalyzerAccountControlObservation @recorded
         return (
             $rule -is [string] -and $rule -ieq 'ACCOUNT.PASSWORD_NEVER_EXPIRES' -and
             $checkStatus -is [string] -and $checkStatus -ceq $Status -and
             $observed -is [bool] -and $observed -eq $Flag -and $allowed -is [bool] -and -not $allowed -and
             $kind -is [string] -and $kind -ieq 'User' -and
-            $enabled -is [bool] -and $enabled -and $flagValue -is [bool] -and $flagValue -eq $Flag -and
+            $null -ne $control -and $control.Consistent -and $control.Enabled -and
+            $control.PasswordNeverExpires -eq $Flag -and
             $target -is [string] -and $dn -is [string] -and
             $dn.Equals($target, [StringComparison]::OrdinalIgnoreCase) -and
-            $this.IsDirectorySubjectInScope($dn, $Scope)
+            (Test-ADAnalyzerDirectorySubjectInScope $dn $Scope)
         )
     }
 
@@ -1880,10 +1866,31 @@ class ADAnalyzerAssessmentComparer {
         [hashtable]$State,
         [ADAnalyzerEvidenceProjector]$Projector
     ) {
-        if ($Observation.Change -ne 'Resolved' -or
+        if ($Observation.Change -notin 'Resolved', 'Changed' -or
             -not $Key.StartsWith(('ACCOUNT.PASSWORD_NEVER_EXPIRES' + [char]0), [StringComparison]::Ordinal)) {
             return
         }
+
+        if ($Observation.Change -eq 'Changed') {
+            if ($null -eq $Observation.Reason -and $Before.Count -eq 1 -and $After.Count -eq 1) {
+                $priorStatus = $this.GetRecordedEvidenceMember($Before[0], 'Status', $Projector, $null)
+                $currentStatus = $this.GetRecordedEvidenceMember($After[0], 'Status', $Projector, $null)
+                if ($priorStatus -is [string] -and $priorStatus -ceq 'Fail' -and
+                    $currentStatus -is [string] -and $currentStatus -ceq 'Unknown') {
+                    if (-not $State.ContainsKey('HasUsersObservation')) {
+                        $State['HasUsersObservation'] = (
+                            $this.HasRecordedUsersObservation($State.Reference, $Projector) -or
+                            $this.HasRecordedUsersObservation($State.Difference, $Projector)
+                        )
+                    }
+                    if ($State.HasUsersObservation) {
+                        $Observation.Reason = 'DirectoryEvidenceInsufficient'
+                    }
+                }
+            }
+            return
+        }
+
         if (-not $State.ContainsKey('Before')) {
             $State['Before'] = $this.GetDirectoryUsersEvidence($State.Reference, $Projector)
             $State['After'] = $this.GetDirectoryUsersEvidence($State.Difference, $Projector)
@@ -1896,7 +1903,8 @@ class ADAnalyzerAssessmentComparer {
 
         $Observation.Change = 'Changed'
         $Observation.Reason = 'DirectoryEvidenceInsufficient'
-        if ($null -eq $oldEvidence['Time'] -or $null -eq $newEvidence['Time'] -or
+        if (-not $State.ReferenceDomainSid -or $State.ReferenceDomainSid -cne $State.DifferenceDomainSid -or
+            $null -eq $oldEvidence['Time'] -or $null -eq $newEvidence['Time'] -or
             -not $oldEvidence.Scope.Equals($newEvidence.Scope, [StringComparison]::OrdinalIgnoreCase) -or
             -not $oldEvidence.Server.Equals($newEvidence.Server, [StringComparison]::OrdinalIgnoreCase) -or
             $oldEvidence.Mode -cne $newEvidence.Mode -or $Before.Count -ne 1 -or $After.Count -ne 1) {
@@ -1907,8 +1915,8 @@ class ADAnalyzerAssessmentComparer {
             return
         }
 
-        $oldGuid = $this.ReadDirectorySubjectGuid($Projector.GetValue($Before[0], @('ObjectGuid')))
-        $newGuid = $this.ReadDirectorySubjectGuid($Projector.GetValue($After[0], @('ObjectGuid')))
+        $oldGuid = ConvertTo-ADAnalyzerDirectorySubjectGuid ($Projector.GetValue($Before[0], @('ObjectGuid')))
+        $newGuid = ConvertTo-ADAnalyzerDirectorySubjectGuid ($Projector.GetValue($After[0], @('ObjectGuid')))
         $oldUser = $null
         $newUser = $null
         if ($oldGuid -ne [guid]::Empty -and $oldGuid -eq $newGuid -and
@@ -2444,7 +2452,10 @@ function Compare-ADAnalyzerAssessment {
     if (-not $comparer.SearchBasesMatch($oldScope, $newScope)) {
         throw 'Cannot compare different search-base scopes as configuration drift'
     }
-    if (-not $comparer.DirectoryDomainSidsMatch($before, $after)) {
+    $projector = [ADAnalyzerEvidenceProjector]::new()
+    $referenceSid = $comparer.GetRecordedDomainSid($before, $projector)
+    $differenceSid = $comparer.GetRecordedDomainSid($after, $projector)
+    if (-not $comparer.DirectoryDomainSidsMatch($referenceSid, $differenceSid)) {
         throw 'Cannot compare different recorded directory domain SIDs as configuration drift'
     }
 
@@ -2500,10 +2511,11 @@ function Compare-ADAnalyzerAssessment {
         }
     }
 
-    $projector = [ADAnalyzerEvidenceProjector]::new()
     $directoryEvidence = @{
         Reference = $before
         Difference = $after
+        ReferenceDomainSid = $referenceSid
+        DifferenceDomainSid = $differenceSid
     }
     $changes = @(
         foreach ($key in @(@($maps[0].Keys) + @($maps[1].Keys) | Sort-Object -Unique)) {

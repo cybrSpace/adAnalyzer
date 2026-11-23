@@ -687,6 +687,328 @@ try {
         Assert-Equal 0 $unexpectedCalls.Count
         Assert-True ($statusDifferences.Count -eq 0) ($statusDifferences -join '; ')
     }
+    Test-Assessment 'scoped password expiration uses one typed account-control observation' {
+        $ruleId = 'ACCOUNT.PASSWORD_NEVER_EXPIRES'
+        $scope = 'OU=Selected,DC=example,DC=invalid'
+        $accountDn = 'CN=Scoped User,' + $scope
+        $subjectGuid = '4bba9958-e7c0-4102-9ad8-ddba376b91f7'
+        $domainSid = 'S-1-5-21-1-2-3'
+        $earlier = '2026-02-09T12:00:00.0000000Z'
+        $later = '2026-02-09T12:05:00.0000000Z'
+        $projector = [ADAnalyzerDirectoryObjectProjector]::new()
+        # The legacy projector rejects text it cannot cast before an assessment exists.
+        Assert-Throws {
+            $projector.Project(@{ UserAccountControl = 'not an account-control value' }, 'User')
+        }
+        $makeAssessment = {
+            param([hashtable]$Options)
+
+            $directory = New-AssessmentFixture
+            $user = [ordered]@{
+                ObjectClass = 'User'
+                AccountType = 'User'
+                DistinguishedName = $accountDn
+                ObjectGuid = $subjectGuid
+                SID = $domainSid + '-3201'
+            }
+            if ($Options.OtherSubject) {
+                $user.ObjectGuid = '4bba9958-e7c0-4102-9ad8-ddba376b91f8'
+            }
+            if ($Options.ContainsKey('Uac')) {
+                $user['UserAccountControl'] = $Options.Uac
+            }
+            if ($Options.ContainsKey('Flags')) {
+                $user['Enabled'] = $true
+                $user['PasswordNeverExpires'] = $Options.Flags
+            }
+            if ($Options.MissingAuthority) {
+                $directory.Domain.PSObject.Properties.Remove('SID')
+            }
+            $record = [pscustomobject]$user
+            $directory.Users = @(
+                switch ($Options.Projection) {
+                    'Class' {
+                        $projector.Project($record, 'User', @('UserAccountControl'))
+                    }
+                    'Command' {
+                        ConvertTo-ADAnalyzerDirectoryObject -Record $record -Kind User -AdditionalProperties 'UserAccountControl'
+                    }
+                    default {
+                        $record
+                    }
+                }
+            )
+            if ($Options.MissingScopedSubject -or $Options.DuplicateScopedSubject -or $Options.ConflictingObjectsRow) {
+                $directory.Objects = @($directory.Users[0].PSObject.Copy())
+            }
+            if ($Options.MissingScopedSubject) {
+                $directory.Users = @()
+            }
+            if ($Options.DuplicateScopedSubject) {
+                $directory.Users += $directory.Users[0].PSObject.Copy()
+            }
+            if ($Options.ConflictingObjectsRow) {
+                $directory.Objects[0].PasswordNeverExpires = $false
+                $directory.Objects[0].UserAccountControl = [int]512
+            }
+            if (-not $Options.Legacy) {
+                $time = if ($Options.Earlier) {
+                    $earlier
+                }
+                else {
+                    $later
+                }
+                $directory.Coverage['DirectoryConnection'] = 'Collected'
+                $directory | Add-Member -NotePropertyMembers @{
+                    DirectoryConnection = [pscustomobject]@{
+                        Mode = 'PSDrive'
+                        Server = $directory.Server
+                        Status = 'Connected'
+                    }
+                    UsersObservation = [pscustomobject]@{
+                        Version = 1
+                        RequestedSearchBase = $scope
+                        SearchBase = $scope
+                        Server = $directory.Server
+                        Mode = 'PSDrive'
+                        ObservedAt = $time
+                        Status = 'Completed'
+                    }
+                }
+            }
+            if ($Options.UnreadableScope) {
+                $directory.UsersObservation.Status = 'Unreadable'
+                $directory.Coverage.Users = 'Unreadable'
+            }
+            Invoke-ADAnalyzerAssessment -DirectoryData $directory -Target 'example.invalid'
+        }
+
+        # 512 is NORMAL_ACCOUNT, 65536 is DONT_EXPIRE_PASSWD, and 2 is ACCOUNTDISABLE.
+        $specifications = [ordered]@{
+            ScopedBefore = @{
+                Uac = [int]66048
+                Flags = $true
+                Earlier = $true
+            }
+            ScopedAfter = @{
+                Uac = [long]512
+                Flags = $false
+            }
+            RawOnlyBefore = @{
+                Uac = [int]66048
+                Earlier = $true
+            }
+            RawOnlyAfter = @{
+                Uac = [long]512
+            }
+            ContradictoryFlag = @{
+                Uac = [int]66048
+                Flags = $false
+            }
+            ContradictoryEnabled = @{
+                Uac = [int]514
+                Flags = $false
+            }
+            MissingUac = @{
+                Flags = $false
+            }
+            StringUac = @{
+                Uac = '512'
+                Flags = $false
+            }
+            InvalidTextUac = @{
+                Uac = 'not an account-control value'
+                Flags = $false
+            }
+            Disabled = @{
+                Uac = [int]514
+            }
+            SingletonUac = @{
+                Uac = @([int]512)
+                Flags = $false
+            }
+            SingletonUacClass = @{
+                Uac = @([int]512)
+                Flags = $false
+                Projection = 'Class'
+            }
+            SingletonUacCommand = @{
+                Uac = @([int]512)
+                Flags = $false
+                Projection = 'Command'
+            }
+            MissingAuthority = @{
+                Uac = [int]512
+                Flags = $false
+                MissingAuthority = $true
+            }
+            OtherSubject = @{
+                Uac = [int]512
+                Flags = $false
+                OtherSubject = $true
+            }
+            MissingScopedSubject = @{
+                Uac = [int]512
+                Flags = $false
+                MissingScopedSubject = $true
+            }
+            DuplicateScopedSubject = @{
+                Uac = [int]512
+                Flags = $false
+                DuplicateScopedSubject = $true
+            }
+            UnreadableScope = @{
+                Uac = [int]512
+                Flags = $false
+                UnreadableScope = $true
+            }
+            ConflictingObjectsRow = @{
+                Uac = [int]66048
+                Flags = $true
+                ConflictingObjectsRow = $true
+            }
+            LegacyBefore = @{
+                Uac = [int]66048
+                Flags = $true
+                Legacy = $true
+            }
+            LegacyAfter = @{
+                Uac = [int]66048
+                Flags = $false
+                Legacy = $true
+            }
+            LegacyUnknown = @{
+                Uac = [int]66048
+                Legacy = $true
+            }
+        }
+        $snapshotDirectory = Join-Path $temp 'scoped account control evidence'
+        $null = [IO.Directory]::CreateDirectory($snapshotDirectory)
+        $report = [ADAnalyzerAssessmentReport]::new()
+        $snapshots = @{}
+        $paths = @{}
+        $hashes = @{}
+        $failureDetails = [Collections.Generic.List[string]]::new()
+        foreach ($name in $specifications.Keys) {
+            $snapshot = & $makeAssessment $specifications[$name]
+            $snapshots[$name] = $snapshot
+            $rows = @($snapshot.Checks | Where-Object RuleId -CEQ $ruleId)
+            Assert-Equal 1 $rows.Count
+            Assert-Equal $accountDn $rows[0].Target
+            $expected = switch ($name) {
+                { $_ -in 'ScopedBefore', 'RawOnlyBefore', 'LegacyBefore', 'ConflictingObjectsRow' } {
+                    'Fail'
+                }
+                { $_ -in 'ScopedAfter', 'RawOnlyAfter', 'MissingAuthority', 'OtherSubject', 'LegacyAfter' } {
+                    'Pass'
+                }
+                'Disabled' {
+                    'NotApplicable'
+                }
+                default {
+                    'Unknown'
+                }
+            }
+            if ($expected -and $rows[0].Status -cne $expected) {
+                $failureDetails.Add(('{0}: expected assessment {1}, received {2}.' -f $name, $expected, $rows[0].Status))
+            }
+            if ($expected -in 'Fail', 'Pass' -and $rows[0].Status -ceq $expected) {
+                Assert-True (
+                    $rows[0].Observed -is [bool] -and $rows[0].Observed -eq ($expected -eq 'Fail')
+                ) ('The check lost Boolean evidence for ' + $name)
+            }
+            if ($name -in 'ScopedBefore', 'ScopedAfter') {
+                $otherCheck = @($snapshot.Checks | Where-Object RuleId -CEQ 'ACCOUNT.PASSWORD_NOT_REQUIRED')
+                if ($otherCheck.Count -ne 1 -or
+                    $otherCheck[0].Evidence.UserAccountControl.GetType() -ne $specifications[$name].Uac.GetType()) {
+                    $failureDetails.Add($name + ': an unrelated flag check changed the recorded numeric type.')
+                }
+            }
+            $path = Join-Path $snapshotDirectory ($name + '.json')
+            [IO.File]::WriteAllText($path, $report.Render($snapshot, 'Json'))
+            $paths[$name] = $path
+            $hashes[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        }
+        # Prior scoped files can carry a Boolean-based Pass that the new evaluator would withhold.
+        foreach ($sourceName in 'ContradictoryFlag', 'SingletonUac') {
+            $name = 'PriorPass' + $sourceName
+            $prior = $snapshots[$sourceName].PSObject.Copy()
+            $prior.Checks = @(
+                foreach ($row in $prior.Checks) {
+                    if ($row.RuleId -cne $ruleId) {
+                        $row
+                        continue
+                    }
+                    $check = $row.PSObject.Copy()
+                    $check.Status = 'Pass'
+                    $check.Observed = $false
+                    $check
+                }
+            )
+            $snapshots[$name] = $prior
+            $path = Join-Path $snapshotDirectory ($name + '.json')
+            [IO.File]::WriteAllText($path, $report.Render($prior, 'Json'))
+            $paths[$name] = $path
+            $hashes[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        }
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $pairs = @(
+            @('ScopedBefore', 'ScopedAfter', 'Resolved'),
+            @('RawOnlyBefore', 'RawOnlyAfter', 'Resolved'),
+            @('LegacyBefore', 'LegacyAfter', 'Resolved'),
+            @('LegacyBefore', 'LegacyUnknown', 'Changed'),
+            @('ScopedBefore', 'ContradictoryFlag', 'Changed'),
+            @('ScopedBefore', 'ContradictoryEnabled', 'Changed'),
+            @('ScopedBefore', 'MissingUac', 'Changed'),
+            @('ScopedBefore', 'StringUac', 'Changed'),
+            @('ScopedBefore', 'InvalidTextUac', 'Changed'),
+            @('ScopedBefore', 'Disabled', 'Changed'),
+            @('ScopedBefore', 'SingletonUac', 'Changed'),
+            @('ScopedBefore', 'SingletonUacClass', 'Changed'),
+            @('ScopedBefore', 'SingletonUacCommand', 'Changed'),
+            @('ScopedBefore', 'PriorPassContradictoryFlag', 'Changed'),
+            @('ScopedBefore', 'PriorPassSingletonUac', 'Changed'),
+            @('ScopedBefore', 'MissingAuthority', 'Changed'),
+            @('ScopedBefore', 'OtherSubject', 'Changed'),
+            @('ScopedBefore', 'MissingScopedSubject', 'Changed'),
+            @('ScopedBefore', 'DuplicateScopedSubject', 'Changed'),
+            @('ScopedBefore', 'UnreadableScope', 'Changed')
+        )
+        foreach ($inputForm in 'InMemory', 'Saved') {
+            $documents = if ($inputForm -ceq 'InMemory') {
+                $snapshots
+            }
+            else {
+                $paths
+            }
+            foreach ($pair in $pairs) {
+                $before, $after, $expected = $pair
+                $expectedReason = if ($expected -ceq 'Changed' -and $after -cne 'LegacyUnknown') {
+                    'DirectoryEvidenceInsufficient'
+                }
+                $comparisons = [ordered]@{
+                    Native = Compare-ADAnalyzerAssessment -Reference $documents[$before] -Difference $documents[$after]
+                    Direct = $comparer.Compare($documents[$before], $documents[$after])
+                }
+                foreach ($route in $comparisons.Keys) {
+                    $rows = @($comparisons[$route].Changes | Where-Object RuleId -CEQ $ruleId)
+                    Assert-Equal 1 $rows.Count
+                    if ($rows[0].Change -cne $expected) {
+                        $failureDetails.Add(('{0}/{1}/{2}: expected {3}, received {4}.' -f
+                                $inputForm, $route, $after, $expected, $rows[0].Change))
+                    }
+                    if ($rows[0].Reason -cne $expectedReason) {
+                        $failureDetails.Add(('{0}/{1}/{2}: expected reason [{3}], received [{4}].' -f
+                                $inputForm, $route, $after, $expectedReason, $rows[0].Reason))
+                    }
+                }
+            }
+        }
+        foreach ($name in $paths.Keys) {
+            Assert-Equal $hashes[$name] (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+        Assert-True ($failureDetails.Count -eq 0) ($failureDetails -join [Environment]::NewLine)
+    }
     Test-Assessment 'password expiry allowance changes are not recorded as account flag changes' {
         $ruleId = 'ACCOUNT.PASSWORD_NEVER_EXPIRES'
         $accountDn = 'CN=Expiry Test,DC=example,DC=invalid'
