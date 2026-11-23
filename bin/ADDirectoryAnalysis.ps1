@@ -2242,16 +2242,37 @@ class ADAnalyzerDirectoryCollector {
     ) {
         if (-not $Enabled) {
             $Coverage['Hosts'] = 'NotConfigured'
+            return
         }
-        elseif (@($Hosts | Where-Object Status -ne 'Observed').Count) {
-            $Coverage['Hosts'] = 'Partial'
-        }
-        elseif ($Hosts.Count) {
-            $Coverage['Hosts'] = 'Collected'
-        }
-        else {
+        if (-not $Hosts.Count) {
             $Coverage['Hosts'] = 'Unreadable'
+            return
         }
+
+        $status = 'Collected'
+        :scanHosts foreach ($hostRecord in $Hosts) {
+            if ($hostRecord.Status -ne 'Observed') {
+                $status = 'Partial'
+                break scanHosts
+            }
+
+            $registry = $hostRecord.PSObject.Properties['Registry']
+            if ($null -eq $registry) {
+                continue
+            }
+            foreach ($record in $registry.Value) {
+                if ($null -ne $record -and
+                    $null -ne $record.PSObject.Properties['Message'] -and
+                    $null -eq $record.PSObject.Properties['ReturnValue'] -and
+                    $record.Status -eq 'Unknown') {
+                    # Caught read failures carry a diagnostic in place of a provider return code.
+                    $status = 'Partial'
+                    break scanHosts
+                }
+            }
+        }
+
+        $Coverage['Hosts'] = $status
     }
 
     hidden [object] DescribeUsersObservation(

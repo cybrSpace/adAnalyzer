@@ -3805,6 +3805,7 @@ $assessmentCollectorCases = [ordered]@{
     Direct = 11
     Isolation = 2
     Composition = 8
+    HostRegistryCoverage = 1
 }
 foreach ($case in $assessmentCollectorCases.Keys) {
     Test-Assessment ('assessment collector API: ' + $case) {
