@@ -3018,6 +3018,37 @@ foreach ($case in $baselineImporterCases.Keys) {
             $baselineImporterCases[$case], $case)
     }
 }
+foreach ($case in 'Native', 'Direct') {
+    Test-Assessment ('scoped Users evidence comparison: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $arguments = @(
+            '-NoLogo'
+            '-NoProfile'
+            '-NonInteractive'
+            '-File'
+            (Join-Path $PSScriptRoot 'DirectoryUsersComparisonFixture.ps1')
+            '-Case'
+            $case
+            '-RepositoryRoot'
+            $RepositoryRoot
+        )
+        $priorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $output = @(& $executable @arguments 2>&1)
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $priorPreference
+        }
+        if ($exitCode -ne 0) {
+            throw ($output -join [Environment]::NewLine)
+        }
+        $marker = 'PASS AD-03 compare ' + $case + ' 29'
+        Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+    }
+}
+
 $assessmentCollectorCases = [ordered]@{
     Native = 52
     Construction = 2

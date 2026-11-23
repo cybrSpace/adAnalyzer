@@ -29,21 +29,21 @@ function Get-ADAnalyzerDirectoryField {
     return $Default
 }
 
-function Get-ADAnalyzerPasswordNeverExpiresObservation {
-    param($Record)
+function Get-ADAnalyzerDirectoryObservationField {
+    param($Record, [string]$Name)
 
     # Preserve the original shape and the caller's PowerShell error scope.
     if ($null -eq $Record) {
         return $null
     }
     if ($Record -is [Collections.IDictionary]) {
-        if (([Collections.IDictionary]$Record).Contains('PasswordNeverExpires')) {
-            return , ($Record['PasswordNeverExpires'])
+        if (([Collections.IDictionary]$Record).Contains($Name)) {
+            return , ($Record[$Name])
         }
         return $null
     }
 
-    $property = $Record.PSObject.Properties['PasswordNeverExpires']
+    $property = $Record.PSObject.Properties[$Name]
     if ($null -ne $property) {
         return , $property.Value
     }
@@ -538,7 +538,7 @@ class ADAnalyzerDirectoryObjectProjector {
         foreach ($name in @('WhenChanged', 'WhenCreated', 'LastLogonDate', 'PasswordLastSet')) {
             $result[$name] = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $Record $name)
         }
-        $result['PasswordNeverExpires'] = Get-ADAnalyzerPasswordNeverExpiresObservation $Record
+        $result['PasswordNeverExpires'] = Get-ADAnalyzerDirectoryObservationField $Record 'PasswordNeverExpires'
         $result['SIDHistory'] = @(Get-ADAnalyzerDirectoryField $Record 'SIDHistory' @() | ForEach-Object { ConvertTo-ADAnalyzerSid $_ })
         $resultantDn = @(Get-ADAnalyzerDirectoryField $Record 'msDS-ResultantPSO' @())
         $result['ResultantPasswordPolicyDN'] = $this.ResultantPolicyDn($resultantDn)
@@ -758,7 +758,7 @@ function ConvertTo-ADAnalyzerDirectoryObject {
     foreach ($name in @('WhenChanged', 'WhenCreated', 'LastLogonDate', 'PasswordLastSet')) {
         $result[$name] = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $Record $name)
     }
-    $result['PasswordNeverExpires'] = Get-ADAnalyzerPasswordNeverExpiresObservation $Record
+    $result['PasswordNeverExpires'] = Get-ADAnalyzerDirectoryObservationField $Record 'PasswordNeverExpires'
     $result['SIDHistory'] = @(Get-ADAnalyzerDirectoryField $Record 'SIDHistory' @() | ForEach-Object { ConvertTo-ADAnalyzerSid $_ })
     $resultantDn = @(Get-ADAnalyzerDirectoryField $Record 'msDS-ResultantPSO' @())
     $result['ResultantPasswordPolicyDN'] = $projector.ResultantPolicyDn($resultantDn)
@@ -2107,12 +2107,58 @@ class ADAnalyzerDirectoryCollector {
         }
     }
 
+    hidden [object] DescribeUsersObservation(
+        [string]$RequestedSearchBase,
+        [string]$SearchBase,
+        [string]$Server,
+        [object]$RootDse,
+        [string]$Mode,
+        [Collections.IDictionary]$Coverage
+    ) {
+        if ([string]::IsNullOrWhiteSpace($RequestedSearchBase)) {
+            return $null
+        }
+
+        $observedAt = $null
+        $status = 'Unreadable'
+        if ($Coverage['Users'] -eq 'Collected') {
+            $status = 'Completed'
+            $observedAt = [datetime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+        }
+        elseif ($Mode -eq 'PSDrive' -and $Coverage['DirectoryConnection'] -ne 'Collected') {
+            $status = 'Unobserved'
+        }
+
+        $controller = $null
+        $ErrorActionPreference = 'Stop'
+        try {
+            $reportedServer = Get-ADAnalyzerDirectoryObservationField $RootDse 'DnsHostName'
+            if ($reportedServer -is [string] -and
+                [string]::Equals($reportedServer, $Server, [StringComparison]::OrdinalIgnoreCase)) {
+                $controller = $Server
+            }
+        }
+        catch {
+            # A missing controller witness does not change the query outcome.
+            $controller = $null
+        }
+        return [pscustomobject][ordered]@{
+            Version = 1
+            RequestedSearchBase = $RequestedSearchBase
+            SearchBase = $SearchBase
+            Server = $controller
+            Mode = $Mode
+            ObservedAt = $observedAt
+            Status = $status
+        }
+    }
+
     hidden [object] CreateSnapshot([hashtable]$Observations) {
         $connectionStatus = $Observations.ConnectionStatus
         if ($Observations.ConnectionMode -eq 'PSDrive' -and $Observations.Coverage['DirectoryConnection'] -ne 'Collected') {
             $connectionStatus = 'Unreadable'
         }
-        return [pscustomobject]@{
+        $snapshot = [ordered]@{
             Server = $Observations.Server
             Domain = [pscustomobject]@{
                 DistinguishedName = $Observations.DomainDn
@@ -2148,6 +2194,10 @@ class ADAnalyzerDirectoryCollector {
             Errors = $Observations.Errors.ToArray()
             Coverage = $Observations.Coverage
         }
+        if ($null -ne $Observations.UsersObservation) {
+            $snapshot['UsersObservation'] = $Observations.UsersObservation
+        }
+        return [pscustomobject]$snapshot
     }
 }
 
@@ -2202,13 +2252,22 @@ function Get-ADAnalyzerDirectoryObservation {
                 $schema = @(& $query $request.Command $request.Arguments $request.Key)
             }
             $available = @($schema | ForEach-Object { [string](Get-ADAnalyzerDirectoryField $_ 'lDAPDisplayName') })
-            $searchBase = [string](Get-ADAnalyzerDirectoryField $Context 'SearchBase')
+            $requestedSearchBase = [string](Get-ADAnalyzerDirectoryField $Context 'SearchBase')
+            $searchBase = $requestedSearchBase
             if ([string]::IsNullOrWhiteSpace($searchBase)) {
                 $searchBase = $domainDn
             }
 
             $accountPlan = $collector.AccountPlan($searchBase, $domainDn, $available, $Profile, $coverage, $errors, $server)
             $rawUsers = @(& $query 'Get-ADUser' $accountPlan.UserArguments 'Users')
+            $usersObservation = $collector.DescribeUsersObservation(
+                $requestedSearchBase,
+                $accountPlan.UserArguments.SearchBase,
+                $server,
+                $root,
+                $connectionMode,
+                $coverage
+            )
             $rawComputers = @(& $query 'Get-ADComputer' $accountPlan.ComputerArguments 'Computers')
             $groups = @(& $query 'Get-ADGroup' $accountPlan.GroupArguments 'Groups')
             $trusts = @(& $query 'Get-ADTrust' $accountPlan.TrustArguments 'Trusts')
@@ -2371,6 +2430,7 @@ function Get-ADAnalyzerDirectoryObservation {
                     Hosts = $hosts
                     Errors = $errors
                     Coverage = $coverage
+                    UsersObservation = $usersObservation
                 })
         }
         catch {
@@ -3058,7 +3118,7 @@ class ADAnalyzerDirectoryPolicyEvaluator {
                     Object = $object
                     Applicability = 'Configured'
                 })
-                $never = Get-ADAnalyzerPasswordNeverExpiresObservation $object
+                $never = Get-ADAnalyzerDirectoryObservationField $object 'PasswordNeverExpires'
                 $allowed = Get-ADAnalyzerDirectoryField $policy 'AllowPasswordNeverExpires'
                 $status = if ($never -isnot [bool] -or $null -eq $allowed) {
                     'Unknown'

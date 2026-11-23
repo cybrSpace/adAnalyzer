@@ -1013,6 +1013,12 @@ class ADAnalyzerAssessmentReport {
                     'RulePredicateChanged' {
                         $explanation = ' Review the recorded rule requirements before interpreting the status change.'
                     }
+                    'DirectoryEvidenceInsufficient' {
+                        $explanation = ' Collect comparable account evidence from the selected directory scope.'
+                    }
+                    'DirectoryObservationNotNewer' {
+                        $explanation = ' Collect a newer observation for this account and scope.'
+                    }
                     'PolicyVersionMismatch' {
                         $explanation = ' Check the recorded directory and SYSVOL versions for this policy side.'
                     }
@@ -1350,6 +1356,10 @@ class ADAnalyzerAssessmentComparer {
         $projector = [ADAnalyzerEvidenceProjector]::new()
         $oldMap = $this.IndexSnapshot($before, $projector)
         $newMap = $this.IndexSnapshot($after, $projector)
+        $directoryEvidence = @{
+            Reference = $before
+            Difference = $after
+        }
         $changes = @(
             foreach ($key in @(@($oldMap.Keys) + @($newMap.Keys) | Sort-Object -Unique)) {
                 $hasOld = $oldMap.ContainsKey($key)
@@ -1376,6 +1386,9 @@ class ADAnalyzerAssessmentComparer {
                     $newGood = @($new | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                     $observation.Change = $this.ClassifyStatus(($oldJson -cne $newJson), $oldFail, $newFail, $oldGood, $newGood)
                     $this.QualifyPasswordExpirationTransition($key, $old, $new, $observation, $projector)
+                    $this.QualifyDirectoryPasswordExpirationResolution(
+                        $key, $old, $new, $observation, $directoryEvidence, $projector
+                    )
                     $this.QualifyGpoRuleTransition($key, $old, $new, $observation)
                     $this.QualifyGpoVersionTransition($key, $oldMap, $newMap, $observation, $projector)
                 }
@@ -1570,6 +1583,226 @@ class ADAnalyzerAssessmentComparer {
         if ($matchesAllowance) {
             $Observation.Change = 'Changed'
             $Observation.Reason = 'RulePredicateChanged'
+        }
+    }
+
+    hidden [object] ReadDirectoryObservationTime([object]$Value) {
+        if ($Value -is [datetime] -and $Value.Kind -eq [DateTimeKind]::Utc) {
+            return $Value
+        }
+        if ($Value -is [datetimeoffset] -and $Value.Offset -eq [timespan]::Zero) {
+            return $Value.UtcDateTime
+        }
+        $time = [datetime]::MinValue
+        if ($Value -is [string] -and $Value.EndsWith('Z', [StringComparison]::Ordinal) -and
+            [datetime]::TryParseExact(
+                $Value,
+                'o',
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind,
+                [ref]$time
+            )) {
+            return $time
+        }
+        return $null
+    }
+
+    hidden [guid] ReadDirectorySubjectGuid([object]$Value) {
+        if ($Value -is [guid]) {
+            return $Value
+        }
+        $identity = [guid]::Empty
+        if ($Value -is [string] -and [guid]::TryParseExact($Value, 'D', [ref]$identity)) {
+            return $identity
+        }
+        return [guid]::Empty
+    }
+
+    hidden [hashtable] GetDirectoryUsersEvidence(
+        [object]$Snapshot,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        $data = $Projector.GetValue($Snapshot, @('Data'))
+        $directory = $Projector.GetValue($data, @('Directory'))
+        $missing = [object]::new()
+        $evidence = $Projector.GetValue($directory, @('UsersObservation'), $missing)
+        if ([object]::ReferenceEquals($evidence, $missing)) {
+            return @{ Present = $false }
+        }
+
+        $invalid = @{ Present = $true }
+        $version = $Projector.GetValue($evidence, @('Version'))
+        $status = $Projector.GetValue($evidence, @('Status'))
+        $coverage = $Projector.GetValue($directory, @('Coverage'))
+        $usersStatus = $Projector.GetValue($coverage, @('Users'))
+        if (($version -isnot [int] -and $version -isnot [long]) -or $version -ne 1 -or
+            $status -isnot [string] -or $status -cne 'Completed' -or
+            $usersStatus -isnot [string] -or $usersStatus -cne 'Collected') {
+            return $invalid
+        }
+
+        $requested = $Projector.GetValue($evidence, @('RequestedSearchBase'))
+        $scope = $Projector.GetValue($evidence, @('SearchBase'))
+        $server = $Projector.GetValue($evidence, @('Server'))
+        $mode = $Projector.GetValue($evidence, @('Mode'))
+        if ($requested -isnot [string] -or [string]::IsNullOrWhiteSpace($requested) -or
+            $scope -isnot [string] -or -not $requested.Equals($scope, [StringComparison]::OrdinalIgnoreCase) -or
+            $server -isnot [string] -or [string]::IsNullOrWhiteSpace($server) -or
+            $mode -isnot [string] -or $mode -cnotin 'PSDrive', 'Direct') {
+            return $invalid
+        }
+
+        $context = $Projector.GetValue($Snapshot, @('Context'))
+        $contextScope = $Projector.GetValue($context, @('SearchBase'))
+        $contextServer = $Projector.GetValue($context, @('Server'))
+        if (($null -ne $contextScope -and
+                ($contextScope -isnot [string] -or -not $scope.Equals($contextScope, [StringComparison]::OrdinalIgnoreCase))) -or
+            ($null -ne $contextServer -and
+                ($contextServer -isnot [string] -or -not $server.Equals($contextServer, [StringComparison]::OrdinalIgnoreCase)))) {
+            return $invalid
+        }
+
+        $connection = $Projector.GetValue($directory, @('DirectoryConnection'))
+        $boundMode = $Projector.GetValue($connection, @('Mode'))
+        $boundServer = $Projector.GetValue($connection, @('Server'))
+        $directoryServer = $Projector.GetValue($directory, @('Server'))
+        $connectionStatus = $Projector.GetValue($connection, @('Status'))
+        $expectedStatus = if ($mode -ceq 'PSDrive') {
+            'Connected'
+        }
+        else {
+            'Direct'
+        }
+        if ($boundMode -isnot [string] -or $boundMode -cne $mode -or
+            $connectionStatus -isnot [string] -or $connectionStatus -cne $expectedStatus -or
+            $boundServer -isnot [string] -or -not $server.Equals($boundServer, [StringComparison]::OrdinalIgnoreCase) -or
+            $directoryServer -isnot [string] -or -not $server.Equals($directoryServer, [StringComparison]::OrdinalIgnoreCase)) {
+            return $invalid
+        }
+
+        $time = $this.ReadDirectoryObservationTime($Projector.GetValue($evidence, @('ObservedAt')))
+        $users = $Projector.GetValue($directory, @('Users'))
+        if ($null -eq $time -or $users -isnot [Collections.IList]) {
+            return $invalid
+        }
+
+        $index = [Collections.Generic.Dictionary[guid, object]]::new()
+        foreach ($user in $users) {
+            $guid = $this.ReadDirectorySubjectGuid($Projector.GetValue($user, @('ObjectGuid')))
+            if ($guid -eq [guid]::Empty) {
+                continue
+            }
+            if ($index.ContainsKey($guid)) {
+                $index[$guid] = $null
+            }
+            else {
+                $index[$guid] = $user
+            }
+        }
+        return @{
+            Present = $true
+            Scope = $scope
+            Server = $server
+            Mode = $mode
+            Time = $time
+            Users = $index
+        }
+    }
+
+    hidden [bool] IsDirectorySubjectInScope([string]$Dn, [string]$Scope) {
+        if ($Dn.Equals($Scope, [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+        $suffix = ',' + $Scope
+        if (-not $Dn.EndsWith($suffix, [StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+
+        # The boundary comma must not be part of an escaped RDN value.
+        $escapes = 0
+        $index = $Dn.Length - $suffix.Length - 1
+        while ($index -ge 0 -and $Dn[$index] -eq [char]92) {
+            $escapes++
+            $index--
+        }
+        return ($escapes % 2 -eq 0)
+    }
+
+    hidden [bool] MatchesObservedPasswordFlag(
+        [object]$Row,
+        [object]$User,
+        [bool]$Flag,
+        [string]$Status,
+        [string]$Scope,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        $rule = $Projector.GetValue($Row, @('RuleId'))
+        $target = $Projector.GetValue($Row, @('Target'))
+        $checkStatus = $Projector.GetValue($Row, @('Status'))
+        $observed = $Projector.GetValue($Row, @('Observed'))
+        $allowed = $Projector.GetValue($Row, @('Expected'))
+        $kind = $Projector.GetValue($User, @('ObjectClass'))
+        $dn = $Projector.GetValue($User, @('DistinguishedName'))
+        $enabled = $Projector.GetValue($User, @('Enabled'))
+        $flagValue = $Projector.GetValue($User, @('PasswordNeverExpires'))
+        return (
+            $rule -is [string] -and $rule -ieq 'ACCOUNT.PASSWORD_NEVER_EXPIRES' -and
+            $checkStatus -is [string] -and $checkStatus -ceq $Status -and
+            $observed -is [bool] -and $observed -eq $Flag -and $allowed -is [bool] -and -not $allowed -and
+            $kind -is [string] -and $kind -ieq 'User' -and
+            $enabled -is [bool] -and $enabled -and $flagValue -is [bool] -and $flagValue -eq $Flag -and
+            $target -is [string] -and $dn -is [string] -and
+            $dn.Equals($target, [StringComparison]::OrdinalIgnoreCase) -and
+            $this.IsDirectorySubjectInScope($dn, $Scope)
+        )
+    }
+
+    hidden [void] QualifyDirectoryPasswordExpirationResolution(
+        [string]$Key,
+        [object[]]$Before,
+        [object[]]$After,
+        [hashtable]$Observation,
+        [hashtable]$State,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        if ($Observation.Change -ne 'Resolved' -or
+            -not $Key.StartsWith(('ACCOUNT.PASSWORD_NEVER_EXPIRES' + [char]0), [StringComparison]::Ordinal)) {
+            return
+        }
+        if (-not $State.ContainsKey('Before')) {
+            $State['Before'] = $this.GetDirectoryUsersEvidence($State.Reference, $Projector)
+            $State['After'] = $this.GetDirectoryUsersEvidence($State.Difference, $Projector)
+        }
+        $oldEvidence = $State.Before
+        $newEvidence = $State.After
+        if (-not $oldEvidence.Present -and -not $newEvidence.Present) {
+            return
+        }
+
+        $Observation.Change = 'Changed'
+        $Observation.Reason = 'DirectoryEvidenceInsufficient'
+        if ($null -eq $oldEvidence['Time'] -or $null -eq $newEvidence['Time'] -or
+            -not $oldEvidence.Scope.Equals($newEvidence.Scope, [StringComparison]::OrdinalIgnoreCase) -or
+            -not $oldEvidence.Server.Equals($newEvidence.Server, [StringComparison]::OrdinalIgnoreCase) -or
+            $oldEvidence.Mode -cne $newEvidence.Mode -or $Before.Count -ne 1 -or $After.Count -ne 1) {
+            return
+        }
+        if ($newEvidence.Time -le $oldEvidence.Time) {
+            $Observation.Reason = 'DirectoryObservationNotNewer'
+            return
+        }
+
+        $oldGuid = $this.ReadDirectorySubjectGuid($Projector.GetValue($Before[0], @('ObjectGuid')))
+        $newGuid = $this.ReadDirectorySubjectGuid($Projector.GetValue($After[0], @('ObjectGuid')))
+        $oldUser = $null
+        $newUser = $null
+        if ($oldGuid -ne [guid]::Empty -and $oldGuid -eq $newGuid -and
+            $oldEvidence.Users.TryGetValue($oldGuid, [ref]$oldUser) -and
+            $newEvidence.Users.TryGetValue($newGuid, [ref]$newUser) -and
+            $this.MatchesObservedPasswordFlag($Before[0], $oldUser, $true, 'Fail', $oldEvidence.Scope, $Projector) -and
+            $this.MatchesObservedPasswordFlag($After[0], $newUser, $false, 'Pass', $newEvidence.Scope, $Projector)) {
+            $Observation.Change = 'Resolved'
+            $Observation.Reason = $null
         }
     }
 
@@ -2150,6 +2383,10 @@ function Compare-ADAnalyzerAssessment {
     }
 
     $projector = [ADAnalyzerEvidenceProjector]::new()
+    $directoryEvidence = @{
+        Reference = $before
+        Difference = $after
+    }
     $changes = @(
         foreach ($key in @(@($maps[0].Keys) + @($maps[1].Keys) | Sort-Object -Unique)) {
             $old = @(
@@ -2174,6 +2411,9 @@ function Compare-ADAnalyzerAssessment {
                 $newGood = @($new | Where-Object Status -notin 'Pass', 'NotApplicable').Count -eq 0
                 $observation.Change = $comparer.ClassifyStatus(($oldJson -cne $newJson), $oldFail, $newFail, $oldGood, $newGood)
                 $comparer.QualifyPasswordExpirationTransition($key, $old, $new, $observation, $projector)
+                $comparer.QualifyDirectoryPasswordExpirationResolution(
+                    $key, $old, $new, $observation, $directoryEvidence, $projector
+                )
                 $comparer.QualifyGpoRuleTransition($key, $old, $new, $observation)
                 $comparer.QualifyGpoVersionTransition($key, $maps[0], $maps[1], $observation, $projector)
             }
