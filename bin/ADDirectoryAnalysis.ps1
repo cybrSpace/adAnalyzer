@@ -2483,6 +2483,9 @@ function Get-ADAnalyzerDirectoryObservation {
                 $settings = @(& $query 'Get-ADObject' $policyPlan.SettingsArguments 'DomainSettings') | Select-Object -First 1
                 $defaultPolicy = @(& $query 'Get-ADDefaultDomainPasswordPolicy' $policyPlan.DefaultArguments 'DefaultPasswordPolicy') |
                     Select-Object -First 1
+                if ($null -eq $defaultPolicy -and $coverage['DefaultPasswordPolicy'] -eq 'Collected') {
+                    $coverage['DefaultPasswordPolicy'] = 'Unreadable'
+                }
                 $fineGrained = @(& $query 'Get-ADFineGrainedPasswordPolicy' $policyPlan.FineGrainedArguments 'FineGrainedPasswordPolicies')
                 $optional = @(& $query 'Get-ADOptionalFeature' $policyPlan.OptionalArguments 'OptionalFeatures')
             }
@@ -2510,6 +2513,11 @@ function Get-ADAnalyzerDirectoryObservation {
                     $effective = @(& $query 'Get-ADUserResultantPasswordPolicy' $policyPlan.Arguments $policyPlan.Key) |
                         Select-Object -First 1
                 }
+                if ($null -eq $effective -and $null -eq $defaultPolicy -and
+                    $coverage[$policyPlan.Key] -eq 'Collected') {
+                    $coverage[$policyPlan.Key] = 'Unreadable'
+                }
+
                 $resultant.Add($collector.CreateResultantPolicyRecord(
                         $user.DistinguishedName, $effective, $defaultPolicy, $coverage[$policyPlan.Key]
                     ))

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Native', 'Construction', 'Direct', 'Isolation', 'UsersCoverage', 'AclCoverage')]
+    [ValidateSet('Native', 'Construction', 'Direct', 'Isolation', 'UsersCoverage', 'AclCoverage', 'ResultantPolicyCoverage')]
     [string]$Case,
     [Parameter(Mandatory)][string]$RepositoryRoot
 )
@@ -314,12 +314,31 @@ function Invoke-FixtureProvider([string]$Command, [Collections.IDictionary]$Boun
             [pscustomobject]@{ HostName = $script:SelectedServer }
         }
         'Get-ADDefaultDomainPasswordPolicy' {
-            New-FixturePolicy 'Default' 12
+            if ($script:Fault -ceq 'PasswordDefaultDenied') {
+                $denial = @{
+                    Message = 'Fixture default domain password policy access denied.'
+                    ErrorId = 'Fixture.DefaultPolicyDenied'
+                    Category = 'PermissionDenied'
+                    ErrorAction = 'Stop'
+                }
+                Write-Error @denial
+            }
+            if ($script:Fault -ceq 'PasswordDefaultEmpty') {
+                return
+            }
+            $policy = New-FixturePolicy 'Default' 12
+            if ($script:Fault -clike 'PasswordDefault*') {
+                $policy.DistinguishedName = $script:DomainDn
+            }
+            $policy
         }
         'Get-ADFineGrainedPasswordPolicy' {
             New-FixturePolicy 'Cached policy' 16
         }
         'Get-ADUserResultantPasswordPolicy' {
+            if ($script:Fault -clike 'PasswordDefault*') {
+                return
+            }
             New-FixturePolicy 'Explicit policy' 18
         }
         'Get-ADOptionalFeature' {
@@ -1035,6 +1054,137 @@ function Invoke-FixtureAclCoverage($Collector) {
     }
 }
 
+function Assert-FixtureResultantPolicyCoverage($Snapshot, [string]$Scenario) {
+    $cachedTarget = 'CN=Cached,' + $script:SearchBase
+    $fallbackTarget = 'CN=Fallback,' + $script:SearchBase
+    $cachedKey = 'ResultantPasswordPolicy:' + $cachedTarget
+    $fallbackKey = 'ResultantPasswordPolicy:' + $fallbackTarget
+    $resultant = $Snapshot.PasswordPolicies.Resultant
+    Assert-DirectoryCollector (
+        ($Snapshot.Users.DistinguishedName -join '|') -ceq ($cachedTarget + '|' + $fallbackTarget) -and
+        $resultant.Count -eq 2 -and $resultant[0].Target -ceq $cachedTarget -and $resultant[1].Target -ceq $fallbackTarget -and
+        $Snapshot.Coverage.Users -ceq 'Collected' -and $Snapshot.Groups.Count -eq 1
+    ) 'The snapshot lost the users, their ordered policy records, or sibling group data.'
+
+    $cached = $resultant[0]
+    $fallback = $resultant[1]
+    Assert-DirectoryCollector (
+        $Snapshot.Coverage.FineGrainedPasswordPolicies -ceq 'Collected' -and
+        $Snapshot.PasswordPolicies.FineGrained.Count -eq 1 -and
+        $Snapshot.Coverage[$cachedKey] -ceq 'Collected' -and $cached.Status -ceq 'Collected' -and
+        $cached.Source -ceq 'FineGrained' -and $cached.Policy.DistinguishedName -ceq $script:PsoDn -and
+        $cached.Policy.MinPasswordLength -eq 16 -and $fallback.Source -ceq 'DefaultDomain'
+    ) 'The positive cached policy or fallback source label changed.'
+
+    $failures = @($Snapshot.Errors | Where-Object {
+            $_.Collector -ceq 'DefaultPasswordPolicy' -or $_.Collector -ceq $fallbackKey -or $_.Collector -ceq $cachedKey
+        })
+    if ($Scenario -ceq 'Denied') {
+        Assert-DirectoryCollector (
+            $failures.Count -eq 1 -and $failures[0].Collector -ceq 'DefaultPasswordPolicy' -and
+            $failures[0].Target -ceq $script:SelectedServer -and $failures[0].Status -ceq 'Unreadable' -and
+            $failures[0].Message -ceq 'Fixture default domain password policy access denied.'
+        ) 'The real synthetic provider denial was lost or duplicated.'
+    }
+    else {
+        Assert-DirectoryCollector ($failures.Count -eq 0) 'A successful empty or present lookup acquired a provider error.'
+    }
+
+    $checks = @(Test-ADAnalyzerDirectoryPolicy -Data $Snapshot -Profile @{ Policy = @{ MinimumPasswordLength = 14 } })
+    $lengthChecks = @($checks | Where-Object RuleId -CEQ 'PASSWORD.MIN_LENGTH')
+    $policyCoverage = @($checks | Where-Object RuleId -CEQ 'COLLECTION.RESULTANTPASSWORDPOLICIES')
+    $expectedFallbackCheck = if ($Scenario -ceq 'Present') { 'Fail' } else { 'Unknown' }
+    Assert-DirectoryCollector (
+        $lengthChecks.Count -eq 2 -and $lengthChecks[0].Target -ceq $cachedTarget -and
+        $lengthChecks[0].Status -ceq 'Pass' -and $lengthChecks[0].Observed -eq 16 -and
+        $lengthChecks[1].Target -ceq $fallbackTarget -and $lengthChecks[1].Status -ceq $expectedFallbackCheck
+    ) 'The actual evaluator lost the affected users or their password length observations.'
+
+    if ($Scenario -ceq 'Present') {
+        Assert-DirectoryCollector (
+            $Snapshot.Coverage.DefaultPasswordPolicy -ceq 'Collected' -and
+            $Snapshot.Coverage[$fallbackKey] -ceq 'Collected' -and $fallback.Status -ceq 'Collected' -and
+            $Snapshot.PasswordPolicies.Default.MinPasswordLength -eq 12 -and $fallback.Policy.MinPasswordLength -eq 12 -and
+            $lengthChecks[1].Observed -eq 12 -and
+            $Snapshot.Coverage.ResultantPasswordPolicies -ceq 'Collected' -and $policyCoverage.Count -eq 0
+        ) 'An empty personal lookup lost its readable domain default.'
+        return
+    }
+
+    Assert-DirectoryCollector ($null -eq $Snapshot.PasswordPolicies.Default -and $null -eq $fallback.Policy -and
+        $null -eq $lengthChecks[1].Observed) 'Unavailable default evidence was replaced with policy values.'
+    Assert-DirectoryCollector (
+        $Snapshot.Coverage.DefaultPasswordPolicy -ceq 'Unreadable' -and
+        $Snapshot.Coverage[$fallbackKey] -ceq 'Unreadable' -and $fallback.Status -ceq 'Unreadable' -and
+        $Snapshot.Coverage.ResultantPasswordPolicies -ceq 'Partial' -and $policyCoverage.Count -eq 1
+    ) ('Missing default policy must report Unreadable/Unreadable/Unreadable/Partial and one coverage check. Actual={0}/{1}/{2}/{3}, checks={4}.' -f
+        $Snapshot.Coverage.DefaultPasswordPolicy, $Snapshot.Coverage[$fallbackKey], $fallback.Status,
+        $Snapshot.Coverage.ResultantPasswordPolicies, $policyCoverage.Count)
+    Assert-DirectoryCollector ($policyCoverage[0].Status -ceq 'Unknown' -and $policyCoverage[0].Observed -ceq 'Partial' -and
+        $policyCoverage[0].Expected -ceq 'Collected') 'Incomplete resultant coverage was not visible in the actual evaluator.'
+}
+
+function Invoke-FixtureResultantPolicyCoverage($Collector) {
+    $failures = [Collections.Generic.List[string]]::new()
+    foreach ($transport in 'PSDrive', 'Direct') {
+        foreach ($scenario in 'Present', 'Empty', 'Denied') {
+            $previousFailures = $failures.Count
+            foreach ($route in 'Native', 'Class') {
+                Clear-FixtureObservations
+                $script:Fault = 'PasswordDefault' + $scenario
+                $context = New-FixtureContext
+                $profile = New-FixtureProfile $transport
+                $caseName = '{0}/{1}/{2}' -f $transport, $route, $scenario
+                try {
+                    if ($route -ceq 'Native') {
+                        $native = Invoke-FixtureNative $context $profile
+                        Assert-DirectoryCollector ($native.Rows.Count -eq 1 -and $native.Restored -and
+                            $null -eq $native.Failure -and $script:Imports.Count -eq 0) 'Native collection did not complete.'
+                        if ($scenario -ceq 'Denied') {
+                            $diagnostics = @(Get-FixtureCapturedError $native.Errors |
+                                Where-Object Id -like 'Fixture.DefaultPolicyDenied*')
+                            Assert-DirectoryCollector ($diagnostics.Count -gt 0) 'Native collection lost its original provider error ID.'
+                        }
+                        $snapshot = $native.Rows[0]
+                    }
+                    else {
+                        $direct = @(Invoke-FixtureDirect $Collector $context $profile)
+                        Assert-DirectoryCollector ($direct.Count -eq 1) 'The class did not complete with one snapshot.'
+                        Assert-FixtureDirectTrace $script:SelectedServer ($transport -ceq 'PSDrive')
+                        $snapshot = $direct[0]
+                    }
+                    $lookups = @($script:Trace | Where-Object Step -in @(
+                            'Get-ADDefaultDomainPasswordPolicy'
+                            'Get-ADFineGrainedPasswordPolicy'
+                            'Get-ADUserResultantPasswordPolicy'
+                        ))
+                    Assert-DirectoryCollector (
+                        ($lookups.Step -join '|') -ceq 'Get-ADDefaultDomainPasswordPolicy|Get-ADFineGrainedPasswordPolicy|Get-ADUserResultantPasswordPolicy' -and
+                        $lookups[0].Identity -ceq $script:DomainDn -and
+                        $lookups[2].Identity -ceq ('CN=Fallback,' + $script:SearchBase) -and
+                        @($lookups | Where-Object {
+                                $_.Server -cne $script:SelectedServer -or -not $_.SameCredential -or
+                                $_.Owned -ne ($transport -ceq 'PSDrive') -or $_.ErrorAction -cne 'Stop'
+                            }).Count -eq 0
+                    ) 'Password policy provider order, count, identity, transport or credential binding changed.'
+                    Assert-FixtureResultantPolicyCoverage $snapshot $scenario
+                    Write-Host ('PASS ResultantPolicyCoverage {0}' -f $caseName)
+                }
+                catch {
+                    $failures.Add($_.Exception.Message)
+                    Write-Host ('FAIL ResultantPolicyCoverage {0} {1}' -f $caseName, $_.Exception.Message)
+                }
+            }
+            if ($failures.Count -eq $previousFailures) {
+                $script:Checks++
+            }
+        }
+    }
+    if ($failures.Count) {
+        throw ('ResultantPolicyCoverage failed {0} of 12 route checks.' -f $failures.Count)
+    }
+}
+
 $collector = [ADAnalyzerDirectoryCollector]::new()
 Assert-DirectoryCollector ($script:Imports.Count -eq 0 -and $script:Ambient.Count -eq 0 -and $script:Trace.Count -eq 0) `
     'Loading or construction performed integration calls.'
@@ -1045,6 +1195,10 @@ if ($Case -eq 'UsersCoverage') {
 
 if ($Case -eq 'AclCoverage') {
     Invoke-FixtureAclCoverage $collector
+}
+
+if ($Case -eq 'ResultantPolicyCoverage') {
+    Invoke-FixtureResultantPolicyCoverage $collector
 }
 
 if ($Case -eq 'Construction') {
