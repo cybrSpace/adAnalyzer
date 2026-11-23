@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Native', 'Construction', 'Direct', 'Reuse', 'Runspace')]
+    [ValidateSet('Native', 'Construction', 'Direct', 'Reuse', 'Runspace', 'Timeout')]
     [string]$Case,
     [Parameter(Mandatory)][string]$RepositoryRoot
 )
@@ -15,6 +15,9 @@ $script:Timeout = 17
 $script:Credential = [pscredential]::new('fixture\host', [Security.SecureString]::new())
 $script:ExpectedCredential = $script:Credential
 $script:Mode = 'Healthy'
+$script:StallMilliseconds = 25
+$script:StallObservations = [Collections.Generic.List[long]]::new()
+$script:RegistryMetadataTimedOut = $false
 $script:ServiceName = 'Fixture''Quoted\"Service'
 $script:ExpectedFilter = @'
 Name='Spooler' OR Name='W32Time' OR Name='Fixture\'Quoted\\\"Service'
@@ -71,6 +74,13 @@ function Add-FixtureEvent([string]$Step, [string]$Computer, [string]$Detail = ''
         })
 }
 
+function Invoke-HostFixtureStall {
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    [Threading.Thread]::Sleep($script:StallMilliseconds)
+    $watch.Stop()
+    $script:StallObservations.Add($watch.ElapsedMilliseconds)
+}
+
 function New-CimSession {
     [CmdletBinding()]
     param([string]$ComputerName, [pscredential]$Credential, [uint32]$OperationTimeoutSec)
@@ -84,6 +94,10 @@ function New-CimSession {
         Confirm-FixtureBinding ([object]::ReferenceEquals($script:ExpectedCredential, $Credential)) 'Session credential identity changed.'
     }
     Add-FixtureEvent Open $ComputerName
+    if ($script:Mode -ceq 'TimeoutSession' -and $ComputerName -clike 'a.*') {
+        Invoke-HostFixtureStall
+        throw [TimeoutException]::new('Fixture provider timeout.')
+    }
     if ($script:Mode -eq 'AcquireFails' -and $ComputerName -clike 'b.*') {
         throw 'Fixture acquisition failure.'
     }
@@ -113,6 +127,13 @@ function Get-CimInstance {
     }
     Add-FixtureEvent Class $computer $ClassName
     if ($ClassName -eq 'Win32_OperatingSystem' -and $computer -clike 'a.*') {
+        if ($script:Mode -in 'TimeoutQuery', 'TimeoutQueryCleanupError', 'TimeoutQueryCleanupThrow', 'TimeoutQueryRegistryMetadata') {
+            Invoke-HostFixtureStall
+            Write-Error -Message 'Fixture provider timeout.' -Category OperationTimeout -ErrorId 'Fixture.ProviderTimeout'
+        }
+        if ($script:Mode -ceq 'TimeoutTextOnly') {
+            throw [InvalidOperationException]::new('Fixture provider timeout.')
+        }
         if ($script:Mode -in 'QueryFails', 'QueryCleanupErrors') {
             throw 'Fixture class query failure.'
         }
@@ -162,11 +183,22 @@ function Invoke-CimMethod {
         4
     }
     if ($MethodName -eq 'EnumValues') {
+        if ($script:Mode -ceq 'TimeoutQueryRegistryMetadata' -and
+            $computer -clike 'a.*' -and
+            -not $script:RegistryMetadataTimedOut) {
+            $script:RegistryMetadataTimedOut = $true
+            Invoke-HostFixtureStall
+            throw [TimeoutException]::new('Fixture registry metadata timeout.')
+        }
         return [pscustomobject]@{
             ReturnValue = 0
             sNames = @('One', 'Two')
             Types = @($type, 7)
         }
+    }
+    if ($script:Mode -ceq 'TimeoutRegistry' -and $computer -clike 'a.*' -and $Arguments.sValueName -ceq 'One') {
+        Invoke-HostFixtureStall
+        throw [InvalidOperationException]::new('Fixture provider timeout.', [TimeoutException]::new('Fixture typed cause.'))
     }
     if ($script:Mode -eq 'RegistryFails' -and $Arguments.sValueName -ieq 'One') {
         throw 'Fixture registry getter failure.'
@@ -202,13 +234,13 @@ function Remove-CimSession {
     Add-FixtureEvent Close $computer
     $null = $script:Sessions.Remove($computer)
     if ($computer -clike 'a.*') {
-        if ($script:Mode -in 'CleanupError', 'QueryCleanupErrors') {
+        if ($script:Mode -in 'CleanupError', 'QueryCleanupErrors', 'TimeoutQueryCleanupError') {
             Write-Error -Message 'Fixture cleanup diagnostic.' -ErrorId 'Fixture.HostCleanup'
             if ($script:Mode -eq 'QueryCleanupErrors') {
                 Write-Error -Message 'Fixture second cleanup diagnostic.' -ErrorId 'Fixture.HostCleanupSecond'
             }
         }
-        elseif ($script:Mode -eq 'CleanupThrow') {
+        elseif ($script:Mode -in 'CleanupThrow', 'TimeoutQueryCleanupThrow') {
             throw 'Fixture terminating cleanup failure.'
         }
     }
@@ -253,6 +285,8 @@ function New-FixtureProfile {
 
 function Reset-HostFixture([string]$Mode) {
     $script:Mode = $Mode
+    $script:RegistryMetadataTimedOut = $false
+    $script:StallObservations.Clear()
     $script:Events.Clear()
     $script:Contracts.Clear()
     $script:Sessions.Clear()
@@ -501,7 +535,7 @@ if ($Case -eq 'Native') {
     Write-Host ('PASS host collector Native {0}' -f $script:Checks)
 }
 
-if ($Case -ne 'Native') {
+if ($Case -notin 'Native', 'Timeout') {
     $nativeQueryFailure = if ($Case -eq 'Direct') {
         Invoke-NativeHostFixture QueryFails
     }
@@ -740,8 +774,262 @@ if ($empty.Hosts.Count -ne 0 -or $empty.Errors.Count -ne 0) {
     }
 }
 
-if ($Case -ne 'Native') {
+if ($Case -notin 'Native', 'Timeout') {
     Assert-HostCollector ($script:LegacyCalls -eq 0 -and $script:Contracts.Count -eq 0 -and
         $script:Sessions.Count -eq 0) 'Direct collection used the legacy command or left a session open.'
+    Write-Host ('PASS host collector {0} {1}' -f $Case, $script:Checks)
+}
+
+
+if ($Case -eq 'Timeout') {
+    $collector = [ADAnalyzerHostCollector]::new()
+    $profile = New-FixtureProfile
+    $hosts = [string[]]@('a.fixture.invalid', 'b.fixture.invalid')
+    $timeoutCases = @(
+        @{
+            Mode = 'TimeoutSession'
+            Phase = 'Session'
+            Operation = 'New-CimSession'
+            Status = 'Unknown'
+            Cleanup = 'NotAttempted'
+        }
+        @{
+            Mode = 'TimeoutQuery'
+            Phase = 'Query'
+            Operation = 'Win32_OperatingSystem'
+            Status = 'Partial'
+            Cleanup = 'Completed'
+        }
+        @{
+            Mode = 'TimeoutRegistry'
+            Phase = 'Registry'
+            Operation = 'GetDWORDValue'
+            Status = 'Partial'
+            Cleanup = 'Completed'
+        }
+        @{
+            Mode = 'TimeoutQueryCleanupError'
+            Phase = 'Query'
+            Operation = 'Win32_OperatingSystem'
+            Status = 'Partial'
+            Cleanup = 'ReportedFailure'
+        }
+        @{
+            Mode = 'TimeoutQueryRegistryMetadata'
+            Phase = 'Query'
+            Operation = 'Win32_OperatingSystem'
+            Status = 'Partial'
+            Cleanup = 'Completed'
+            MetadataRefresh = $true
+        }
+        @{
+            Mode = 'TimeoutQueryCleanupThrow'
+            Cutoff = $true
+        }
+        @{
+            Mode = 'TimeoutTextOnly'
+            Status = 'Partial'
+        }
+    )
+    foreach ($route in 'Native', 'Direct') {
+        $routeCases = $timeoutCases
+        if ($route -ceq 'Native') {
+            $routeCases += @{
+                Mode = 'TimeoutQuery'
+                Phase = 'Query'
+                Operation = 'Win32_OperatingSystem'
+                Status = 'Partial'
+                Cleanup = 'Completed'
+                First = $true
+            }
+        }
+        foreach ($scenario in $routeCases) {
+            Test-HostCollector {
+                Reset-HostFixture $scenario.Mode
+                $rows = [Collections.Generic.List[object]]::new()
+                $errors = [Collections.Generic.List[object]]::new()
+                $failure = $null
+                $watch = [Diagnostics.Stopwatch]::StartNew()
+                try {
+                    if ($route -ceq 'Native') {
+                        $arguments = @{
+                            ComputerNames = $hosts
+                            Credential = $script:Credential
+                            TimeoutSeconds = $script:Timeout
+                            Profile = $profile
+                            Errors = $errors
+                        }
+                        $recordRow = {
+                            Confirm-FixtureBinding ($script:Sessions.Count -eq 0) 'A host emitted before local cleanup.'
+                            Add-FixtureEvent Emit $_.ComputerName
+                            $rows.Add($_)
+                        }
+                        if ($scenario.First) {
+                            Get-ADAnalyzerHostData @arguments | Select-Object -First 1 | ForEach-Object $recordRow
+                        }
+                        else {
+                            Get-ADAnalyzerHostData @arguments | ForEach-Object $recordRow
+                        }
+                    }
+                    else {
+                        $result = $collector.Collect($hosts, $script:Credential, [uint32]$script:Timeout, $profile)
+                        $rows.AddRange($result.Hosts)
+                        $errors.AddRange($result.Errors)
+                    }
+                }
+                catch {
+                    $failure = $_.Exception.GetBaseException().Message
+                }
+                finally {
+                    $watch.Stop()
+                }
+
+                $label = $route + '/' + $scenario.Mode
+                if ($scenario.First) {
+                    $label += '/First'
+                }
+                $opened = @($script:Events | Where-Object Step -ceq Open)
+                $closed = @($script:Events | Where-Object Step -ceq Close)
+                Assert-HostCollector ($script:Sessions.Count -eq 0 -and $script:Contracts.Count -eq 0) ($label + ': CIM substitute binding or ownership failed.')
+                if ($scenario.Cutoff) {
+                    Assert-HostCollector (
+                        $failure -ceq 'Fixture terminating cleanup failure.' -and $rows.Count -eq 0 -and
+                        $opened.Count -eq 1 -and $closed.Count -eq 1 -and $script:StallObservations.Count -eq 1
+                    ) ($label + ': terminating cleanup emitted a row or continued to another host.')
+                    return
+                }
+
+                $expectedHosts = if ($scenario.First) {
+                    $hosts[0]
+                }
+                else {
+                    $hosts -join '|'
+                }
+                Assert-HostCollector (
+                    $null -eq $failure -and ($rows.ComputerName -join '|') -ceq $expectedHosts -and
+                    ($opened.Computer -join '|') -ceq $expectedHosts
+                ) ($label + ': timeout prevented or changed later host evidence.')
+                if (-not $scenario.First) {
+                    Assert-HostCollector (
+                        $rows[1].Status -ceq 'Observed' -and $null -eq $rows[1].PSObject.Properties['CollectionTiming']
+                    ) ($label + ': timeout leaked into later host evidence.')
+                }
+                if ($route -ceq 'Native') {
+                    $lifecycle = @(
+                        foreach ($event in $script:Events) {
+                            if ($event.Step -in 'Open', 'Close', 'Emit') {
+                                $event.Step + ':' + $event.Computer
+                            }
+                        }
+                    )
+                    $expectedLifecycle = @(
+                        'Open:a.fixture.invalid'
+                        if ($scenario.Phase -cne 'Session') {
+                            'Close:a.fixture.invalid'
+                        }
+                        'Emit:a.fixture.invalid'
+                        if (-not $scenario.First) {
+                            'Open:b.fixture.invalid'
+                            'Close:b.fixture.invalid'
+                            'Emit:b.fixture.invalid'
+                        }
+                    )
+                    Assert-HostCollector (
+                        ($lifecycle -join '|') -ceq ($expectedLifecycle -join '|')
+                    ) ($label + ': native cleanup, emission, or follow-up acquisition changed order.')
+                }
+                Assert-HostCollector ($rows[0].Status -ceq $scenario.Status) ($label + ': affected host coverage changed.')
+                $timingProperty = $rows[0].PSObject.Properties['CollectionTiming']
+                if ($scenario.Mode -ceq 'TimeoutTextOnly') {
+                    Assert-HostCollector (
+                        $null -eq $timingProperty -and $script:StallObservations.Count -eq 0 -and
+                        ($closed.Computer -join '|') -ceq ($hosts -join '|') -and $errors.Count -eq 1 -and
+                        $errors[0].Collector -ceq 'Host.OperatingSystem' -and $errors[0].Message -ceq 'Fixture provider timeout.'
+                    ) ($label + ': error text was mistaken for typed timeout evidence.')
+                    return
+                }
+
+                Assert-HostCollector ($null -ne $timingProperty) ($label + ': verified provider timeout has no timing evidence.')
+                $timing = $timingProperty.Value
+                $operations = $timing.TimedOutOperations
+                $expectedOperations = @(
+                    $scenario.Phase + '/' + $scenario.Operation
+                    if ($scenario.MetadataRefresh) {
+                        'Registry/EnumValues'
+                    }
+                )
+                Assert-HostCollector (
+                    $timing.OperationTimeoutSeconds -eq $script:Timeout -and
+                    $timing.LocalCleanup -ceq $scenario.Cleanup -and $timing.RemoteSettlement -ceq 'Unknown' -and
+                    $operations -is [array] -and $operations.Count -eq $expectedOperations.Count -and
+                    $script:StallObservations.Count -eq $expectedOperations.Count
+                ) ($label + ': operation count, budget, cleanup or settlement evidence is incorrect.')
+                for ($index = 0; $index -lt $expectedOperations.Count; $index++) {
+                    $operation = $operations[$index]
+                    $observedStall = $script:StallObservations[$index]
+                    Assert-HostCollector (
+                        ($operation.Phase + '/' + $operation.Operation) -ceq $expectedOperations[$index] -and
+                        $observedStall -ge $script:StallMilliseconds -and
+                        $operation.Elapsed -is [long] -and
+                        $operation.Elapsed -ge $observedStall -and
+                        $operation.Elapsed -le $watch.ElapsedMilliseconds
+                    ) ($label + ': timed-out operation order, phase, or elapsed milliseconds changed.')
+                }
+                if ($scenario.Phase -ceq 'Session') {
+                    Assert-HostCollector (
+                        ($closed.Computer -join '|') -ceq $hosts[1] -and $errors.Count -eq 1 -and
+                        $errors[0].Collector -ceq 'Host' -and $errors[0].Message -ceq 'Fixture provider timeout.' -and
+                        @($script:Events | Where-Object {
+                                $_.Computer -ceq $hosts[0] -and $_.Step -cne 'Emit'
+                            }).Count -eq 1
+                    ) ($label + ': session failure changed diagnostics or used an unacquired session.')
+                }
+                else {
+                    Assert-HostCollector (
+                        ($closed.Computer -join '|') -ceq $expectedHosts -and $rows[0].Services[0].State -ceq 'Running'
+                    ) ($label + ': existing evidence or acquired session cleanup was lost.')
+                }
+                if ($scenario.Phase -ceq 'Registry') {
+                    $registry = @($rows[0].Registry | Where-Object Path -ceq 'SYSTEM\Fixture')
+                    Assert-HostCollector (
+                        $errors.Count -eq 0 -and ($registry.Name -join '|') -ceq 'One|Two' -and
+                        $registry[0].Status -ceq 'Unknown' -and $null -eq $registry[0].Value -and
+                        $registry[0].Message -ceq 'Fixture provider timeout.' -and $registry[1].Status -ceq 'Observed'
+                    ) ($label + ': registry timeout lost its Unknown row, or earlier/later evidence.')
+                }
+                if ($scenario.Phase -ceq 'Query') {
+                    $expectedCollectors = 'Host.OperatingSystem'
+                    if ($scenario.Cleanup -ceq 'ReportedFailure') {
+                        $expectedCollectors += '|Host.Cleanup'
+                    }
+                    Assert-HostCollector (
+                        ($errors.Collector -join '|') -ceq $expectedCollectors -and
+                        $errors[0].Message -ceq 'Fixture provider timeout.' -and $null -eq $rows[0].OperatingSystem -and
+                        $rows[0].Patches.Count -eq 1
+                    ) ($label + ': query or cleanup error order, evidence or continuation changed.')
+                }
+                if ($scenario.MetadataRefresh) {
+                    $registry = @($rows[0].Registry | Where-Object Path -ceq 'SYSTEM\Fixture')
+                    $registryEvents = @($script:Events | Where-Object {
+                            $_.Computer -ceq $hosts[0] -and
+                            $_.Step -ceq 'Registry' -and
+                            $_.Detail -clike '*|SYSTEM\Fixture|*'
+                        })
+                    $expectedRefresh = @(
+                        'EnumValues|SYSTEM\Fixture|'
+                        'EnumValues|SYSTEM\Fixture|'
+                        'GetMultiStringValue|SYSTEM\Fixture|Two'
+                    )
+                    Assert-HostCollector (
+                        ($registry.Name -join '|') -ceq 'One|Two' -and
+                        $registry[0].Status -ceq 'Unknown' -and $null -eq $registry[0].Value -and
+                        $registry[0].Message -ceq 'Fixture registry metadata timeout.' -and
+                        $registry[1].Status -ceq 'Observed' -and ($registry[1].Value -join '|') -ceq 'first|second' -and
+                        ($registryEvents.Detail -join '>') -ceq ($expectedRefresh -join '>')
+                    ) ($label + ': registry metadata timeout prevented refresh or replaced evidence.')
+                }
+            }
+        }
+    }
     Write-Host ('PASS host collector {0} {1}' -f $Case, $script:Checks)
 }

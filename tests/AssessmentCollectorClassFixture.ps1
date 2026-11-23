@@ -1606,6 +1606,20 @@ Invoke-CompositionProvider 'COMPOSITION_COMMAND' $PSBoundParameters
             $Arguments.hDefKey -eq [uint32]2147483650 -and
             $PSBoundParameters['ErrorAction'] -eq 'Stop') 'Registry observation changed its bound session or request.'
         Add-CompositionEvent CimRegistry $MethodName
+        if ($script:CompositionRegistryTimeout -and $Arguments.sSubKeyName -ceq 'SYSTEM\CurrentControlSet\Services\W32Time\Parameters') {
+            if ($Arguments.sValueName -ceq 'NtpServer') {
+                Assert-Fixture ($MethodName -ceq 'GetStringValue') 'The timeout substitute did not bind to the expected registry method.'
+                Add-CompositionEvent CimRegistryTimeout $Arguments.sValueName
+                throw [TimeoutException]::new('Fixture composed CIM operation timeout.')
+            }
+            if ($Arguments.sValueName -ceq 'Type') {
+                Add-CompositionEvent CimRegistryContinued $Arguments.sValueName
+                return [pscustomobject]@{
+                    ReturnValue = 0
+                    sValue = 'NTP'
+                }
+            }
+        }
         [pscustomobject]@{ ReturnValue = 2 }
     }
 
@@ -1711,12 +1725,69 @@ function Invoke-CompositionProvider([string]$Command, [Collections.IDictionary]$
     }
 }
 
+function Assert-CompositionRegistryTimeout([object]$Assessment) {
+    $directory = $Assessment.Data.Directory
+    $hostRow = $directory.Hosts[0]
+    $observations = @($Assessment.Checks | Where-Object RuleId -CEQ 'HOST.OBSERVATIONS')
+    $service = @($Assessment.Checks | Where-Object RuleId -CEQ 'HOST.SERVICE')
+    $timedRegistry = @($hostRow.Registry | Where-Object Name -CEQ 'NtpServer')
+    $laterRegistry = @($hostRow.Registry | Where-Object Name -CEQ 'Type')
+    Assert-Fixture (
+        $observations.Count -eq 1 -and $observations[0].Target -ceq $script:CompositionPinnedServer -and
+        $observations[0].Status -ceq 'Unknown' -and $service.Count -eq 1 -and $service[0].Status -ceq 'Pass' -and
+        $timedRegistry.Count -eq 1 -and $timedRegistry[0].Status -ceq 'Unknown' -and $null -eq $timedRegistry[0].Value -and
+        $timedRegistry[0].Message -ceq 'Fixture composed CIM operation timeout.' -and
+        $laterRegistry.Count -eq 1 -and $laterRegistry[0].Status -ceq 'Observed' -and $laterRegistry[0].Value -ceq 'NTP'
+    ) 'Assessment lost valid service or registry evidence after the registry timeout.'
+    $trace = $script:CompositionTrace.ToArray()
+    $timeoutStep = [array]::IndexOf($trace, 'CimRegistryTimeout|NtpServer')
+    $continuationStep = [array]::IndexOf($trace, 'CimRegistryContinued|Type')
+    $cleanupStep = [array]::IndexOf($trace, 'CimClose|')
+    $finalStages = @($trace | Select-Object -Last 4)
+    Assert-Fixture (
+        $timeoutStep -gt 0 -and $trace[$timeoutStep - 1] -ceq 'CimRegistry|GetStringValue' -and
+        $continuationStep -gt $timeoutStep -and $cleanupStep -gt $continuationStep -and
+        ($finalStages -join ',') -ceq 'CimClose|,DirectoryRestore|,DirectoryRemove|,Audit|' -and
+        @($trace | Where-Object { $_ -clike 'CimRegistryTimeout|*' }).Count -eq 1 -and
+        $script:CompositionImports -eq 2 -and $script:CompositionForeignCalls -eq 0 -and
+        $script:CompositionOwned.Count -eq 0 -and $null -eq $script:CompositionSession -and
+        (Microsoft.PowerShell.Management\Get-Location).Path -ceq $script:CompositionCallerPath
+    ) 'The timed registry attempt, later observation, cleanup or assessment order changed.'
+
+    Assert-Fixture (
+        $directory.Coverage.Hosts -ceq 'Partial' -and $hostRow.Status -ceq 'Partial'
+    ) 'The recognized registry timeout did not mark composed host coverage Partial.'
+    $hostTiming = $hostRow.CollectionTiming
+    $checkTiming = $observations[0].Observed.CollectionTiming
+    Assert-Fixture (
+        $hostTiming.OperationTimeoutSeconds -eq 17 -and $hostTiming.LocalCleanup -ceq 'Completed' -and
+        $hostTiming.RemoteSettlement -ceq 'Unknown' -and $hostTiming.TimedOutOperations -is [array] -and
+        $hostTiming.TimedOutOperations.Count -eq 1 -and $hostTiming.TimedOutOperations[0].Phase -ceq 'Registry' -and
+        $hostTiming.TimedOutOperations[0].Operation -ceq 'GetStringValue' -and
+        $hostTiming.TimedOutOperations[0].Elapsed -is [long] -and
+        $hostTiming.TimedOutOperations[0].Elapsed -ge 0 -and
+        -not [object]::ReferenceEquals($hostTiming, $checkTiming)
+    ) 'The composed timing or its local/remote outcomes are missing or aliased.'
+
+    $report = [ADAnalyzerAssessmentReport]::new().Render($Assessment, 'Json') | ConvertFrom-Json
+    $reportObservation = @($report.Checks | Where-Object RuleId -CEQ 'HOST.OBSERVATIONS')[0].Observed
+    $reportTiming = $report.Data.Directory.Hosts[0].CollectionTiming
+    $expected = ConvertTo-Json -InputObject $hostTiming -Depth 10 -Compress
+    Assert-Fixture (
+        $report.Data.Directory.Coverage.Hosts -ceq 'Partial' -and
+        (ConvertTo-Json -InputObject $checkTiming -Depth 10 -Compress) -ceq $expected -and
+        (ConvertTo-Json -InputObject $reportTiming -Depth 10 -Compress) -ceq $expected -and
+        (ConvertTo-Json -InputObject $reportObservation.CollectionTiming -Depth 10 -Compress) -ceq $expected
+    ) 'The assessment observations or rendered JSON lost the composed coverage and timing.'
+}
+
 function Invoke-AssessmentCompositionFixture {
     param(
         [string]$Transport,
         [object]$Collector,
         [switch]$FailEvaluation,
-        [switch]$CimCleanupError
+        [switch]$CimCleanupError,
+        [switch]$CimRegistryTimeout
     )
 
     $script:CompositionImports = 0
@@ -1725,6 +1796,7 @@ function Invoke-AssessmentCompositionFixture {
     $script:CompositionCallerPath = (Microsoft.PowerShell.Management\Get-Location).Path
     $script:CompositionSession = $null
     $script:CompositionCimCleanupError = [bool]$CimCleanupError
+    $script:CompositionRegistryTimeout = [bool]$CimRegistryTimeout
     $script:CompositionTemp = [IO.Path]::Combine([IO.Path]::GetTempPath(), ('assessment-composition-' + [guid]::NewGuid().ToString('N')))
     $nativeService = $null
     try {
@@ -1809,6 +1881,9 @@ function Invoke-AssessmentCompositionFixture {
                 }
             }
         }
+        if ($CimRegistryTimeout) {
+            $options.SkipGpo = $true
+        }
         if ($FailEvaluation) {
             $options.SkipGpo = $true
             $caught = $null
@@ -1847,9 +1922,16 @@ function Invoke-AssessmentCompositionFixture {
             $directory.DirectoryConnection.Mode -ceq $Transport -and
             $directory.DirectoryConnection.Status -ceq $status -and
             $directory.Domain.MachineAccountQuota -eq 0 -and
-            $directory.Coverage.Hosts -ceq 'Collected' -and
             @($directory.Hosts).Count -eq 1
         ) 'Composed directory, host, or transport data changed.'
+        if ($CimRegistryTimeout) {
+            Assert-CompositionRegistryTimeout $result
+            return
+        }
+        Assert-Fixture (
+            $directory.Coverage.Hosts -ceq 'Collected' -and
+            $null -eq $directory.Hosts[0].PSObject.Properties['CollectionTiming']
+        ) 'Healthy CIM coverage or the host field contract changed.'
         $isCleanupError = {
             $collectorField = $_.PSObject.Properties['Collector']
             $null -ne $collectorField -and $collectorField.Value -ceq 'Host.Cleanup'
@@ -1984,6 +2066,9 @@ if ($Case -eq 'Composition') {
     }
     Test-Fixture 'actual composition retains recoverable CIM cleanup evidence' {
         Invoke-AssessmentCompositionFixture Direct $compositionCollector -CimCleanupError
+    }
+    Test-Fixture 'composed assessment and JSON retain incomplete CIM timing' {
+        Invoke-AssessmentCompositionFixture PSDrive $compositionCollector -CimRegistryTimeout
     }
     Test-Fixture 'actual strict composition retains unreadable and healthy GPOs' {
         Set-StrictMode -Version Latest

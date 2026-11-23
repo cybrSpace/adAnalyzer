@@ -788,6 +788,84 @@ function ConvertTo-ADAnalyzerDirectoryObject {
     $projector.FinishObject($result, $rawAttributes)
 }
 
+class ADAnalyzerHostCollectionTiming {
+    hidden [uint32] $OperationTimeoutSeconds
+    hidden [Diagnostics.Stopwatch] $Clock
+    hidden [string] $Phase
+    hidden [string] $Operation
+    hidden [string] $LocalCleanup = 'NotAttempted'
+    hidden [Collections.Generic.List[object]] $TimedOutOperations
+
+    ADAnalyzerHostCollectionTiming([uint32]$OperationTimeoutSeconds) {
+        $this.OperationTimeoutSeconds = $OperationTimeoutSeconds
+        $this.Clock = [Diagnostics.Stopwatch]::new()
+    }
+
+    hidden [void] StartOperation([string]$Phase, [string]$Operation) {
+        $this.Phase = $Phase
+        $this.Operation = $Operation
+        $this.Clock.Restart()
+    }
+
+    hidden [void] CompleteOperation() {
+        $this.Clock.Reset()
+    }
+
+    hidden [bool] IsTimeout([Management.Automation.ErrorRecord]$Failure) {
+        if ($Failure.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::OperationTimeout) {
+            return $true
+        }
+        for ($cause = $Failure.Exception; $null -ne $cause; $cause = $cause.InnerException) {
+            if ($cause -is [TimeoutException]) {
+                return $true
+            }
+        }
+        return $false
+    }
+
+    hidden [void] RecordFailure([Management.Automation.ErrorRecord]$Failure) {
+        if (-not $this.Clock.IsRunning) {
+            return
+        }
+        $this.Clock.Stop()
+        if (-not $this.IsTimeout($Failure)) {
+            return
+        }
+        if ($null -eq $this.TimedOutOperations) {
+            $this.TimedOutOperations = [Collections.Generic.List[object]]::new()
+        }
+        $this.TimedOutOperations.Add([pscustomobject][ordered]@{
+                Phase = $this.Phase
+                Operation = $this.Operation
+                Elapsed = $this.Clock.ElapsedMilliseconds
+            })
+    }
+
+    hidden [bool] HasTimeouts() {
+        return $null -ne $this.TimedOutOperations
+    }
+
+    hidden [void] RecordCleanup([bool]$ReportedErrors) {
+        $this.LocalCleanup = if ($ReportedErrors) {
+            'ReportedFailure'
+        }
+        else {
+            'Completed'
+        }
+    }
+
+    hidden [void] AddToReport([Collections.Specialized.OrderedDictionary]$Report) {
+        if ($this.HasTimeouts()) {
+            $Report['CollectionTiming'] = [pscustomobject][ordered]@{
+                OperationTimeoutSeconds = $this.OperationTimeoutSeconds
+                TimedOutOperations = $this.TimedOutOperations.ToArray()
+                LocalCleanup = $this.LocalCleanup
+                RemoteSettlement = 'Unknown'
+            }
+        }
+    }
+}
+
 class ADAnalyzerHostCollector {
     ADAnalyzerHostCollector() {
     }
@@ -1120,37 +1198,56 @@ class ADAnalyzerHostCollector {
         $session = $null
         $initialErrorCount = $Errors.Count
         $report = $this.CreateReport($ComputerName)
+        $timing = [ADAnalyzerHostCollectionTiming]::new($TimeoutSeconds)
         try {
             $arguments = $this.SessionArguments($ComputerName, $Credential, $TimeoutSeconds)
+            $timing.StartOperation('Session', 'New-CimSession')
             $session = New-CimSession @arguments
+            $timing.CompleteOperation()
             foreach ($query in $Plan.Queries) {
                 try {
                     $arguments = $this.QueryArguments($session, $query, $TimeoutSeconds)
+                    $timing.StartOperation('Query', $query.ClassName)
                     $report[$query.Key] = @(Get-CimInstance @arguments)
+                    $timing.CompleteOperation()
                 }
                 catch {
+                    $timing.RecordFailure($_)
                     $Errors.Add($this.CollectorFailure(('Host.' + $query.Key), $ComputerName, $_.Exception.Message))
                 }
             }
-            $registry = $this.CollectRegistry($session, $Plan.RegistrySettings, $TimeoutSeconds)
-            $this.CompleteReport($report, $registry, ($Errors.Count -gt $initialErrorCount))
+            $registry = $this.CollectRegistry($session, $Plan.RegistrySettings, $TimeoutSeconds, $timing)
+            $this.CompleteReport($report, $registry, ($Errors.Count -gt $initialErrorCount -or $timing.HasTimeouts()))
         }
         catch {
+            $timing.RecordFailure($_)
             $Errors.Add($this.CollectorFailure('Host', $ComputerName, $_.Exception.Message))
         }
         finally {
             if ($null -ne $session) {
                 $cleanupErrors = $null
                 Remove-CimSession -CimSession $session -ErrorAction SilentlyContinue -ErrorVariable cleanupErrors
+                $timing.RecordCleanup([bool]$cleanupErrors)
                 if ($cleanupErrors) {
                     $this.RecordCleanupFailures($Errors, $ComputerName, $cleanupErrors)
                 }
             }
         }
+        $timing.AddToReport($report)
         return [pscustomobject]$report
     }
 
     hidden [object[]] CollectRegistry([object]$Session, [hashtable[]]$Settings, [uint32]$TimeoutSeconds) {
+        $timing = [ADAnalyzerHostCollectionTiming]::new($TimeoutSeconds)
+        return $this.CollectRegistry($Session, $Settings, $TimeoutSeconds, $timing)
+    }
+
+    hidden [object[]] CollectRegistry(
+        [object]$Session,
+        [hashtable[]]$Settings,
+        [uint32]$TimeoutSeconds,
+        [ADAnalyzerHostCollectionTiming]$Timing
+    ) {
         $registry = [Collections.Generic.List[object]]::new()
         $typeCache = @{}
         foreach ($setting in $Settings) {
@@ -1160,7 +1257,9 @@ class ADAnalyzerHostCollector {
                 if (-not $method) {
                     $arguments = $this.RegistryMetadataArguments($typeCache, $Session, $setting, $TimeoutSeconds)
                     if ($null -ne $arguments) {
+                        $Timing.StartOperation('Registry', 'EnumValues')
                         $typeCache[$setting.Path] = Invoke-CimMethod @arguments
+                        $Timing.CompleteOperation()
                     }
                     $metadata = $typeCache[$setting.Path]
                     if ($metadata.ReturnValue -ne 0) {
@@ -1182,7 +1281,9 @@ class ADAnalyzerHostCollector {
                 }
 
                 $arguments = $this.RegistryArguments($Session, $setting, $method, $TimeoutSeconds)
+                $Timing.StartOperation('Registry', $method)
                 $value = Invoke-CimMethod @arguments
+                $Timing.CompleteOperation()
                 $record = $this.RegistryObservation($setting, $type, $value.ReturnValue, $value.ReturnValue)
                 if ($value.ReturnValue -eq 0) {
                     $property = $this.RegistryValueProperty($type)
@@ -1191,6 +1292,7 @@ class ADAnalyzerHostCollector {
                 $registry.Add($record)
             }
             catch {
+                $Timing.RecordFailure($_)
                 $registry.Add($this.RegistryFailure($setting, $type, $_.Exception.Message))
             }
         }
@@ -1216,15 +1318,21 @@ function Get-ADAnalyzerHostData {
         $session = $null
         $initialErrorCount = $Errors.Count
         $data = $collector.CreateReport($computer)
+        $timing = [ADAnalyzerHostCollectionTiming]::new($TimeoutSeconds)
         try {
             $arguments = $collector.SessionArguments($computer, $Credential, $TimeoutSeconds)
+            $timing.StartOperation('Session', 'New-CimSession')
             $session = New-CimSession @arguments
+            $timing.CompleteOperation()
             foreach ($query in $plan.Queries) {
                 try {
                     $splat = $collector.QueryArguments($session, $query, $TimeoutSeconds)
+                    $timing.StartOperation('Query', $query.ClassName)
                     $data[$query.Key] = @(Get-CimInstance @splat)
+                    $timing.CompleteOperation()
                 }
                 catch {
+                    $timing.RecordFailure($_)
                     $Errors.Add($collector.CollectorFailure(('Host.' + $query.Key), $computer, $_.Exception.Message)) > $null
                 }
             }
@@ -1238,7 +1346,9 @@ function Get-ADAnalyzerHostData {
                     if (-not $method) {
                         $splat = $collector.RegistryMetadataArguments($typeCache, $session, $setting, $TimeoutSeconds)
                         if ($null -ne $splat) {
+                            $timing.StartOperation('Registry', 'EnumValues')
                             $typeCache[$setting.Path] = Invoke-CimMethod @splat
+                            $timing.CompleteOperation()
                         }
                         $metadata = $typeCache[$setting.Path]
                         if ($metadata.ReturnValue -ne 0) {
@@ -1260,7 +1370,9 @@ function Get-ADAnalyzerHostData {
                     }
 
                     $splat = $collector.RegistryArguments($session, $setting, $method, $TimeoutSeconds)
+                    $timing.StartOperation('Registry', $method)
                     $value = Invoke-CimMethod @splat
+                    $timing.CompleteOperation()
                     $record = $collector.RegistryObservation($setting, $type, $value.ReturnValue, $value.ReturnValue)
                     if ($value.ReturnValue -eq 0) {
                         $property = $collector.RegistryValueProperty($type)
@@ -1269,23 +1381,27 @@ function Get-ADAnalyzerHostData {
                     $registry.Add($record)
                 }
                 catch {
+                    $timing.RecordFailure($_)
                     $registry.Add($collector.RegistryFailure($setting, $type, $_.Exception.Message))
                 }
             }
-            $collector.CompleteReport($data, $registry.ToArray(), ($Errors.Count -gt $initialErrorCount))
+            $collector.CompleteReport($data, $registry.ToArray(), ($Errors.Count -gt $initialErrorCount -or $timing.HasTimeouts()))
         }
         catch {
+            $timing.RecordFailure($_)
             $Errors.Add($collector.CollectorFailure('Host', $computer, $_.Exception.Message)) > $null
         }
         finally {
             if ($null -ne $session) {
                 $cleanupErrors = $null
                 Remove-CimSession -CimSession $session -ErrorAction SilentlyContinue -ErrorVariable cleanupErrors
+                $timing.RecordCleanup([bool]$cleanupErrors)
                 if ($cleanupErrors) {
                     $collector.RecordCleanupFailures($Errors, $computer, $cleanupErrors)
                 }
             }
         }
+        $timing.AddToReport($data)
         [pscustomobject]$data
     }
 }

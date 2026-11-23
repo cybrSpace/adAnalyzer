@@ -2796,6 +2796,7 @@ $hostCollectorCases = [ordered]@{
     Direct = 7
     Reuse = 2
     Runspace = 2
+    Timeout = 15
 }
 foreach ($case in $hostCollectorCases.Keys) {
     Invoke-DirectoryTest ('host collector: ' + $case) {
