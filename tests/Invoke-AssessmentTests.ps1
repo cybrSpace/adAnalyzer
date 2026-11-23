@@ -3384,6 +3384,7 @@ $prerequisiteInspectorCases = [ordered]@{
     Direct = 4
     Isolation = 2
     Online = 14
+    RootDse = 21
 }
 foreach ($case in $prerequisiteInspectorCases.Keys) {
     Test-Assessment ('prerequisite inspector API: ' + $case) {
