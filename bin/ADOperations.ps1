@@ -663,19 +663,11 @@ class ADAnalyzerOperationDocumentReader {
     }
 
     hidden [bool] PrepareRecord([hashtable]$Document) {
-        $value = $Document.Value
-        if ($value -is [array] -and $value.Rank -eq 1 -and $value.Length -eq 1) {
-            $value = $value.GetValue($value.GetLowerBound(0))
-            $Document.Value = $value
-        }
-        return -not ($null -eq $value -or
-            $value -is [ValueType] -or
-            $value -is [string] -or
-            ($value -is [Collections.IEnumerable] -and $value -isnot [Collections.IDictionary]))
+        return Test-ADAnalyzerDocumentRecord $Document
     }
 
     hidden [bool] IsSupportedVersion([string]$Version) {
-        return ($Version -match '^1(?:\.|$)')
+        return Test-ADAnalyzerDocumentSchemaVersion $Version
     }
 }
 

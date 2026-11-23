@@ -131,6 +131,13 @@ function Start-ADAnalyzer {
         }
         return Undo-ADAnalyzerRemediation @arguments
     }
+    $reference = $null
+    if ($ReferencePath -and $Operation -in 'assess', 'report') {
+        # Standalone execution has only the package's exported commands in scope.
+        . (Join-Path $PSScriptRoot 'ADFile.ps1')
+        $reference = Read-ADAnalyzerSavedComparisonReference $ReferencePath
+    }
+
     $arguments = @{
         Credential = $Credential
         Profile = $profile
@@ -158,11 +165,11 @@ function Start-ADAnalyzer {
         }
         return $result
     }
-    if ($ReferencePath) {
+    if ($null -ne $reference) {
         $assessment | Add-Member `
             -NotePropertyName Comparison `
             -NotePropertyValue (Compare-ADAnalyzerAssessment `
-                -Reference $ReferencePath `
+                -Reference $reference.Assessment `
                 -Difference $assessment)
     }
     if ($OutputPath) {
@@ -173,8 +180,8 @@ function Start-ADAnalyzer {
             WhatIf = $WhatIfPreference
             Confirm = $false
         }
-        if ($ReferencePath) {
-            $export.ComparisonReferencePath = $ReferencePath
+        if ($null -ne $reference) {
+            $export.ComparisonReferencePath = $reference.Path
         }
         $null = Export-ADAnalyzerAssessment @export
     }

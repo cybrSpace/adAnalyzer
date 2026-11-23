@@ -24,7 +24,7 @@ The exporter writes JSON evidence, HTML with summary/check tables and expandable
 
 When exporting from a saved assessment file, choose a distinct output path. Both report export APIs reject destinations that resolve to the source's normalized FileSystem path. An All export checks all generated paths before writing any report. Windows name comparison is case-insensitive. File identity through filesystem links and junctions has a separate qualification scope.
 
-`Start-ADAnalyzer -ReferencePath` also protects the selected saved comparison. If any generated JSON, HTML, or CSV destination matches that reference's normalized FileSystem path, the export fails before publishing any report. `-WhatIf` still reads and compares the reference without publishing.
+`Start-ADAnalyzer -ReferencePath` admits the selected saved assessment before directory or host collection. Comparison uses that admitted record and export protects its normalized FileSystem path. If any generated JSON, HTML, or CSV destination matches the reference path, the export fails before publishing any report. `-WhatIf` still reads and compares the reference without publishing.
 
 Assessment comparisons reject different valid recorded directory domain SIDs even when the target label and search base match. Snapshots without a usable recorded domain SID retain the legacy target and scope checks.
 

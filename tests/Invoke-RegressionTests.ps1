@@ -163,6 +163,7 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
     $script:Exports = 0
     $script:FailScan = $false
     $script:FailExport = $false
+    $script:ReferenceReplacement = $null
 
     function Get-ADAnalyzerAssessment {
         param(
@@ -180,6 +181,9 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
         $script:ScanArguments = $PSBoundParameters
         if ($script:FailScan) {
             throw 'fixture scan failure'
+        }
+        if ($null -ne $script:ReferenceReplacement) {
+            [IO.File]::WriteAllBytes($script:ReferenceReplacement.Path, $script:ReferenceReplacement.Bytes)
         }
         [pscustomobject]@{
             SchemaVersion = 1
@@ -583,6 +587,181 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
             $fresh = Join-Path $temporary 'invalid-comparison-fresh'
             Assert-Throws { Start-ADAnalyzer -OutputPath $fresh -ReferencePath (Join-Path $temporary 'missing-reference.json') }
             Assert-Equal 0 @(Get-ChildItem -LiteralPath $temporary -Filter 'invalid-comparison-fresh*').Count
+        }
+    }
+    Invoke-Test 'CLI admits the saved comparison reference before acquisition' {
+        & {
+            . (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')
+            $root = Join-Path $temporary 'comparison reference admission'
+            $null = [IO.Directory]::CreateDirectory($root)
+            $extensions = '.json', '.html', '.csv'
+            $invalid = [ordered]@{
+                Missing = $null
+                Malformed = '{"SchemaVersion":'
+                Unsupported = '{"SchemaVersion":2,"Target":"actual.example.invalid","Checks":[]}'
+                NonObject = '42'
+            }
+            $failures = [Collections.Generic.List[string]]::new()
+            foreach ($operation in 'assess', 'report') {
+                foreach ($preview in $false, $true) {
+                    foreach ($name in $invalid.Keys) {
+                        $label = '{0}/WhatIf={1}/{2}' -f $operation, $preview, $name
+                        try {
+                            $directory = Join-Path $root ('{0}-{1}-{2}' -f $operation, $preview, $name)
+                            $null = [IO.Directory]::CreateDirectory($directory)
+                            $reference = Join-Path $directory 'reference.json'
+                            $output = Join-Path $directory 'snapshot'
+                            if ($null -ne $invalid[$name]) {
+                                [IO.File]::WriteAllText($reference, $invalid[$name])
+                            }
+                            foreach ($extension in $extensions) {
+                                [IO.File]::WriteAllText(($output + $extension), ('previous ' + $extension))
+                            }
+                            $before = ([IO.Directory]::GetFileSystemEntries($directory) | Sort-Object) -join '|'
+                            $expectedError = switch ($name) {
+                                'Missing' { 'Assessment file does not exist' }
+                                'Unsupported' { 'Unsupported Assessment SchemaVersion' }
+                                'NonObject' { 'Assessment must be a structured object or JSON file' }
+                                'Malformed' {
+                                    # Compare the existing parser's wording on the selected engine.
+                                    $parseFailure = $null
+                                    try {
+                                        $null = Read-ADAnalyzerOperationDocument $reference
+                                    }
+                                    catch {
+                                        $parseFailure = $_
+                                    }
+                                    Assert-True ($null -ne $parseFailure) 'The fixture JSON unexpectedly parsed.'
+                                    $parseFailure.Exception.GetBaseException().Message
+                                }
+                            }
+                            $scans = $script:ScanCalls
+                            $failure = $null
+                            $results = [Collections.Generic.List[object]]::new()
+                            try {
+                                Start-ADAnalyzer -Operation $operation -ReferencePath $reference `
+                                    -OutputPath $output -IncludeHostChecks -WhatIf:$preview |
+                                    ForEach-Object { $results.Add($_) }
+                            }
+                            catch {
+                                $failure = $_
+                            }
+                            Assert-True ($null -ne $failure) 'Invalid reference returned without terminating.'
+                            Assert-Equal $expectedError $failure.Exception.GetBaseException().Message
+                            Assert-Equal 0 $results.Count
+                            Assert-Equal $before (([IO.Directory]::GetFileSystemEntries($directory) | Sort-Object) -join '|')
+                            foreach ($extension in $extensions) {
+                                Assert-Equal ('previous ' + $extension) ([IO.File]::ReadAllText($output + $extension))
+                            }
+                            Assert-True ($script:ScanCalls -eq $scans) 'Invalid reference reached assessment acquisition.'
+                        }
+                        catch {
+                            $failures.Add(('{0}: {1}' -f $label, $_.Exception.GetBaseException().Message))
+                        }
+                    }
+
+                    $label = '{0}/WhatIf={1}/Replacement' -f $operation, $preview
+                    try {
+                        $directory = Join-Path $root ('{0}-{1}-replacement' -f $operation, $preview)
+                        $null = [IO.Directory]::CreateDirectory($directory)
+                        $reference = Join-Path $directory 'reference.json'
+                        $output = Join-Path $directory 'snapshot'
+                        $original = @{
+                            SchemaVersion = 1
+                            Target = 'actual.example.invalid'
+                            RunId = 'admitted-reference'
+                            Checks = @(@{
+                                    RuleId = 'ACCOUNT.FIXTURE.CHECK'
+                                    Target = 'original-finding'
+                                    Status = 'Fail'
+                                })
+                            Findings = @()
+                        }
+                        [IO.File]::WriteAllText($reference, (ConvertTo-Json -InputObject $original -Depth 8))
+                        $replacement = [Text.Encoding]::UTF8.GetBytes(
+                            '{"SchemaVersion":1,"Target":"actual.example.invalid","RunId":"acquisition-replacement","Checks":[],"Findings":[]}'
+                        )
+                        $scans = $script:ScanCalls
+                        $script:ReferenceReplacement = @{
+                            Path = $reference
+                            Bytes = $replacement
+                        }
+                        try {
+                            $results = @(Start-ADAnalyzer -Operation $operation -ReferencePath $reference `
+                                    -OutputPath $output -IncludeHostChecks -WhatIf:$preview)
+                        }
+                        finally {
+                            $script:ReferenceReplacement = $null
+                        }
+                        Assert-Equal ($scans + 1) $script:ScanCalls
+                        Assert-True $script:ScanArguments.IncludeHostChecks 'Valid reference lost the host assessment option.'
+                        Assert-Equal ([Convert]::ToBase64String($replacement)) (
+                            [Convert]::ToBase64String([IO.File]::ReadAllBytes($reference))
+                        )
+                        Assert-Equal 1 $results.Count
+                        $comparisons = @($results[0].Comparison)
+                        if ($preview) {
+                            Assert-Equal 1 ([IO.Directory]::GetFileSystemEntries($directory).Length)
+                        }
+                        else {
+                            Assert-Equal 4 ([IO.Directory]::GetFileSystemEntries($directory).Length)
+                            foreach ($extension in $extensions) {
+                                Assert-True ([IO.File]::Exists($output + $extension)) 'A selected report format was not published.'
+                            }
+                            $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($output + '.json'))
+                            $comparisons += $saved.Comparison
+                        }
+                        foreach ($comparison in $comparisons) {
+                            Assert-Equal 'ADAnalyzerAssessmentComparison' $comparison.ComparisonType
+                            Assert-Equal 'fixture' $comparison.DifferenceRunId
+                            Assert-Equal 'admitted-reference' $comparison.ReferenceRunId
+                            Assert-Equal 1 $comparison.Changes.Count
+                            Assert-Equal 'original-finding' $comparison.Changes[0].Target
+                            Assert-Equal 'NotObservedInDifference' $comparison.Changes[0].Reason
+                        }
+                    }
+                    catch {
+                        $failures.Add(('{0}: {1}' -f $label, $_.Exception.GetBaseException().Message))
+                    }
+                }
+            }
+            $reference = Join-Path $root 'legacy-version.json'
+            [IO.File]::WriteAllText($reference, '{"SchemaVersion":[],"Target":"actual.example.invalid","RunId":"legacy-empty-version","Checks":[]}')
+            try {
+                $result = Start-ADAnalyzer -ReferencePath $reference
+                Assert-Equal 'legacy-empty-version' $result.Comparison.ReferenceRunId
+            }
+            catch {
+                $failures.Add(('Legacy empty version: ' + $_.Exception.GetBaseException().Message))
+            }
+
+            if ($PSVersionTable.PSVersion.Major -ge 7) {
+                $defaults = $PSDefaultParameterValues
+                $PSDefaultParameterValues = [Management.Automation.DefaultParameterDictionary]::new($defaults)
+                $PSDefaultParameterValues['ConvertFrom-Json:AsHashtable'] = $true
+                try {
+                    $reference = Join-Path $root 'hashtable-unsupported-version.json'
+                    [IO.File]::WriteAllText($reference, '{"SchemaVersion":2,"Target":"actual.example.invalid","Checks":[]}')
+                    $scans = $script:ScanCalls
+                    $failure = $null
+                    try {
+                        $null = Start-ADAnalyzer -Operation report -ReferencePath $reference -WhatIf
+                    }
+                    catch {
+                        $failure = $_
+                    }
+                    Assert-Equal 'Unsupported Assessment SchemaVersion' $failure.Exception.GetBaseException().Message
+                    Assert-Equal $scans $script:ScanCalls
+                }
+                catch {
+                    $failures.Add(('Hashtable version admission: ' + $_.Exception.GetBaseException().Message))
+                }
+                finally {
+                    $PSDefaultParameterValues = $defaults
+                }
+            }
+
+            Assert-True ($failures.Count -eq 0) ($failures -join [Environment]::NewLine)
         }
     }
     Invoke-Test 'credential is forwarded by reference and collectors remain opt-in' {

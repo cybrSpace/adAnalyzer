@@ -62,6 +62,78 @@ function ConvertTo-ADAnalyzerJsonText {
     }
 }
 
+function Test-ADAnalyzerDocumentRecord {
+    param([hashtable]$Document)
+
+    $value = $Document.Value
+    if ($value -is [array] -and $value.Rank -eq 1 -and $value.Length -eq 1) {
+        $value = $value.GetValue($value.GetLowerBound(0))
+        $Document.Value = $value
+    }
+    return -not ($null -eq $value -or
+        $value -is [ValueType] -or
+        $value -is [string] -or
+        ($value -is [Collections.IEnumerable] -and $value -isnot [Collections.IDictionary]))
+}
+
+function Get-ADAnalyzerDocumentSchemaVersion {
+    param([object]$Document)
+
+    if ($Document -is [Collections.IDictionary]) {
+        if (([Collections.IDictionary]$Document).Contains('SchemaVersion')) {
+            return $Document['SchemaVersion']
+        }
+        return $null
+    }
+    $property = $Document.PSObject.Properties['SchemaVersion']
+    if ($null -ne $property) {
+        return $property.Value
+    }
+    return $null
+}
+
+function Test-ADAnalyzerDocumentSchemaVersion {
+    param([string]$Version)
+
+    return ($Version -match '^1(?:\.|$)')
+}
+
+function Read-ADAnalyzerSavedComparisonReference {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $fullPath = Resolve-ADAnalyzerFilePath $Path
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+        throw 'Assessment file does not exist'
+    }
+    $jsonParameters = @{
+        ErrorAction = 'Stop'
+    }
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        $jsonParameters.NoEnumerate = $true
+    }
+    $readParameters = Get-ADAnalyzerJsonReadParameters $fullPath
+    $PSDefaultParameterValues = Get-ADAnalyzerJsonReadDefaults
+    $value = Microsoft.PowerShell.Management\Get-Content @readParameters |
+        ConvertTo-ADAnalyzerJsonText |
+        ConvertFrom-Json @jsonParameters
+
+    $document = @{
+        Value = $value
+    }
+    if (-not (Test-ADAnalyzerDocumentRecord $document)) {
+        throw 'Assessment must be a structured object or JSON file'
+    }
+
+    $version = Get-ADAnalyzerDocumentSchemaVersion $document.Value
+    if ($null -ne $version -and -not (Test-ADAnalyzerDocumentSchemaVersion ([string]$version))) {
+        throw 'Unsupported Assessment SchemaVersion'
+    }
+    return [pscustomobject]@{
+        Path = $fullPath
+        Assessment = $document.Value
+    }
+}
+
 function Resolve-ADAnalyzerFilePath {
     param([Parameter(Mandatory)][string]$Path)
     $provider = $null
