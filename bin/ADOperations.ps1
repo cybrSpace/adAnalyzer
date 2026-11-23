@@ -1301,7 +1301,8 @@ function Export-ADAnalyzerAssessment {
         [Parameter(Mandatory)]$Assessment,
         [Parameter(Mandatory)][string]$Path,
         [ValidateSet('Json', 'Html', 'Csv', 'All')][string]$Format = 'Json',
-        [switch]$CreateOnly
+        [switch]$CreateOnly,
+        [Parameter(DontShow = $true)][string]$ComparisonReferencePath
 
     )
 
@@ -1317,13 +1318,17 @@ function Export-ADAnalyzerAssessment {
     if ($Assessment -is [string] -and -not $WhatIfPreference) {
         $sourcePath = $report.GetReportFileSystemPath($Assessment)
     }
+    $referencePath = ''
+    if ($ComparisonReferencePath -and -not $WhatIfPreference) {
+        $referencePath = $report.GetReportFileSystemPath($ComparisonReferencePath)
+    }
     $checkedOutputs = $false
     foreach ($item in $formats) {
         $outputPath = $report.GetOutputPath($Path, $Format, $item)
         if (-not $PSCmdlet.ShouldProcess($outputPath, 'Export assessment projection')) {
             continue
         }
-        if ($sourcePath) {
+        if ($sourcePath -or $referencePath) {
             # Guard the whole export before publishing its first file. Later approvals may change path resolution.
             $itemsToCheck = if ($checkedOutputs) {
                 @($item)
@@ -1331,8 +1336,11 @@ function Export-ADAnalyzerAssessment {
             else {
                 $formats
             }
-            if ($report.HasSavedSourceDestination($sourcePath, $Path, $Format, $itemsToCheck)) {
+            if ($sourcePath -and $report.HasSavedSourceDestination($sourcePath, $Path, $Format, $itemsToCheck)) {
                 throw 'A report destination matches the saved assessment source.'
+            }
+            if ($referencePath -and $report.HasSavedSourceDestination($referencePath, $Path, $Format, $itemsToCheck)) {
+                throw 'A report destination matches the saved comparison reference.'
             }
             $checkedOutputs = $true
         }

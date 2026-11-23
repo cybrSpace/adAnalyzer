@@ -388,6 +388,181 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
                     [StringComparison]::Ordinal)) 'Saved comparison input was modified'
         }
     }
+    Invoke-Test 'CLI report exports preserve the normalized saved comparison reference' {
+        & {
+            . (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')
+            $root = Join-Path $temporary 'comparison reference preservation'
+            $null = [IO.Directory]::CreateDirectory($root)
+            $driveName = 'ADAnalyzerReferenceFixture'
+            $null = New-PSDrive -Name $driveName -PSProvider FileSystem -Root $root -Scope Script -ErrorAction Stop
+            try {
+                $separator = [IO.Path]::DirectorySeparatorChar
+                $referenceBytes = [Text.Encoding]::UTF8.GetBytes(
+                    '{"SchemaVersion":1,"Target":"actual.example.invalid","RunId":"saved-reference","Checks":[],"Findings":[]}'
+                )
+                $cases = @(
+                    @{
+                        Name = 'literal JSON'
+                        Operation = 'assess'
+                        Extension = '.json'
+                    }
+                    @{
+                        Name = 'later HTML'
+                        Operation = 'report'
+                        Extension = '.html'
+                        PathForm = 'TrailingDots'
+                        Preview = $true
+                    }
+                    @{
+                        Name = 'qualified CSV'
+                        Operation = 'assess'
+                        Extension = '.csv'
+                        PathForm = 'QualifiedReference'
+                    }
+                    @{
+                        Name = 'relative parent segment'
+                        Operation = 'report'
+                        Extension = '.json'
+                        PathForm = 'RelativeReference'
+                    }
+                    @{
+                        Name = 'mapped reference'
+                        Operation = 'report'
+                        Extension = '.json'
+                        PathForm = 'MappedReference'
+                    }
+                    @{
+                        Name = 'mapped destination'
+                        Operation = 'assess'
+                        Extension = '.html'
+                        PathForm = 'MappedDestination'
+                    }
+                )
+                if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                    $cases += @{
+                        Name = 'Windows case alias'
+                        Operation = 'report'
+                        Extension = '.json'
+                        PathForm = 'CaseReference'
+                    }
+                }
+
+                $differences = [Collections.Generic.List[string]]::new()
+                foreach ($case in $cases) {
+                    $directory = Join-Path $root $case.Name
+                    $null = [IO.Directory]::CreateDirectory((Join-Path $directory 'child'))
+                    $stem = 'report [literal]'
+                    $prefix = Join-Path $directory $stem
+                    $reference = $prefix + $case.Extension
+                    $referencePath = $reference
+                    $outputPath = $prefix
+                    switch ($case.PathForm) {
+                        'TrailingDots' {
+                            $outputPath += '...'
+                        }
+                        'QualifiedReference' {
+                            $referencePath = 'FileSystem::' + $reference
+                        }
+                        'RelativeReference' {
+                            $referencePath = 'child' + $separator + '..' + $separator + $stem + $case.Extension
+                        }
+                        'MappedReference' {
+                            $referencePath = $driveName + ':' + $separator + $case.Name + $separator + $stem + $case.Extension
+                        }
+                        'MappedDestination' {
+                            $outputPath = $driveName + ':' + $separator + $case.Name + $separator + $stem
+                        }
+                        'CaseReference' {
+                            $referencePath = Join-Path $directory (($stem + $case.Extension).ToUpperInvariant())
+                        }
+                    }
+                    $otherExtensions = @('.json', '.html', '.csv' | Where-Object { $_ -ne $case.Extension })
+                    $sibling = $prefix + $otherExtensions[0]
+                    $absent = $prefix + $otherExtensions[1]
+                    $siblingBytes = [byte[]]@(0, 1, 239, 255)
+                    [IO.File]::WriteAllBytes($reference, $referenceBytes)
+                    [IO.File]::WriteAllBytes($sibling, $siblingBytes)
+                    $expectedReference = [Convert]::ToBase64String($referenceBytes)
+                    $expectedSibling = [Convert]::ToBase64String($siblingBytes)
+                    $arguments = @{
+                        Operation = $case.Operation
+                        OutputPath = $outputPath
+                        ReferencePath = $referencePath
+                        ErrorAction = 'Stop'
+                    }
+                    $rows = [Collections.Generic.List[object]]::new()
+                    $failure = $null
+                    Push-Location -LiteralPath $directory
+                    try {
+                        if ($case.Preview) {
+                            $preview = Start-ADAnalyzer @arguments -WhatIf
+                            Assert-Equal 'saved-reference' $preview.Comparison.ReferenceRunId
+                            Assert-Equal $expectedReference ([Convert]::ToBase64String([IO.File]::ReadAllBytes($reference)))
+                            Assert-Equal $expectedSibling ([Convert]::ToBase64String([IO.File]::ReadAllBytes($sibling)))
+                            Assert-True (-not [IO.File]::Exists($absent)) 'Preview published an uncreated report sibling.'
+                        }
+                        try {
+                            Start-ADAnalyzer @arguments | ForEach-Object {
+                                $rows.Add($_)
+                            }
+                        }
+                        catch {
+                            $failure = $_
+                        }
+                    }
+                    finally {
+                        Pop-Location
+                    }
+                    if ($null -eq $failure -or
+                        $failure.Exception.GetBaseException().Message -cne 'A report destination matches the saved comparison reference.') {
+                        $diagnostic = if ($null -eq $failure) {
+                            'no failure'
+                        }
+                        else {
+                            $failure.Exception.GetBaseException().Message
+                        }
+                        $differences.Add(('{0}: expected reference collision, got {1}' -f $case.Name, $diagnostic))
+                    }
+                    if ($rows.Count -ne 0) {
+                        $differences.Add(($case.Name + ': returned a completed result'))
+                    }
+                    if (-not [IO.File]::Exists($reference) -or
+                        [Convert]::ToBase64String([IO.File]::ReadAllBytes($reference)) -cne $expectedReference) {
+                        $differences.Add(($case.Name + ': saved reference bytes changed'))
+                    }
+                    if (-not [IO.File]::Exists($sibling) -or
+                        [Convert]::ToBase64String([IO.File]::ReadAllBytes($sibling)) -cne $expectedSibling) {
+                        $differences.Add(($case.Name + ': existing sibling bytes changed'))
+                    }
+                    if ([IO.File]::Exists($absent)) {
+                        $differences.Add(($case.Name + ': fresh sibling was created'))
+                    }
+                    Assert-Equal 0 @(Get-ChildItem -LiteralPath $directory -Force -Filter '.ad-analyzer-*.tmp').Count
+                }
+
+                $reference = Join-Path $root 'distinct-reference.json'
+                $prefix = Join-Path $root 'distinct-output'
+                [IO.File]::WriteAllBytes($reference, $referenceBytes)
+                foreach ($extension in '.json', '.html', '.csv') {
+                    [IO.File]::WriteAllText(($prefix + $extension), 'old output')
+                }
+                $result = Start-ADAnalyzer -Operation report -ReferencePath $reference -OutputPath $prefix
+                $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($prefix + '.json'))
+                Assert-Equal 'saved-reference' $result.Comparison.ReferenceRunId
+                Assert-Equal 'saved-reference' $saved.Comparison.ReferenceRunId
+                Assert-Equal ([Convert]::ToBase64String($referenceBytes)) (
+                    [Convert]::ToBase64String([IO.File]::ReadAllBytes($reference))
+                )
+                foreach ($extension in '.json', '.html', '.csv') {
+                    Assert-True ([IO.File]::ReadAllText($prefix + $extension) -cne 'old output') 'Distinct output was not replaced.'
+                }
+                Assert-True ($differences.Count -eq 0) ($differences -join [Environment]::NewLine)
+            }
+            finally {
+                Remove-PSDrive -Name $driveName -Scope Script -Force -ErrorAction Stop
+            }
+        }
+    }
     Invoke-Test 'invalid comparison references preserve existing reports and create no fresh reports' {
         & {
             . (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')

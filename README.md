@@ -24,6 +24,8 @@ The exporter writes JSON evidence, HTML with summary/check tables and expandable
 
 When exporting from a saved assessment file, choose a distinct output path. Both report export APIs reject destinations that resolve to the source's normalized FileSystem path. An All export checks all generated paths before writing any report. Windows name comparison is case-insensitive. File identity through filesystem links and junctions has a separate qualification scope.
 
+`Start-ADAnalyzer -ReferencePath` also protects the selected saved comparison. If any generated JSON, HTML, or CSV destination matches that reference's normalized FileSystem path, the export fails before publishing any report. `-WhatIf` still reads and compares the reference without publishing.
+
 To publish a new JSON snapshot and preserve any existing destination, use `Export-ADAnalyzerAssessment -Assessment $scan -Path ./reports/new.json -Format Json -CreateOnly`. The direct equivalent is `[ADAnalyzerAssessmentReport]::new().WriteNew($scan, './reports/new.json')`. If another writer publishes to that destination first, the create-only write fails and leaves the existing report intact. `-WhatIf` and the optional third `WriteNew` argument `$true` validate the input without staging or publishing a report. Standard exports can still replace a distinct destination.
 
 When an assessment carries an explicit comparison, the HTML report shows the two run IDs, recorded outcome totals and changed rows alongside the current checks. An unobserved result directs the reader to check coverage and collect fresh evidence for that rule and target. A changed predicate directs review to the rule requirements. The full comparison remains in the embedded snapshot and JSON export.

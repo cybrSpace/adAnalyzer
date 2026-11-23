@@ -166,7 +166,17 @@ function Start-ADAnalyzer {
                 -Difference $assessment)
     }
     if ($OutputPath) {
-        $null = Export-ADAnalyzerAssessment -Assessment $assessment -Path $OutputPath -Format All -WhatIf:$WhatIfPreference -Confirm:$false
+        $export = @{
+            Assessment = $assessment
+            Path = $OutputPath
+            Format = 'All'
+            WhatIf = $WhatIfPreference
+            Confirm = $false
+        }
+        if ($ReferencePath) {
+            $export.ComparisonReferencePath = $ReferencePath
+        }
+        $null = Export-ADAnalyzerAssessment @export
     }
     return $assessment
 }
