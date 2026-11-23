@@ -17,7 +17,8 @@ $packageRoots = @('ADEnvironment.psd1', 'README.md', 'bin', 'lib', 'profiles')
 function Invoke-PackageGit {
     param([string[]]$Arguments)
 
-    $result = & $git -C $RepositoryRoot @Arguments
+    # Package bytes must be independent of the host checkout line-ending setting.
+    $result = & $git -c core.autocrlf=false -C $RepositoryRoot @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw ('Package Git command failed (' + $Arguments[0] + '), exit code ' + $LASTEXITCODE)
     }
