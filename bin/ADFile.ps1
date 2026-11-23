@@ -77,10 +77,17 @@ function Write-ADAnalyzerFile {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][AllowEmptyString()][string]$Content,
-        [switch]$RequireExisting
+        [switch]$RequireExisting,
+        [switch]$CreateOnly
 
     )
+    if ($RequireExisting -and $CreateOnly) {
+        throw [ArgumentException]::new('CreateOnly requires a new destination.')
+    }
     $full = Resolve-ADAnalyzerFilePath $Path
+    if ($CreateOnly -and [IO.File]::Exists($full)) {
+        throw [IO.IOException]::new('The report destination already exists.')
+    }
     $directory = [IO.Path]::GetDirectoryName($full)
     if (-not [IO.Directory]::Exists($directory)) {
         if ($RequireExisting) {
@@ -91,9 +98,11 @@ function Write-ADAnalyzerFile {
     $temporary = Join-Path $directory ('.ad-analyzer-' + [guid]::NewGuid().ToString('N') + '.tmp')
     $stream = $null
     $writer = $null
+    $ownsTemporary = $false
     $failed = $false
     try {
         $stream = [IO.FileStream]::new($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $ownsTemporary = $true
         # A BOM keeps non-ASCII snapshots readable with Windows PowerShell 5.1 defaults.
         $writer = [IO.StreamWriter]::new($stream, [Text.UTF8Encoding]::new($true))
         $writer.Write($Content)
@@ -103,13 +112,29 @@ function Write-ADAnalyzerFile {
         $writer = $null
         $stream.Dispose()
         $stream = $null
-        # NullString passes an actual null backup path through PowerShell's method binder.
-        if ($RequireExisting -or [IO.File]::Exists($full)) {
+        if ($CreateOnly) {
+            try {
+                [IO.File]::Move($temporary, $full)
+            }
+            catch [IO.IOException] {
+                $cause = $_.Exception.GetBaseException()
+                # Windows reports file-exists HRESULTs. Unix .NET can expose EEXIST directly.
+                $exists = $cause.HResult -in 0x80070050, 0x800700B7 -or
+                    ([IO.Path]::DirectorySeparatorChar -eq '/' -and $cause.HResult -eq 17)
+                if ($exists) {
+                    throw [IO.IOException]::new('The report destination already exists.', $cause)
+                }
+                throw
+            }
+        }
+        elseif ($RequireExisting -or [IO.File]::Exists($full)) {
+            # NullString passes an actual null backup path through PowerShell's method binder.
             [IO.File]::Replace($temporary, $full, [Management.Automation.Language.NullString]::Value)
         }
         else {
             [IO.File]::Move($temporary, $full)
         }
+        $ownsTemporary = $false
     }
     catch {
         $failed = $true
@@ -128,7 +153,7 @@ function Write-ADAnalyzerFile {
                 }
             }
         }
-        if ([IO.File]::Exists($temporary)) {
+        if ($ownsTemporary -and [IO.File]::Exists($temporary)) {
             try {
                 [IO.File]::Delete($temporary)
             }

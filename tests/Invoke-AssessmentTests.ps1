@@ -1580,6 +1580,290 @@ try {
             Remove-PSDrive -Name $driveName -Scope Script -Force -ErrorAction Stop
         }
     }
+    Test-Assessment 'create-only JSON export preserves existing bytes and honors preview' {
+        $directory = Join-Path $temp 'create-only JSON'
+        $null = [IO.Directory]::CreateDirectory($directory)
+        $document = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = 'assessment-' + [char]233 + '.example.invalid'
+            Checks = @()
+            Findings = @()
+        }
+        $report = [ADAnalyzerAssessmentReport]::new()
+        $routes = [ordered]@{
+            Native = {
+                param($InputDocument, $Destination, [bool]$Preview)
+
+                $parameters = @{
+                    Assessment = $InputDocument
+                    Path = $Destination
+                    Format = 'Json'
+                    CreateOnly = $true
+                    Confirm = $false
+                    WhatIf = $Preview
+                    ErrorAction = 'Stop'
+                }
+                Export-ADAnalyzerAssessment @parameters
+            }
+            Direct = {
+                param($InputDocument, $Destination, [bool]$Preview)
+
+                if ($Preview) {
+                    $report.WriteNew($InputDocument, $Destination, $true)
+                }
+                else {
+                    $report.WriteNew($InputDocument, $Destination)
+                }
+            }
+        }
+        Assert-True ((Get-Command Export-ADAnalyzerAssessment).Parameters.ContainsKey('CreateOnly')) (
+            'The native exporter has no create-only option.'
+        )
+        Assert-True ($null -ne $report.PSObject.Methods['WriteNew']) (
+            'The direct report API has no create-only method.'
+        )
+
+        foreach ($route in $routes.GetEnumerator()) {
+            $previewParent = Join-Path $directory ($route.Key + ' preview')
+            $previewPath = Join-Path $previewParent 'assessment [literal].json'
+            $preview = @(& $route.Value $document $previewPath $true)
+            Assert-Equal 0 $preview.Count
+            Assert-True (-not [IO.Directory]::Exists($previewParent)) 'Preview created a destination directory.'
+            $invalidProviderPreview = @(& $route.Value $document 'Variable:ADAnalyzerCreateOnlyFixture' $true)
+            Assert-Equal 0 $invalidProviderPreview.Count
+            Assert-Throws { & $route.Value ([pscustomobject]@{ SchemaVersion = 2 }) $previewPath $true }
+            Assert-True (-not [IO.Directory]::Exists($previewParent)) 'Invalid preview created a destination directory.'
+
+            $path = Join-Path $directory ($route.Key + ' assessment [literal].json')
+            $published = @(& $route.Value $document $path $false)
+            Assert-Equal 1 $published.Count
+            Assert-Equal $path $published[0]
+            $bytes = [IO.File]::ReadAllBytes($path)
+            Assert-True (
+                $bytes.Length -gt 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191
+            ) 'The JSON writer did not preserve its UTF-8 BOM.'
+            $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path))
+            Assert-Equal $document.Target $saved.Target
+            $original = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            $replacement = [pscustomobject]@{
+                SchemaVersion = 1
+                Target = 'replacement.example.invalid'
+            }
+
+            $failure = $null
+            $unexpectedPaths = [Collections.Generic.List[object]]::new()
+            try {
+                & $route.Value $replacement $path $false | ForEach-Object {
+                    $unexpectedPaths.Add($_)
+                }
+            }
+            catch {
+                $failure = $_
+            }
+            Assert-True (
+                $null -ne $failure -and
+                $failure.Exception.GetBaseException().Message -ceq 'The report destination already exists.'
+            ) ('Expected the create-only conflict diagnostic for ' + $route.Key)
+            Assert-Equal 0 $unexpectedPaths.Count
+            Assert-Equal $original (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+
+            $sourceOverlap = $null
+            try {
+                $null = & $route.Value $path $path $false
+            }
+            catch {
+                $sourceOverlap = $_
+            }
+            Assert-True (
+                $null -ne $sourceOverlap -and
+                $sourceOverlap.Exception.GetBaseException().Message -ceq 'A report destination matches the saved assessment source.'
+            ) ('Create-only export lost the saved source protection for ' + $route.Key)
+            Assert-Equal $original (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+
+            if ($route.Key -eq 'Native') {
+                $overwritten = @(Export-ADAnalyzerAssessment -Assessment $replacement -Path $path -Format Json -Confirm:$false)
+            }
+            else {
+                $overwritten = @($report.Write($replacement, $path, 'Json'))
+            }
+            Assert-Equal 1 $overwritten.Count
+            Assert-Equal $path $overwritten[0]
+            $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path))
+            Assert-Equal $replacement.Target $saved.Target
+        }
+        foreach ($format in 'Html', 'Csv', 'All') {
+            $invalidParent = Join-Path $directory ('invalid ' + $format)
+            $invalidPath = Join-Path $invalidParent 'report'
+            $failure = $null
+            try {
+                $null = Export-ADAnalyzerAssessment -Assessment $document -Path $invalidPath -Format $format -CreateOnly -Confirm:$false
+            }
+            catch {
+                $failure = $_
+            }
+            Assert-True (
+                $null -ne $failure -and
+                $failure.Exception.GetBaseException().Message -match 'CreateOnly.*Json|Json.*CreateOnly'
+            ) ('Create-only export did not identify the unsupported ' + $format + ' format.')
+            Assert-True (-not [IO.Directory]::Exists($invalidParent)) 'Invalid create-only format created a destination directory.'
+        }
+        Assert-Equal 0 @(Get-ChildItem -LiteralPath $directory -Force -Filter '.ad-analyzer-*.tmp').Count
+    }
+    Test-Assessment 'create-only export preserves a staging file it could not open' {
+        $directory = Join-Path $temp 'create-only staging ownership'
+        $null = [IO.Directory]::CreateDirectory($directory)
+        $destination = Join-Path $directory 'report.json'
+        $sentinel = [byte[]]@(0, 1, 239, 255)
+        $state = [pscustomobject]@{
+            StagePath = $null
+            Failure = $null
+            OutputPaths = [Collections.Generic.List[object]]::new()
+        }
+        try {
+            & {
+                # Restrict the shadow to this one write and its private staging directory.
+                function Join-Path {
+                    [CmdletBinding()]
+                    param(
+                        [Parameter(Mandatory, Position = 0)][string[]]$Path,
+                        [Parameter(Mandatory, Position = 1)][string]$ChildPath
+                    )
+
+                    $resolved = Microsoft.PowerShell.Management\Join-Path @PSBoundParameters
+                    if ($Path.Count -eq 1 -and $Path[0] -eq $directory -and $ChildPath -like '.ad-analyzer-*.tmp') {
+                        Assert-True ($null -eq $state.StagePath -and -not [IO.File]::Exists($resolved)) (
+                            'Unexpected staging retry or fixture name collision.'
+                        )
+                        [IO.File]::WriteAllBytes($resolved, $sentinel)
+                        $state.StagePath = $resolved
+                    }
+                    return $resolved
+                }
+
+                $parameters = @{
+                    Assessment = [pscustomobject]@{
+                        SchemaVersion = 1
+                        Target = 'stage-ownership.example.invalid'
+                    }
+                    Path = $destination
+                    Format = 'Json'
+                    CreateOnly = $true
+                    Confirm = $false
+                    ErrorAction = 'Stop'
+                }
+                try {
+                    Export-ADAnalyzerAssessment @parameters | ForEach-Object {
+                        $state.OutputPaths.Add($_)
+                    }
+                }
+                catch {
+                    $state.Failure = $_
+                }
+            }
+            Assert-True ($null -ne $state.StagePath) 'The staging-name fault was not exercised.'
+            Assert-True (
+                $null -ne $state.Failure -and $state.Failure.Exception.GetBaseException() -is [IO.IOException]
+            ) 'Create-only export did not report the failed staging open.'
+            Assert-Equal 0 $state.OutputPaths.Count
+            Assert-True (-not [IO.File]::Exists($destination)) 'A failed staging open published a report.'
+            Assert-True ([IO.File]::Exists($state.StagePath)) 'The writer removed a staging file it never owned.'
+            Assert-Equal ([Convert]::ToBase64String($sentinel)) (
+                [Convert]::ToBase64String([IO.File]::ReadAllBytes($state.StagePath))
+            )
+        }
+        finally {
+            if ($null -ne $state.StagePath) {
+                [IO.File]::Delete($state.StagePath)
+            }
+        }
+        Assert-Equal 0 @([IO.Directory]::GetFileSystemEntries($directory)).Count
+    }
+    Test-Assessment 'overlapping create-only writers publish one complete JSON report' {
+        $directory = Join-Path $temp 'create-only concurrency'
+        $null = [IO.Directory]::CreateDirectory($directory)
+        $destination = Join-Path $directory 'shared [literal].json'
+        $fixture = Join-Path $RepositoryRoot 'tests/AssessmentCreateOnlyWorker.ps1'
+        $engine = (Get-Process -Id $PID).Path
+        $workers = [ordered]@{}
+        try {
+            foreach ($role in 'Native', 'Direct') {
+                $arguments = '-NoLogo -NoProfile -NonInteractive -File "{0}" -RepositoryRoot "{1}" -Destination "{2}" -Coordination "{3}" -Role {4}' -f
+                    $fixture, $RepositoryRoot, $destination, $directory, $role
+                $parameters = @{
+                    FilePath = $engine
+                    ArgumentList = $arguments
+                    PassThru = $true
+                    RedirectStandardOutput = Join-Path $directory ($role + '.out')
+                    RedirectStandardError = Join-Path $directory ($role + '.err')
+                }
+                $process = Start-Process @parameters
+                $workers[$role] = $process
+                # Windows PowerShell needs the process handle cached before exit.
+                $null = $process.Handle
+            }
+
+            $stages = [Collections.Generic.List[string]]::new()
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            foreach ($role in $workers.Keys) {
+                $readyPath = Join-Path $directory ($role + '.ready')
+                $process = $workers[$role]
+                while (-not [IO.File]::Exists($readyPath) -and -not $process.HasExited) {
+                    Assert-True ($watch.Elapsed.TotalSeconds -lt 30) ('Timed out waiting for ' + $role + ' to reach staging.')
+                    Start-Sleep -Milliseconds 25
+                }
+                if ($process.HasExited) {
+                    throw ('Fixture ' + $role + ' exited before release. ' +
+                        [IO.File]::ReadAllText((Join-Path $directory ($role + '.err'))))
+                }
+            }
+            Assert-True (-not [IO.File]::Exists($destination)) 'A writer published before both reached the staging boundary.'
+
+            foreach ($role in $workers.Keys) {
+                $releasePath = Join-Path $directory ($role + '.release')
+                [IO.File]::WriteAllText($releasePath, 'release')
+                $process = $workers[$role]
+                Assert-True ($process.WaitForExit(20000)) ('Timed out waiting for ' + $role + ' to finish.')
+                $process.WaitForExit()
+                $stages.Add([IO.File]::ReadAllText((Join-Path $directory ($role + '.ready'))))
+                $processOutput = [IO.File]::ReadAllText((Join-Path $directory ($role + '.out'))).Trim()
+                $processError = [IO.File]::ReadAllText((Join-Path $directory ($role + '.err'))).Trim()
+                if ($role -eq 'Native') {
+                    Assert-True ($process.ExitCode -eq 0 -and $processOutput -ceq 'Published') (
+                        'The first fixture writer did not publish. ' + $processError
+                    )
+                    $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($destination))
+                    Assert-Equal 'Native.example.invalid' $saved.Target
+                    Assert-Equal ('Native|' * 1024) $saved.Payload
+                    $publishedHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+                }
+                else {
+                    Assert-True ($process.ExitCode -eq 4 -and $processOutput -ceq 'The report destination already exists.') (
+                        'The competing writer did not report a create-only conflict. ' + $processError
+                    )
+                    Assert-Equal $publishedHash (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+                }
+            }
+            Assert-True ($stages[0] -cne $stages[1]) 'The workers shared a staging path.'
+            foreach ($stage in $stages) {
+                Assert-True (-not [IO.File]::Exists($stage)) 'An owned staging file remained after the writer exited.'
+            }
+            Assert-Equal 1 @(Get-ChildItem -LiteralPath $directory -Force -Filter '*.json').Count
+            Assert-Equal 0 @(Get-ChildItem -LiteralPath $directory -Force -Filter '.ad-analyzer-*.tmp').Count
+        }
+        finally {
+            foreach ($process in $workers.Values) {
+                try {
+                    if (-not $process.HasExited) {
+                        $process.Kill()
+                        $null = $process.WaitForExit(5000)
+                    }
+                }
+                finally {
+                    $process.Dispose()
+                }
+            }
+        }
+    }
     Test-Assessment 'SYSVOL version mismatch and policy read errors remain explicit' {
         $policy = New-PolicyFixture
         $policy.SysvolVersion = 2

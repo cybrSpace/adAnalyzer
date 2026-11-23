@@ -724,9 +724,14 @@ function Write-ADAnalyzerOperationFile {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][AllowEmptyString()][string]$Content,
-        [switch]$RequireExisting
+        [switch]$RequireExisting,
+        [switch]$CreateOnly
 
     )
+    if ($CreateOnly) {
+        Write-ADAnalyzerFile -Path $Path -Content $Content -CreateOnly -RequireExisting:$RequireExisting
+        return
+    }
     if ($RequireExisting) {
         Write-ADAnalyzerFile -Path $Path -Content $Content -RequireExisting
         return
@@ -752,6 +757,17 @@ class ADAnalyzerAssessmentReport {
             throw [ArgumentException]::new('An assessment report output path is required.', 'Path')
         }
         return $this.RenderReports($Assessment, $Format, $Path, $DryRun)
+    }
+
+    [string[]] WriteNew([object]$Assessment, [string]$Path) {
+        return $this.WriteNew($Assessment, $Path, $false)
+    }
+
+    [string[]] WriteNew([object]$Assessment, [string]$Path, [bool]$DryRun) {
+        if ([string]::IsNullOrEmpty($Path)) {
+            throw [ArgumentException]::new('An assessment report output path is required.', 'Path')
+        }
+        return $this.RenderReports($Assessment, 'Json', $Path, $DryRun, $true)
     }
 
     hidden [hashtable] Prepare([object]$Assessment) {
@@ -1069,8 +1085,21 @@ class ADAnalyzerAssessmentReport {
     }
 
     hidden [string[]] RenderReports([object]$Assessment, [string]$Format, [string]$Path, [bool]$DryRun) {
+        return $this.RenderReports($Assessment, $Format, $Path, $DryRun, $false)
+    }
+
+    hidden [string[]] RenderReports(
+        [object]$Assessment,
+        [string]$Format,
+        [string]$Path,
+        [bool]$DryRun,
+        [bool]$CreateOnly
+    ) {
         $ErrorActionPreference = 'Stop'
         $writeFiles = -not [string]::IsNullOrEmpty($Path)
+        if ($CreateOnly -and (-not $writeFiles -or $Format -ne 'Json')) {
+            throw [ArgumentException]::new('CreateOnly requires a Json report destination.')
+        }
         $formats = $this.GetFormats($Format, $writeFiles)
         if (-not $writeFiles -and $Assessment -is [string]) {
             throw [ArgumentException]::new('Render requires an in-memory assessment.', 'Assessment')
@@ -1175,7 +1204,12 @@ class ADAnalyzerAssessmentReport {
                 }
                 if ($writeFiles) {
                     $outputPath = $this.GetOutputPath($Path, $Format, $item)
-                    Write-ADAnalyzerOperationFile -Path $outputPath -Content $content
+                    if ($CreateOnly) {
+                        Write-ADAnalyzerOperationFile -Path $outputPath -Content $content -CreateOnly
+                    }
+                    else {
+                        Write-ADAnalyzerOperationFile -Path $outputPath -Content $content
+                    }
                 }
                 else {
                     $content
@@ -1266,10 +1300,14 @@ function Export-ADAnalyzerAssessment {
     param(
         [Parameter(Mandatory)]$Assessment,
         [Parameter(Mandatory)][string]$Path,
-        [ValidateSet('Json', 'Html', 'Csv', 'All')][string]$Format = 'Json'
+        [ValidateSet('Json', 'Html', 'Csv', 'All')][string]$Format = 'Json',
+        [switch]$CreateOnly
 
     )
 
+    if ($CreateOnly -and $Format -ne 'Json') {
+        throw [ArgumentException]::new('CreateOnly requires Json format.', 'Format')
+    }
     $document = Read-ADAnalyzerOperationDocument $Assessment
     $safe = ConvertTo-ADAnalyzerSafeData -InputObject $document
     $report = [ADAnalyzerAssessmentReport]::new()
@@ -1326,6 +1364,10 @@ function Export-ADAnalyzerAssessment {
                     $report.EmptyCsv()
                 }
             }
+        }
+        if ($CreateOnly) {
+            Write-ADAnalyzerOperationFile -Path $outputPath -Content $content -CreateOnly
+            continue
         }
         Write-ADAnalyzerOperationFile -Path $outputPath -Content $content
     }
