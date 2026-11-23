@@ -29,6 +29,27 @@ function Get-ADAnalyzerDirectoryField {
     return $Default
 }
 
+function Get-ADAnalyzerPasswordNeverExpiresObservation {
+    param($Record)
+
+    # Preserve the original shape and the caller's PowerShell error scope.
+    if ($null -eq $Record) {
+        return $null
+    }
+    if ($Record -is [Collections.IDictionary]) {
+        if (([Collections.IDictionary]$Record).Contains('PasswordNeverExpires')) {
+            return , ($Record['PasswordNeverExpires'])
+        }
+        return $null
+    }
+
+    $property = $Record.PSObject.Properties['PasswordNeverExpires']
+    if ($null -ne $property) {
+        return , $property.Value
+    }
+    return $null
+}
+
 function ConvertTo-ADAnalyzerSid {
     param($Value)
     if ($null -eq $Value) {
@@ -486,25 +507,6 @@ class ADAnalyzerDirectoryObjectProjector {
     ADAnalyzerDirectoryObjectProjector() {
     }
 
-    hidden static [object] ReadPasswordNeverExpires([object]$Record) {
-        # Keep the observed type, including a singleton collection.
-        if ($null -eq $Record) {
-            return $null
-        }
-        if ($Record -is [Collections.IDictionary]) {
-            if (([Collections.IDictionary]$Record).Contains('PasswordNeverExpires')) {
-                return $Record['PasswordNeverExpires']
-            }
-            return $null
-        }
-
-        $property = $Record.PSObject.Properties['PasswordNeverExpires']
-        if ($null -ne $property) {
-            return $property.Value
-        }
-        return $null
-    }
-
     [object] Project([object]$Record, [string]$Kind) {
         return $this.Project($Record, $Kind, @())
     }
@@ -536,7 +538,7 @@ class ADAnalyzerDirectoryObjectProjector {
         foreach ($name in @('WhenChanged', 'WhenCreated', 'LastLogonDate', 'PasswordLastSet')) {
             $result[$name] = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $Record $name)
         }
-        $result['PasswordNeverExpires'] = [ADAnalyzerDirectoryObjectProjector]::ReadPasswordNeverExpires($Record)
+        $result['PasswordNeverExpires'] = Get-ADAnalyzerPasswordNeverExpiresObservation $Record
         $result['SIDHistory'] = @(Get-ADAnalyzerDirectoryField $Record 'SIDHistory' @() | ForEach-Object { ConvertTo-ADAnalyzerSid $_ })
         $resultantDn = @(Get-ADAnalyzerDirectoryField $Record 'msDS-ResultantPSO' @())
         $result['ResultantPasswordPolicyDN'] = $this.ResultantPolicyDn($resultantDn)
@@ -756,7 +758,7 @@ function ConvertTo-ADAnalyzerDirectoryObject {
     foreach ($name in @('WhenChanged', 'WhenCreated', 'LastLogonDate', 'PasswordLastSet')) {
         $result[$name] = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $Record $name)
     }
-    $result['PasswordNeverExpires'] = [ADAnalyzerDirectoryObjectProjector]::ReadPasswordNeverExpires($Record)
+    $result['PasswordNeverExpires'] = Get-ADAnalyzerPasswordNeverExpiresObservation $Record
     $result['SIDHistory'] = @(Get-ADAnalyzerDirectoryField $Record 'SIDHistory' @() | ForEach-Object { ConvertTo-ADAnalyzerSid $_ })
     $resultantDn = @(Get-ADAnalyzerDirectoryField $Record 'msDS-ResultantPSO' @())
     $result['ResultantPasswordPolicyDN'] = $projector.ResultantPolicyDn($resultantDn)
@@ -3056,7 +3058,7 @@ class ADAnalyzerDirectoryPolicyEvaluator {
                     Object = $object
                     Applicability = 'Configured'
                 })
-                $never = [ADAnalyzerDirectoryObjectProjector]::ReadPasswordNeverExpires($object)
+                $never = Get-ADAnalyzerPasswordNeverExpiresObservation $object
                 $allowed = Get-ADAnalyzerDirectoryField $policy 'AllowPasswordNeverExpires'
                 $status = if ($never -isnot [bool] -or $null -eq $allowed) {
                     'Unknown'
