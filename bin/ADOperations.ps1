@@ -1402,6 +1402,9 @@ class ADAnalyzerAssessmentComparer {
         if (-not $this.SearchBasesMatch($oldScope, $newScope)) {
             throw 'Cannot compare different search-base scopes as configuration drift'
         }
+        if (-not $this.DirectoryDomainSidsMatch($before, $after)) {
+            throw 'Cannot compare different recorded directory domain SIDs as configuration drift'
+        }
 
         $projector = [ADAnalyzerEvidenceProjector]::new()
         $oldMap = $this.IndexSnapshot($before, $projector)
@@ -1509,6 +1512,68 @@ class ADAnalyzerAssessmentComparer {
 
     hidden [bool] SearchBasesMatch([string]$Before, [string]$After) {
         return $Before -ieq $After
+    }
+
+    hidden [bool] DirectoryDomainSidsMatch([object]$Reference, [object]$Difference) {
+        $projector = [ADAnalyzerEvidenceProjector]::new()
+        $referenceSid = $this.GetRecordedDomainSid($Reference, $projector)
+        $differenceSid = $this.GetRecordedDomainSid($Difference, $projector)
+        return -not ($referenceSid -and $differenceSid -and $referenceSid -cne $differenceSid)
+    }
+
+    hidden [string] GetRecordedDomainSid([object]$Snapshot, [ADAnalyzerEvidenceProjector]$Projector) {
+        $data = $this.GetRecordedDomainMember($Snapshot, 'Data', $Projector)
+        $directory = $this.GetRecordedDomainMember($data, 'Directory', $Projector)
+        $domain = $this.GetRecordedDomainMember($directory, 'Domain', $Projector)
+        $sid = $this.GetRecordedDomainMember($domain, 'SID', $Projector)
+        if ($sid -isnot [string]) {
+            return ''
+        }
+
+        $match = [regex]::Match($sid, '\A[Ss]-1-5-21-([0-9]{1,10})-([0-9]{1,10})-([0-9]{1,10})\z')
+        if (-not $match.Success) {
+            return ''
+        }
+
+        $components = [uint32[]]::new(3)
+        for ($index = 0; $index -lt $components.Length; $index++) {
+            $component = [uint32]0
+            if (-not [uint32]::TryParse(
+                $match.Groups[$index + 1].Value,
+                [Globalization.NumberStyles]::None,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [ref]$component
+            )) {
+                return ''
+            }
+            $components[$index] = $component
+        }
+        return ('S-1-5-21-{0}-{1}-{2}' -f $components[0], $components[1], $components[2])
+    }
+
+    hidden [object] GetRecordedDomainMember(
+        [object]$Record,
+        [string]$Name,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        if ($null -eq $Record) {
+            return $null
+        }
+
+        $wrapped = $Record.PSObject
+        $type = $wrapped.BaseObject.GetType()
+        $genericDictionary = ([Collections.Generic.Dictionary[object, object]]).GetGenericTypeDefinition()
+        if ($type -eq [hashtable] -or $type -eq [Collections.Specialized.OrderedDictionary] -or
+            ($type.IsGenericType -and $type.GetGenericTypeDefinition() -eq $genericDictionary)) {
+            return $Projector.GetValue($Record, @($Name))
+        }
+
+        # This optional comparison guard reads captured fields without invoking legacy getters.
+        $property = $wrapped.Properties[$Name]
+        if ($property -is [Management.Automation.PSNoteProperty]) {
+            return $property.Value
+        }
+        return $null
     }
 
     hidden [string[]] CheckNames() {
@@ -2378,6 +2443,9 @@ function Compare-ADAnalyzerAssessment {
     $newScope = [string](Get-ADAnalyzerOperationValue (Get-ADAnalyzerOperationValue $after @('Context')) @('SearchBase'))
     if (-not $comparer.SearchBasesMatch($oldScope, $newScope)) {
         throw 'Cannot compare different search-base scopes as configuration drift'
+    }
+    if (-not $comparer.DirectoryDomainSidsMatch($before, $after)) {
+        throw 'Cannot compare different recorded directory domain SIDs as configuration drift'
     }
 
     $maps = @(@{}, @{})

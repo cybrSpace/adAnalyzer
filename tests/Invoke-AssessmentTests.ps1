@@ -784,6 +784,150 @@ try {
             Assert-Equal $hashes[$name] (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
         }
     }
+    Test-Assessment 'comparison rejects distinct recorded domain SIDs for the same target label' {
+        $domainSid = 'S-1-5-21-1-2-3'
+        $otherDomainSid = 'S-1-5-21-4-5-4294967295'
+        $rule = 'ACCOUNT.PASSWORD_NEVER_EXPIRES'
+        $accountDn = 'CN=Domain Comparison Test,DC=example,DC=invalid'
+        $makeSnapshot = {
+            param([string]$DomainSid, [bool]$Flag)
+
+            $directory = New-AssessmentFixture
+            $directory.Domain.SID = $DomainSid
+            $directory.Objects = @([pscustomobject]@{
+                    ObjectClass = 'User'
+                    AccountType = 'User'
+                    Enabled = $true
+                    DistinguishedName = $accountDn
+                    SID = $DomainSid + '-4201'
+                    PasswordNeverExpires = $Flag
+                })
+            $profile = @{ Policy = @{ AllowPasswordNeverExpires = $false } }
+            Invoke-ADAnalyzerAssessment -DirectoryData $directory -Profile $profile
+        }
+
+        $snapshots = [ordered]@{
+            Before = & $makeSnapshot $domainSid $true
+            Same = & $makeSnapshot $domainSid $false
+            Distinct = & $makeSnapshot $otherDomainSid $false
+        }
+        Assert-Equal $domainSid $snapshots.Before.Data.Directory.Domain.SID
+        Assert-Equal $otherDomainSid $snapshots.Distinct.Data.Directory.Domain.SID
+        foreach ($name in 'Missing', 'Null', 'Overflow', 'Account', 'Array') {
+            $snapshots[$name] = & $makeSnapshot $domainSid $false
+        }
+        $snapshots.Missing.Data.Directory.Domain.PSObject.Properties.Remove('SID')
+        $snapshots.Null.Data.Directory.Domain.SID = $null
+        $snapshots.Overflow.Data.Directory.Domain.SID = 'S-1-5-21-4-5-4294967296'
+        $snapshots.Account.Data.Directory.Domain.SID = $otherDomainSid + '-4201'
+        $snapshots.Array.Data.Directory.Domain.SID = @($otherDomainSid)
+
+        $paths = @{}
+        $hashes = @{}
+        foreach ($name in $snapshots.Keys) {
+            Assert-Equal 'offline' $snapshots[$name].Target
+            $paths[$name] = Join-Path $temp ('recorded-domain-comparison-' + $name + '.json')
+            $null = Export-ADAnalyzerAssessment -Assessment $snapshots[$name] -Path $paths[$name] -Format Json -Confirm:$false
+            $hashes[$name] = (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $differences = [Collections.Generic.List[string]]::new()
+        $controlRows = $null
+        foreach ($representation in 'Object', 'Json') {
+            $documents = if ($representation -ceq 'Object') { $snapshots } else { $paths }
+            foreach ($api in 'Native', 'Direct') {
+                foreach ($pair in @(
+                        @('Before', 'Same'),
+                        @('Before', 'Missing'),
+                        @('Before', 'Null'),
+                        @('Before', 'Overflow'),
+                        @('Before', 'Account'),
+                        @('Before', 'Array'),
+                        @('Before', 'Distinct'),
+                        @('Distinct', 'Before')
+                    )) {
+                    $before, $after = $pair
+                    $label = "$representation/$api/$before-$after"
+                    $rows = [Collections.Generic.List[object]]::new()
+                    $problem = $null
+                    try {
+                        if ($api -ceq 'Native') {
+                            Compare-ADAnalyzerAssessment -Reference $documents[$before] -Difference $documents[$after] -ErrorAction Stop |
+                                ForEach-Object { $rows.Add($_) }
+                        }
+                        else {
+                            $rows.Add($comparer.Compare($documents[$before], $documents[$after]))
+                        }
+                    }
+                    catch {
+                        $problem = $_
+                    }
+
+                    if ('Distinct' -cin $pair) {
+                        if ($null -eq $problem -or $rows.Count -ne 0 -or
+                            $problem.Exception.GetBaseException().Message -cnotlike '*different*domain SID*') {
+                            $differences.Add("$label did not reject a different recorded domain SID before emitting results")
+                        }
+                        continue
+                    }
+                    Assert-True ($null -eq $problem -and $rows.Count -eq 1) "$label rejected the same domain or unusable legacy evidence"
+                    $result = $rows[0]
+                    $expiry = @($result.Changes | Where-Object RuleId -CEQ $rule)
+                    Assert-True (
+                        $expiry.Count -eq 1 -and $expiry[0].Target -ceq $accountDn -and
+                        $expiry[0].Change -ceq 'Resolved' -and $null -eq $expiry[0].Reason -and
+                        $expiry[0].Reference[0].Observed -is [bool] -and $expiry[0].Reference[0].Observed -and
+                        $expiry[0].Difference[0].Observed -is [bool] -and -not $expiry[0].Difference[0].Observed
+                    ) "$label changed a verified same-label comparison"
+                    $rowOrder = @($result.Changes | ForEach-Object { $_.RuleId + '|' + $_.Target + '|' + $_.Change })
+                    if ($null -eq $controlRows) {
+                        $controlRows = $rowOrder
+                    }
+                    Assert-Equal ($controlRows -join [Environment]::NewLine) ($rowOrder -join [Environment]::NewLine)
+                }
+            }
+        }
+        foreach ($name in $paths.Keys) {
+            Assert-Equal $hashes[$name] (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+        Assert-True ($differences.Count -eq 0) ($differences -join [Environment]::NewLine)
+
+        $ordinary = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = 'offline'
+            Checks = @([pscustomobject]@{
+                    RuleId = 'FIXTURE.UNRELATED'
+                    Target = 'fixture.invalid'
+                    Status = 'Pass'
+                })
+        }
+        $getterReads = [pscustomobject]@{ Data = 0; Sid = 0 }
+        $legacyData = $ordinary.PSObject.Copy()
+        $readData = {
+            $getterReads.Data++
+            throw 'Unused legacy Data getter was invoked.'
+        }.GetNewClosure()
+        $legacyData | Add-Member -MemberType ScriptProperty -Name Data -Value $readData
+        $legacySid = $ordinary.PSObject.Copy()
+        $legacyDomain = [pscustomobject]@{}
+        $readSid = {
+            $getterReads.Sid++
+            throw 'Unused legacy SID getter was invoked.'
+        }.GetNewClosure()
+        $legacyDomain | Add-Member -MemberType ScriptProperty -Name SID -Value $readSid
+        $legacySid | Add-Member -NotePropertyName Data -NotePropertyValue @{
+            Directory = @{ Domain = $legacyDomain }
+        }
+        foreach ($legacy in $legacyData, $legacySid) {
+            $native = Compare-ADAnalyzerAssessment -Reference $ordinary -Difference $legacy -ErrorAction Stop
+            $direct = $comparer.Compare($ordinary, $legacy)
+            Assert-Equal 1 $native.Summary.Unchanged
+            Assert-Equal 1 $direct.Summary.Unchanged
+        }
+        Assert-Equal 0 $getterReads.Data
+        Assert-Equal 0 $getterReads.Sid
+    }
     Test-Assessment 'unreadable collectors produce partial coverage and preserve errors' {
         $data = New-AssessmentFixture
         $data.Coverage.Users = 'Unreadable'
