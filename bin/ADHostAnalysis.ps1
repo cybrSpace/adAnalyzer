@@ -208,7 +208,7 @@ class ADAnalyzerHostPolicyEvaluator {
             $status = $this.RegistryStatus($true, $typeKnown, $typeMatches)
             if ($status -eq 'Compare') {
                 try {
-                    $comparison = [ADAnalyzerPolicyValueSemantics]::new()
+                    $comparison = New-ADAnalyzerPolicyValueSemantics
                     $status = $this.RegistryComparisonStatus(
                         $true,
                         $comparison.Compare($observed, $Rule.Expected, $this.RegistryOperator($Rule))
@@ -366,6 +366,7 @@ class ADAnalyzerHostPolicyEvaluator {
                     ProfileRuleId = $Rule['Id']
                     RegistryPath = $Rule.Key
                     ValueName = $Rule.ValueName
+                    RegistryOperator = $this.RegistryOperator($Rule)
                     RegistryType = $RegistryType
                     ExpectedRegistryType = $Rule['Type']
                 }

@@ -3,6 +3,7 @@
 . (Join-Path $PSScriptRoot 'ADSecret.ps1')
 . (Join-Path $PSScriptRoot 'ADFile.ps1')
 . (Join-Path $PSScriptRoot 'ADAccountControl.ps1')
+. (Join-Path $PSScriptRoot 'ADPolicyValueSemantics.ps1')
 
 class ADAnalyzerEvidenceProjector {
     ADAnalyzerEvidenceProjector() {
@@ -1448,6 +1449,7 @@ class ADAnalyzerAssessmentComparer {
                         $key, $old, $new, $observation, $directoryEvidence, $projector
                     )
                     $this.QualifyHostServiceTransition($key, $old, $new, $observation, $projector)
+                    $this.QualifyHostRegistryTransition($key, $old, $new, $observation, $projector)
                     $this.QualifyGpoRuleTransition($key, $old, $new, $observation)
                     $this.QualifyGpoVersionTransition($key, $oldMap, $newMap, $observation, $projector)
                 }
@@ -2032,6 +2034,120 @@ class ADAnalyzerAssessmentComparer {
         }
     }
 
+    hidden [void] QualifyHostRegistryTransition(
+        [string]$Key,
+        [object[]]$Before,
+        [object[]]$After,
+        [hashtable]$Observation,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        if ($Observation.Change -notin 'Resolved', 'New' -or
+            -not $Key.StartsWith(('HOST.REGISTRY' + [char]0), [StringComparison]::Ordinal) -or
+            $Before.Count -ne 1 -or $After.Count -ne 1) {
+            return
+        }
+
+        $semantics = New-ADAnalyzerPolicyValueSemantics
+        $previous = $this.ReadHostRegistryDecision($Before[0], $Key, $Projector, $semantics)
+        $current = $this.ReadHostRegistryDecision($After[0], $Key, $Projector, $semantics)
+        if ($null -eq $previous -or $null -eq $current -or $previous.Status -ceq $current.Status -or
+            $previous.Type -ne $current.Type -or $previous.Observed -cne $current.Observed) {
+            return
+        }
+
+        if ($previous.Operator -cne $current.Operator -or $previous.Expected -ine $current.Expected) {
+            $Observation.Change = 'Changed'
+            $Observation.Reason = 'RulePredicateChanged'
+        }
+    }
+
+    hidden [hashtable] ReadHostRegistryDecision(
+        [object]$Row,
+        [string]$Key,
+        [ADAnalyzerEvidenceProjector]$Projector,
+        [object]$Semantics
+    ) {
+        $ruleId = $this.GetRecordedEvidenceMember($Row, 'RuleId', $Projector, $null)
+        $status = $this.GetRecordedEvidenceMember($Row, 'Status', $Projector, $null)
+        $evidence = $this.GetRecordedEvidenceMember($Row, 'Evidence', $Projector, $null)
+        if ($ruleId -isnot [string] -or $ruleId -ine 'HOST.REGISTRY' -or
+            $status -isnot [string] -or $status -cnotin 'Pass', 'Fail' -or
+            $null -eq $evidence -or $evidence.PSObject.BaseObject.GetType() -ne [Management.Automation.PSCustomObject] -or
+            -not $this.MatchesHostRegistryKey($Row, $evidence, $Key, $Projector)) {
+            return $null
+        }
+
+        $registryType = $Projector.GetValue($evidence, @('RegistryType'))
+        $declaredType = $Projector.GetValue($evidence, @('ExpectedRegistryType'))
+        $operatorText = $Projector.GetValue($evidence, @('RegistryOperator'))
+        if (-not $this.IsRecordedRegistryType($registryType) -or $registryType -notin 1, 2, 4, 11 -or
+            ($null -ne $declaredType -and
+                (-not $this.IsRecordedRegistryType($declaredType) -or $declaredType -ne $registryType)) -or
+            $operatorText -isnot [string]) {
+            return $null
+        }
+
+        $operator = $Semantics.ResolveOperator($operatorText)
+        $observed = $this.GetRecordedEvidenceMember($Row, 'Observed', $Projector, $null)
+        $expected = $this.GetRecordedEvidenceMember($Row, 'Expected', $Projector, $null)
+        if ($registryType -in 1, 2) {
+            if ($observed -isnot [string] -or $expected -isnot [string] -or $operator -notin 'Equals', 'NotEquals') {
+                return $null
+            }
+        }
+        elseif (-not $this.IsRecordedInteger($observed) -or -not $this.IsRecordedInteger($expected) -or
+            [long]$observed -lt 0 -or ($registryType -eq 4 -and [long]$observed -gt [uint32]::MaxValue) -or
+            $operator -notin 'Equals', 'NotEquals', 'Minimum', 'Maximum') {
+            return $null
+        }
+
+        try {
+            if ($Semantics.Compare($observed, $expected, $operator) -ne ($status -ceq 'Pass')) {
+                return $null
+            }
+        }
+        catch {
+            return $null
+        }
+
+        if ($registryType -in 4, 11) {
+            $observed = [long]$observed
+            $expected = [long]$expected
+        }
+        return @{
+            Status = $status
+            Type = [int]$registryType
+            Operator = $operator
+            Observed = $observed
+            Expected = $expected
+        }
+    }
+
+    hidden [bool] MatchesHostRegistryKey(
+        [object]$Row,
+        [object]$Evidence,
+        [string]$Key,
+        [ADAnalyzerEvidenceProjector]$Projector
+    ) {
+        $id = $Projector.GetValue($Evidence, @('ProfileRuleId'))
+        $path = $Projector.GetValue($Evidence, @('RegistryPath'))
+        $name = $Projector.GetValue($Evidence, @('ValueName'))
+        $target = $this.GetRecordedEvidenceMember($Row, 'Target', $Projector, $null)
+        if ($id -isnot [string] -or [string]::IsNullOrWhiteSpace($id) -or $id.IndexOf([char]0) -ge 0 -or
+            -not $this.HasLiteralRegistryIdentity($path, $name) -or [string]::IsNullOrWhiteSpace($path) -or
+            $path.IndexOf([char]0) -ge 0 -or $name.IndexOf([char]0) -ge 0 -or $target -isnot [string]) {
+            return $false
+        }
+
+        $suffix = '/Registry/' + $path + '/' + $name
+        if ($target.Length -le $suffix.Length -or -not $target.EndsWith($suffix, [StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+        $identity = Get-ADAnalyzerHostRuleIdentity -Rule @{ Id = $id } -Target $target -Parts @($path, $name)
+        $recordedKey = 'HOST.REGISTRY' + [char]0 + $identity.ToUpperInvariant()
+        return $Key.Equals($recordedKey, [StringComparison]::Ordinal)
+    }
+
     hidden [void] QualifyGpoRuleTransition(
         [string]$Key,
         [object[]]$Before,
@@ -2194,21 +2310,30 @@ class ADAnalyzerAssessmentComparer {
         [object[]]$Rows,
         [ADAnalyzerEvidenceProjector]$Projector
     ) {
-        if (-not $Key.StartsWith('GPO.EXPECTED.', [StringComparison]::Ordinal)) {
+        $hostRegistry = $Key.StartsWith(('HOST.REGISTRY' + [char]0), [StringComparison]::Ordinal)
+        if (-not $hostRegistry -and -not $Key.StartsWith('GPO.EXPECTED.', [StringComparison]::Ordinal)) {
             return $Rows
         }
 
         return @(
             foreach ($row in $Rows) {
                 $evidence = $Projector.GetValue($row, @('Evidence'))
-                if ($null -eq $this.GetRecordedRegistrySelector($evidence, $Projector)) {
+                $predicateField = if ($hostRegistry) {
+                    if ($null -ne $evidence -and $evidence.PSObject.Properties['RegistryOperator'] -is [Management.Automation.PSNoteProperty]) {
+                        'RegistryOperator'
+                    }
+                }
+                elseif ($null -ne $this.GetRecordedRegistrySelector($evidence, $Projector)) {
+                    'RegistrySelector'
+                }
+                if (-not $predicateField) {
                     $row
                     continue
                 }
 
-                # Compare selectors separately so new metadata alone does not change legacy comparisons.
+                # Compare predicate metadata separately to preserve legacy comparison results.
                 $comparableEvidence = $evidence.PSObject.Copy()
-                $comparableEvidence.PSObject.Properties.Remove('RegistrySelector')
+                $comparableEvidence.PSObject.Properties.Remove($predicateField)
                 $comparableRow = $row.PSObject.Copy()
                 $comparableRow.PSObject.Properties['Evidence'].Value = $comparableEvidence
                 $comparableRow
@@ -2648,6 +2773,7 @@ function Compare-ADAnalyzerAssessment {
                     $key, $old, $new, $observation, $directoryEvidence, $projector
                 )
                 $comparer.QualifyHostServiceTransition($key, $old, $new, $observation, $projector)
+                $comparer.QualifyHostRegistryTransition($key, $old, $new, $observation, $projector)
                 $comparer.QualifyGpoRuleTransition($key, $old, $new, $observation)
                 $comparer.QualifyGpoVersionTransition($key, $maps[0], $maps[1], $observation, $projector)
             }

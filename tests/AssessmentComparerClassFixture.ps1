@@ -888,6 +888,44 @@ try {
                     $actual.Summary.Unchanged -eq 1
                 ) 'The standalone operations file requires the full loader for an ordinary comparison.'
             }
+
+            Test-Fixture 'standalone operations qualify saved named host registry requirements' {
+                . (Join-Path $RepositoryRoot 'bin/ADProfile.ps1')
+                Assert-Fixture (-not (Get-Command Test-ADAnalyzerGpoPolicy -ListImported -ErrorAction SilentlyContinue)) 'The policy loader was not needed for this fixture.'
+                $makeSnapshot = {
+                    param([int]$Expected, [string]$Status)
+                    [pscustomobject]@{
+                        SchemaVersion = 1
+                        Target = 'example.invalid'
+                        Checks = @([pscustomobject]@{
+                                RuleId = 'HOST.REGISTRY'
+                                Target = 'host.example.invalid/Registry/SOFTWARE\Policies\Fixture/Flag'
+                                Status = $Status
+                                Observed = [int]1
+                                Expected = $Expected
+                                Evidence = @{
+                                    ProfileRuleId = 'fixture-registry'
+                                    RegistryPath = 'SOFTWARE\Policies\Fixture'
+                                    ValueName = 'Flag'
+                                    RegistryType = 4
+                                    ExpectedRegistryType = 4
+                                    RegistryOperator = 'Equals'
+                                }
+                            })
+                    }
+                }
+                $before = Join-Path $fixtureDirectory 'named-registry-before.json'
+                $after = Join-Path $fixtureDirectory 'named-registry-after.json'
+                [IO.File]::WriteAllText($before, (ConvertTo-Json -InputObject (& $makeSnapshot 0 'Fail') -Depth 12))
+                [IO.File]::WriteAllText($after, (ConvertTo-Json -InputObject (& $makeSnapshot 1 'Pass') -Depth 12))
+                $direct = [ADAnalyzerAssessmentComparer]::new().Compare($before, $after)
+                $native = Compare-ADAnalyzerAssessment -Reference $before -Difference $after
+                foreach ($result in $direct, $native) {
+                    Assert-Fixture ($result.Changes.Count -eq 1 -and
+                        $result.Changes[0].Change -ceq 'Changed' -and
+                        $result.Changes[0].Reason -ceq 'RulePredicateChanged') 'The standalone saved comparison misclassified the named registry requirement.'
+                }
+            }
         }
 
         'Direct' {

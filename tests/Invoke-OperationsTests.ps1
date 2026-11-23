@@ -2655,6 +2655,197 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
         Assert-Equal 1 $comparison.Summary.Changed
         Assert-Equal NotObservedInDifference ($comparison.Changes | Where-Object Change -eq Changed).Reason
     }
+    Invoke-Test 'named host registry comparison distinguishes predicate edits from observed repairs' {
+        foreach ($file in 'ADGpo', 'ADPolicyAnalysis', 'ADHostAnalysis') {
+            . (Join-Path $RepositoryRoot ('bin/' + $file + '.ps1'))
+        }
+        $providerCalls = [Collections.Generic.List[string]]::new()
+        $unexpectedProvider = {
+            $providerCalls.Add($MyInvocation.InvocationName)
+            throw 'Unexpected provider call in the offline host registry fixture.'
+        }
+        foreach ($commandName in 'New-CimSession', 'Invoke-CimMethod', 'Get-CimInstance', 'Get-WinEvent', 'Invoke-Command') {
+            Set-Item -LiteralPath ('Function:local:' + $commandName) -Value $unexpectedProvider
+        }
+        Assert-Throws { New-CimSession }
+        Assert-Equal 1 $providerCalls.Count
+        $providerCalls.Clear()
+
+        $computer = 'registry-comparison.fixture.invalid'
+        $key = 'SYSTEM\Fixture/Control'
+        $name = 'Part/Enabled'
+        $ruleId = 'fixture-registry-enabled'
+        $target = $computer + '/Registry/' + $key + '/' + $name
+        $evaluator = [ADAnalyzerHostPolicyEvaluator]::new()
+        $makeSnapshot = {
+            param(
+                [string]$Route,
+                [int]$ObservedType,
+                [object]$Observed,
+                [int]$ExpectedType,
+                [object]$Expected,
+                [object]$Operator,
+                [string]$Status
+            )
+
+            $profile = Get-ADAnalyzerDefaultProfile
+            $rule = @{
+                Id = $ruleId
+                Key = $key
+                ValueName = $name
+                Type = $ExpectedType
+                Expected = $Expected
+            }
+            if ($null -ne $Operator) {
+                $rule.Operator = $Operator
+            }
+            $profile.Host.RegistryRules = @($rule)
+            $hosts = @([pscustomobject]@{
+                    ComputerName = $computer
+                    Services = @()
+                    Registry = @([pscustomobject]@{
+                            Path = $key
+                            Name = $name
+                            Type = $ObservedType
+                            Status = 'Observed'
+                            Value = $Observed
+                        })
+                })
+            $rows = if ($Route -ceq 'Command') {
+                Test-ADAnalyzerHostPolicy -Hosts $hosts -Profile $profile
+            }
+            else {
+                $evaluator.Evaluate($hosts, $profile)
+            }
+            $checks = @($rows | Where-Object RuleId -CEQ 'HOST.REGISTRY')
+            Assert-Equal 1 $checks.Count
+            $check = $checks[0]
+            Assert-Equal $target $check.Target
+            Assert-Equal $Status $check.Status
+            Assert-True (
+                $check.Observed.GetType() -eq $Observed.GetType() -and $check.Observed -eq $Observed -and
+                $check.Expected.GetType() -eq $Expected.GetType() -and $check.Expected -eq $Expected
+            ) 'The host evaluator must retain typed observation and expectation values.'
+            Assert-True (
+                $check.Evidence.ProfileRuleId -ceq $ruleId -and
+                $check.Evidence.RegistryPath -ceq $key -and $check.Evidence.ValueName -ceq $name -and
+                $check.Evidence.RegistryType -eq $ObservedType -and $check.Evidence.ExpectedRegistryType -eq $ExpectedType
+            ) 'The host evaluator lost the named registry identity or type evidence.'
+            return @{ Checks = $checks }
+        }
+
+        $reporter = [ADAnalyzerAssessmentReport]::new()
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $failures = [Collections.Generic.List[string]]::new()
+        $comparisons = 0
+        foreach ($evaluatorRoute in 'Command', 'Class') {
+            $snapshots = [ordered]@{
+                RequireZero = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 0 $null 'Fail'
+                AcceptOne = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 1 'Equals' 'Pass'
+                RejectOne = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 1 'NotEquals' 'Fail'
+                MinimumTwo = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 2 'Minimum' 'Fail'
+                MinimumOne = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 1 'Minimum' 'Pass'
+                Repaired = & $makeSnapshot $evaluatorRoute 4 ([uint32]0) 4 ([long]0) 'eQuAlS' 'Pass'
+                BothChanged = & $makeSnapshot $evaluatorRoute 4 ([uint32]2) 4 2 'Equals' 'Pass'
+                ChangedType = & $makeSnapshot $evaluatorRoute 11 ([uint64]1) 11 1 'Equals' 'Pass'
+                InvalidType = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 11 1 'Equals' 'Invalid'
+                TextFail = & $makeSnapshot $evaluatorRoute 1 'disabled' 1 'enabled' 'Equals' 'Fail'
+                TextPass = & $makeSnapshot $evaluatorRoute 1 'disabled' 1 'disabled' 'Equals' 'Pass'
+                Legacy = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 1 'Equals' 'Pass'
+                MalformedOperator = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 1 'Equals' 'Pass'
+                MalformedObserved = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 1 'Equals' 'Pass'
+                MissingType = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 1 'Equals' 'Pass'
+                Contradictory = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 2 'Equals' 'Fail'
+            }
+            $snapshots.Legacy.Checks[0].Evidence.Remove('RegistryOperator')
+            $snapshots.MalformedOperator.Checks[0].Evidence.RegistryOperator = 'Unsupported'
+            $snapshots.MalformedObserved.Checks[0].Observed = @([uint32]1)
+            $snapshots.MissingType.Checks[0].Evidence.Remove('RegistryType')
+            $snapshots.Contradictory.Checks[0].Status = 'Pass'
+            $files = @{}
+            $hashes = @{}
+            foreach ($snapshotName in $snapshots.Keys) {
+                Assert-Equal $snapshots.RequireZero.Checks[0].CheckId $snapshots[$snapshotName].Checks[0].CheckId
+                $path = Join-Path $script:Temporary ('host-registry-' + $evaluatorRoute + '-' + $snapshotName + '.json')
+                $null = $reporter.Write($snapshots[$snapshotName], $path, 'Json')
+                $files[$snapshotName] = $path
+                $hashes[$snapshotName] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            }
+
+            foreach ($representation in 'Memory', 'Json') {
+                $inputDocuments = if ($representation -ceq 'Memory') {
+                    $snapshots
+                }
+                else {
+                    $files
+                }
+                foreach ($case in @(
+                        @('RequireZero', 'AcceptOne', 'Changed', 'RulePredicateChanged'),
+                        @('AcceptOne', 'RequireZero', 'Changed', 'RulePredicateChanged'),
+                        @('RejectOne', 'AcceptOne', 'Changed', 'RulePredicateChanged'),
+                        @('AcceptOne', 'RejectOne', 'Changed', 'RulePredicateChanged'),
+                        @('MinimumTwo', 'MinimumOne', 'Changed', 'RulePredicateChanged'),
+                        @('TextFail', 'TextPass', 'Changed', 'RulePredicateChanged'),
+                        @('RequireZero', 'Repaired', 'Resolved', $null),
+                        @('Repaired', 'RequireZero', 'New', $null),
+                        @('RequireZero', 'BothChanged', 'Resolved', $null),
+                        @('RequireZero', 'ChangedType', 'Resolved', $null),
+                        @('InvalidType', 'AcceptOne', 'Resolved', $null),
+                        @('RequireZero', 'Legacy', 'Resolved', $null),
+                        @('RequireZero', 'MalformedOperator', 'Resolved', $null),
+                        @('RequireZero', 'MalformedObserved', 'Resolved', $null),
+                        @('RequireZero', 'MissingType', 'Resolved', $null),
+                        @('RequireZero', 'Contradictory', 'Resolved', $null)
+                    )) {
+                    $beforeName, $afterName, $expectedChange, $expectedReason = $case
+                    $reference = $inputDocuments[$beforeName]
+                    $difference = $inputDocuments[$afterName]
+                    $results = [ordered]@{
+                        Command = Compare-ADAnalyzerAssessment -Reference $reference -Difference $difference
+                        Class = $comparer.Compare($reference, $difference)
+                    }
+                    foreach ($compareRoute in $results.Keys) {
+                        $comparison = $results[$compareRoute]
+                        Assert-Equal 1 $comparison.Changes.Count
+                        $change = $comparison.Changes[0]
+                        Assert-True (
+                            $change.RuleId -ceq 'HOST.REGISTRY' -and $change.Target -ceq $target -and
+                            $change.Reference.Count -eq 1 -and $change.Difference.Count -eq 1 -and
+                            $change.Reference[0].Status -ceq $snapshots[$beforeName].Checks[0].Status -and
+                            $change.Difference[0].Status -ceq $snapshots[$afterName].Checks[0].Status
+                        ) 'The comparer changed the registry identity or either original verdict.'
+                        if ($change.Change -cne $expectedChange -or $change.Reason -cne $expectedReason) {
+                            $label = "$evaluatorRoute/$representation/$compareRoute/$beforeName-$afterName"
+                            $failures.Add("$label expected $expectedChange/$expectedReason, got $($change.Change)/$($change.Reason).")
+                        }
+                        $comparisons++
+                    }
+                }
+            }
+            foreach ($snapshotName in $files.Keys) {
+                Assert-Equal $hashes[$snapshotName] (Get-FileHash -LiteralPath $files[$snapshotName] -Algorithm SHA256).Hash
+            }
+            foreach ($sample in @(
+                    @('RequireZero', 'Equals'),
+                    @('AcceptOne', 'Equals'),
+                    @('RejectOne', 'NotEquals'),
+                    @('MinimumTwo', 'Minimum')
+                )) {
+                $snapshotName, $expectedOperator = $sample
+                $memory = $snapshots[$snapshotName]
+                $saved = Get-Content -LiteralPath $files[$snapshotName] -Raw | ConvertFrom-Json
+                foreach ($document in $memory, $saved) {
+                    $actualOperator = $document.Checks[0].Evidence.RegistryOperator
+                    if ($actualOperator -isnot [string] -or $actualOperator -ine $expectedOperator) {
+                        $failures.Add("$evaluatorRoute/$snapshotName expected recorded operator $expectedOperator.")
+                    }
+                }
+            }
+        }
+        Assert-Equal 128 $comparisons
+        Assert-Equal 0 $providerCalls.Count
+        Assert-True ($failures.Count -eq 0) ($failures -join [Environment]::NewLine)
+    }
     Invoke-Test 'malformed named host snapshot identities are rejected instead of merged' {
         foreach ($id in @('', ' ', 1, ('bad' + [char]0 + 'id'))) {
             $snapshot = @{
@@ -3277,7 +3468,7 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
     $assessmentComparerCases = [ordered]@{
         Native = 22
         Construction = 2
-        Standalone = 1
+        Standalone = 2
         Direct = 7
         Isolation = 2
     }
