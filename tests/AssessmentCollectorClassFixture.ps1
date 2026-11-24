@@ -1630,7 +1630,53 @@ Invoke-CompositionProvider 'COMPOSITION_COMMAND' $PSBoundParameters
             $Arguments.hDefKey -eq [uint32]2147483650 -and
             $PSBoundParameters['ErrorAction'] -eq 'Stop') 'Registry observation changed its bound session or request.'
         Add-CompositionEvent CimRegistry $MethodName
-        if ($script:CompositionRegistryReturnCase -and
+        if ($script:CompositionNumericRegistryRules.Count -and
+            $Arguments.sSubKeyName -ceq 'SYSTEM\NumericFixture') {
+            $type = $script:CompositionNumericRegistryRules[0].Type
+            if ($MethodName -ceq 'EnumValues') {
+                return [pscustomobject]@{
+                    ReturnValue = [uint32]0
+                    sNames = [string[]]@('Selected', 'Later')
+                    Types = [uint32[]]@($type, 4)
+                }
+            }
+            if ($Arguments.sValueName -ceq 'Later') {
+                Assert-Fixture ($MethodName -ceq 'GetDWORDValue') 'Numeric control reached the wrong getter.'
+                Add-CompositionEvent CimRegistryReachedNumericControl $CimSession.ComputerName
+                return [pscustomobject]@{
+                    ReturnValue = [uint32]0
+                    uValue = [uint32]0
+                }
+            }
+            $getter = if ($type -eq 4) {
+                'GetDWORDValue'
+            }
+            else {
+                'GetQWORDValue'
+            }
+            Assert-Fixture (
+                $Arguments.sValueName -ceq 'Selected' -and $MethodName -ceq $getter
+            ) 'Incomplete numeric result reached the wrong getter or value.'
+            $response = [ordered]@{
+                ReturnValue = [uint32]0
+            }
+            if ($CimSession.ComputerName -ceq $script:CompositionPinnedServer) {
+                Add-CompositionEvent CimRegistryResponse $script:CompositionRegistryReturnCase
+                if ($type -eq 11) {
+                    $response['uValue'] = $null
+                }
+            }
+            else {
+                $response['uValue'] = if ($type -eq 4) {
+                    [uint32]0
+                }
+                else {
+                    [uint64]4294967296
+                }
+            }
+            return [pscustomobject]$response
+        }
+        if ($script:CompositionRegistryReturnCase -and -not $script:CompositionNumericRegistryRules.Count -and
             $Arguments.sSubKeyName -ceq 'SYSTEM\CurrentControlSet\Services\W32Time\Parameters') {
             Assert-Fixture ($MethodName -ceq 'GetStringValue') 'Synthetic returned registry results require the intended getter.'
             if ($Arguments.sValueName -ceq 'NtpServer' -and $CimSession.ComputerName -ceq $script:CompositionPinnedServer) {
@@ -1941,6 +1987,39 @@ function New-CompositionRegistryResponse([string]$Scenario) {
     return [pscustomobject]$result
 }
 
+function Assert-CompositionNumericRegistryRows([object[]]$Hosts, [string]$Label, [bool]$FromJson) {
+    $type = $script:CompositionNumericRegistryRules[0].Type
+    $primary = @($Hosts[0].Registry | Where-Object Path -CEQ 'SYSTEM\NumericFixture')
+    $healthy = @($Hosts[1].Registry | Where-Object Path -CEQ 'SYSTEM\NumericFixture')
+    Assert-Fixture (
+        ($primary.Name -join ',') -ceq 'Selected,Later' -and ($healthy.Name -join ',') -ceq 'Selected,Later'
+    ) "$Label lost or reordered an expected numeric registry row."
+    Assert-Fixture (
+        $primary[0].Type -eq $type -and
+        ($FromJson -or $primary[0].ReturnValue -is [uint32]) -and $primary[0].ReturnValue -eq 0
+    ) "$Label changed the type or successful return code of an incomplete numeric response."
+    Assert-Fixture ($primary[0].Status -ceq 'Unknown' -and $null -eq $primary[0].Value) (
+        '{0} expected incomplete numeric registry status Unknown, got {1}.' -f $Label, $primary[0].Status
+    )
+    $healthyValue = if ($type -eq 4) {
+        [uint32]0
+    }
+    else {
+        [uint64]4294967296
+    }
+    Assert-Fixture (
+        $healthy[0].Status -ceq 'Observed' -and $healthy[0].Type -eq $type -and
+        ($FromJson -or $healthy[0].Value.GetType() -eq $healthyValue.GetType()) -and
+        $healthy[0].Value -eq $healthyValue
+    ) "$Label lost the other host's observed numeric value."
+    foreach ($control in $primary[1], $healthy[1]) {
+        Assert-Fixture (
+            $control.Status -ceq 'Observed' -and $control.Type -eq 4 -and
+            ($FromJson -or $control.Value -is [uint32]) -and $control.Value -eq 0
+        ) "$Label lost a later typed zero."
+    }
+}
+
 function Assert-CompositionRegistryReturnRows(
     [object[]]$Hosts,
     [string]$Scenario,
@@ -1955,6 +2034,11 @@ function Assert-CompositionRegistryReturnRows(
         $null -eq $Hosts[0].PSObject.Properties['CollectionTiming'] -and
         $null -eq $Hosts[1].PSObject.Properties['CollectionTiming']
     ) "$Label changed the host records or classified a returned registry result as a timeout."
+
+    if ($script:CompositionNumericRegistryRules.Count) {
+        Assert-CompositionNumericRegistryRows $Hosts $Label $FromJson.IsPresent
+        return
+    }
 
     $primary = @($Hosts[0].Registry | Where-Object Name -CEQ 'NtpServer')
     $absent = @($Hosts[1].Registry | Where-Object Name -CEQ 'NtpServer')
@@ -2004,12 +2088,23 @@ function Assert-CompositionRegistryReturnRows(
 function Assert-CompositionRegistryReturnTrace([string]$Scenario, [string]$Label) {
     $trace = $script:CompositionTrace.ToArray()
     $selected = [array]::IndexOf($trace, ('CimRegistryResponse|' + $Scenario))
-    $later = [array]::IndexOf($trace, ('CimRegistryReachedType|' + $script:CompositionPinnedServer))
+    $getterEvent = 'CimRegistry|GetStringValue'
+    $controlEvent = 'CimRegistryReachedType'
+    if ($script:CompositionNumericRegistryRules.Count) {
+        $getterEvent = if ($script:CompositionNumericRegistryRules[0].Type -eq 4) {
+            'CimRegistry|GetDWORDValue'
+        }
+        else {
+            'CimRegistry|GetQWORDValue'
+        }
+        $controlEvent = 'CimRegistryReachedNumericControl'
+    }
+    $later = [array]::IndexOf($trace, ($controlEvent + '|' + $script:CompositionPinnedServer))
     $close = [array]::IndexOf($trace, ('CimClose|' + $script:CompositionPinnedServer))
     $healthy = [array]::IndexOf($trace, ('CimOpen|' + $script:CompositionHealthyHost))
     $healthyClose = [array]::IndexOf($trace, ('CimClose|' + $script:CompositionHealthyHost))
     Assert-Fixture (
-        $selected -gt 0 -and $trace[$selected - 1] -ceq 'CimRegistry|GetStringValue' -and
+        $selected -gt 0 -and $trace[$selected - 1] -ceq $getterEvent -and
         $later -gt $selected -and $close -gt $later -and $healthy -gt $close -and $healthyClose -gt $healthy -and
         @($trace | Where-Object { $_ -clike 'CimRegistryResponse|*' }).Count -eq 1 -and
         @($trace | Where-Object { $_ -clike 'CimOpen|*' }).Count -eq 2 -and
@@ -2041,6 +2136,9 @@ function Assert-CompositionRegistryReturnCoverage([object]$Assessment, [object]$
                 }
             )
         }
+    }
+    if ($script:CompositionNumericRegistryRules.Count) {
+        $profile.Host.RegistryRules = $script:CompositionNumericRegistryRules
     }
     $script:CompositionTrace.Clear()
     $nativeArguments = @{
@@ -2084,6 +2182,17 @@ function Assert-CompositionRegistryReturnCoverage([object]$Assessment, [object]$
                 $checks[0].Expected -ceq 'Collected'
             ) 'Coverage check lost the explicit partial observation.'
         }
+        if ($script:CompositionNumericRegistryRules.Count) {
+            $selected = @($result.Checks | Where-Object {
+                    $_.RuleId -ceq 'HOST.REGISTRY' -and $_.Target -clike '*/Registry/SYSTEM\NumericFixture/Selected'
+                })
+            Assert-Fixture (
+                $selected.Count -eq 2 -and
+                $selected[0].Target -ceq ($script:CompositionPinnedServer + '/Registry/SYSTEM\NumericFixture/Selected') -and
+                $selected[1].Target -ceq ($script:CompositionHealthyHost + '/Registry/SYSTEM\NumericFixture/Selected') -and
+                ($selected.Status -join ',') -ceq 'Unknown,Pass' -and $null -eq $selected[0].Observed
+            ) 'Expected an incomplete deny-list check to be Unknown and the other host to pass.'
+        }
     }
 }
 
@@ -2109,6 +2218,30 @@ function Invoke-AssessmentCompositionFixture {
     $script:CompositionRegistryTimeout = [bool]$CimRegistryTimeout
     $script:CompositionRegistryDenied = [bool]$CimRegistryDenied
     $script:CompositionRegistryReturnCase = $CimRegistryReturnCase
+    $script:CompositionNumericRegistryRules = @()
+    if ($CimRegistryReturnCase -cin 'MissingDwordValue', 'NullQwordValue') {
+        $type = if ($CimRegistryReturnCase -ceq 'MissingDwordValue') {
+            4
+        }
+        else {
+            11
+        }
+        $script:CompositionNumericRegistryRules = @(
+            @{
+                Key = 'SYSTEM\NumericFixture'
+                ValueName = 'Selected'
+                Type = $type
+                Operator = 'NotIn'
+                Expected = @([uint64]17)
+            }
+            @{
+                Key = 'SYSTEM\NumericFixture'
+                ValueName = 'Later'
+                Type = 4
+                Expected = [uint32]0
+            }
+        )
+    }
     $script:CompositionPairedHosts = $CimRegistryDenied -or $CimRegistryReturnCase
     $script:CompositionTemp = [IO.Path]::Combine([IO.Path]::GetTempPath(), ('assessment-composition-' + [guid]::NewGuid().ToString('N')))
     $nativeService = $null
@@ -2199,6 +2332,9 @@ function Invoke-AssessmentCompositionFixture {
         }
         if ($script:CompositionPairedHosts) {
             $options.Profile.Host.AuditRules = @()
+        }
+        if ($script:CompositionNumericRegistryRules.Count) {
+            $options.Profile.Host.RegistryRules = $script:CompositionNumericRegistryRules
         }
         if ($DisableGpoInProfile) {
             $options.Profile.Analysis.IncludeGpo = $false
@@ -2426,7 +2562,10 @@ if ($Case -eq 'HostRegistryCoverage') {
 
 if ($Case -eq 'HostRegistryReturnCodes') {
     $failures = [Collections.Generic.List[string]]::new()
-    foreach ($scenario in 'Success', 'Absent', 'AccessDenied', 'UnexpectedFailure', 'NullCode', 'MissingCode', 'TextZero', 'SingletonZero') {
+    foreach ($scenario in @(
+            'Success', 'Absent', 'AccessDenied', 'UnexpectedFailure', 'NullCode', 'MissingCode',
+            'TextZero', 'SingletonZero', 'MissingDwordValue', 'NullQwordValue'
+        )) {
         try {
             Test-Fixture ('returned registry response ' + $scenario) {
                 Invoke-AssessmentCompositionFixture Direct $compositionCollector -CimRegistryReturnCase $scenario

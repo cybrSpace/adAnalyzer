@@ -1167,21 +1167,32 @@ class ADAnalyzerHostCollector {
     hidden [pscustomobject] RegistryObservation(
         [hashtable]$Setting,
         [object]$Type,
-        [object]$ReturnCode
+        [object]$Result
     ) {
-        $status = if ($this.RegistryReturnCodeIs($ReturnCode, 0)) {
-            'Observed'
-        }
-        else {
-            'Unknown'
+        $returnCode = Get-ADAnalyzerDirectoryObservationField $Result 'ReturnValue'
+        $status = 'Unknown'
+        $value = $null
+        if ($this.RegistryReturnCodeIs($returnCode, 0)) {
+            $property = $this.RegistryValueProperty($Type)
+            if ($Type -in 4, 11) {
+                # DWORD and QWORD getters return their data separately from the status code.
+                $value = Get-ADAnalyzerDirectoryObservationField $Result $property
+                if ($null -ne $value) {
+                    $status = 'Observed'
+                }
+            }
+            else {
+                $value = $Result.$property
+                $status = 'Observed'
+            }
         }
         return [pscustomobject]@{
             Path = $Setting.Path
             Name = $Setting.Name
             Type = $Type
             Status = $status
-            Value = $null
-            ReturnValue = $ReturnCode
+            Value = $value
+            ReturnValue = $returnCode
         }
     }
 
@@ -1331,13 +1342,7 @@ class ADAnalyzerHostCollector {
                 $Timing.StartOperation('Registry', $method)
                 $value = Invoke-CimMethod @arguments
                 $Timing.CompleteOperation()
-                $returnCode = Get-ADAnalyzerDirectoryObservationField $value 'ReturnValue'
-                $record = $this.RegistryObservation($setting, $type, $returnCode)
-                if ($record.Status -eq 'Observed') {
-                    $property = $this.RegistryValueProperty($type)
-                    $record.Value = $value.$property
-                }
-                $registry.Add($record)
+                $registry.Add($this.RegistryObservation($setting, $type, $value))
             }
             catch {
                 $Timing.RecordFailure($_)
@@ -1422,13 +1427,7 @@ function Get-ADAnalyzerHostData {
                     $timing.StartOperation('Registry', $method)
                     $value = Invoke-CimMethod @splat
                     $timing.CompleteOperation()
-                    $returnCode = Get-ADAnalyzerDirectoryObservationField $value 'ReturnValue'
-                    $record = $collector.RegistryObservation($setting, $type, $returnCode)
-                    if ($record.Status -eq 'Observed') {
-                        $property = $collector.RegistryValueProperty($type)
-                        $record.Value = $value.$property
-                    }
-                    $registry.Add($record)
+                    $registry.Add($collector.RegistryObservation($setting, $type, $value))
                 }
                 catch {
                     $timing.RecordFailure($_)
