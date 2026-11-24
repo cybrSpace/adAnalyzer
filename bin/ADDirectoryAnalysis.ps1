@@ -3190,6 +3190,17 @@ class ADAnalyzerDirectoryPolicyEvaluator {
             return $null
         }
 
+        $controller = Get-ADAnalyzerDirectoryObservationField $observation 'Server'
+        $directoryServer = Get-ADAnalyzerDirectoryObservationField $Data 'Server'
+        $connection = Get-ADAnalyzerDirectoryObservationField $Data 'DirectoryConnection'
+        $connectionServer = Get-ADAnalyzerDirectoryObservationField $connection 'Server'
+        if ($controller -isnot [string] -or [string]::IsNullOrWhiteSpace($controller) -or
+            $directoryServer -isnot [string] -or $connectionServer -isnot [string] -or
+            -not $controller.Equals($directoryServer, [StringComparison]::OrdinalIgnoreCase) -or
+            -not $controller.Equals($connectionServer, [StringComparison]::OrdinalIgnoreCase)) {
+            return @{ ControllerCorroborated = $false }
+        }
+
         $index = [Collections.Generic.Dictionary[guid, object]]::new()
         foreach ($user in $users) {
             $identity = ConvertTo-ADAnalyzerDirectorySubjectGuid (Get-ADAnalyzerDirectoryObservationField $user 'ObjectGuid')
@@ -3203,13 +3214,14 @@ class ADAnalyzerDirectoryPolicyEvaluator {
             $index.Add($identity, $user)
         }
         return @{
+            ControllerCorroborated = $true
             Scope = $scope
             Users = $index
         }
     }
 
     hidden [object] FindScopedUser([object]$Object, [hashtable]$Evidence) {
-        if ($null -eq $Evidence) {
+        if ($null -eq $Evidence -or -not $Evidence.ControllerCorroborated) {
             return $null
         }
         $identity = ConvertTo-ADAnalyzerDirectorySubjectGuid (Get-ADAnalyzerDirectoryObservationField $Object 'ObjectGuid')
@@ -3246,6 +3258,7 @@ class ADAnalyzerDirectoryPolicyEvaluator {
         if ($scopedUsers) {
             $scopedEvidence = $this.GetScopedUserEvidence($Data)
         }
+        $controllerUncorroborated = $null -ne $scopedEvidence -and -not $scopedEvidence.ControllerCorroborated
 
         $allObjects = @(Get-ADAnalyzerDirectoryField $Data 'Objects' @())
         if (-not $allObjects.Count) {
@@ -3402,8 +3415,12 @@ class ADAnalyzerDirectoryPolicyEvaluator {
                 })
                 $never = Get-ADAnalyzerDirectoryObservationField $object 'PasswordNeverExpires'
                 $allowed = Get-ADAnalyzerDirectoryField $policy 'AllowPasswordNeverExpires'
+                $expirationMessage = 'Exceptions and account purpose require explicit profile decisions.'
                 $disabled = $false
                 if ($scopedUser) {
+                    if ($controllerUncorroborated) {
+                        $expirationMessage = 'The Users query did not corroborate the selected directory controller. Recheck the account using a confirmed controller.'
+                    }
                     $observation = @{
                         Value = Get-ADAnalyzerDirectoryObservationField $object 'UserAccountControl'
                         Enabled = $recordedEnabled
@@ -3450,7 +3467,7 @@ class ADAnalyzerDirectoryPolicyEvaluator {
                     Observed = $never
                     Expected = $allowed
                     Evidence = @()
-                    Message = 'Exceptions and account purpose require explicit profile decisions.'
+                    Message = $expirationMessage
                     Object = $object
                     Applicability = 'Configured'
                 })

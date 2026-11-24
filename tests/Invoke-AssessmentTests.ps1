@@ -3950,6 +3950,37 @@ foreach ($case in 'Native', 'Direct') {
     }
 }
 
+foreach ($case in 'Native', 'Direct') {
+    Test-Assessment ('scoped controller evidence: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $arguments = @(
+            '-NoLogo'
+            '-NoProfile'
+            '-NonInteractive'
+            '-File'
+            (Join-Path $PSScriptRoot 'ScopedControllerEvidenceFixture.ps1')
+            '-Case'
+            $case
+            '-RepositoryRoot'
+            $RepositoryRoot
+        )
+        $output = & {
+            $ErrorActionPreference = 'Continue'
+            $PSNativeCommandUseErrorActionPreference = $false
+            $lines = @(& $executable @arguments 2>&1)
+            [pscustomobject]@{
+                ExitCode = $LASTEXITCODE
+                Lines = $lines
+            }
+        }
+        if ($output.ExitCode -ne 0) {
+            throw ($output.Lines -join [Environment]::NewLine)
+        }
+        $marker = 'PASS AD-09 scoped controller ' + $case + ' 17'
+        Assert-Equal 1 @($output.Lines | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+    }
+}
+
 $assessmentCollectorCases = [ordered]@{
     Native = 52
     Construction = 2
