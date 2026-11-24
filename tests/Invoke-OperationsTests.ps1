@@ -1948,6 +1948,248 @@ try {
         Assert-Equal 1 @($plan.Actions).Count
         Assert-Equal 'MaximumActionsReached' $plan.Excluded[0].Reason
     }
+    & {
+        function Assert-ConsentTargetRejection([scriptblock]$Body) {
+            $caught = $null
+            $output = [Collections.Generic.List[object]]::new()
+            try {
+                & $Body | ForEach-Object { $output.Add($_) }
+            }
+            catch {
+                $caught = $_.Exception.GetBaseException().Message
+            }
+            Assert-Equal 0 $output.Count
+            Assert-Equal (
+                'Remediation target distinguished name is missing or differs from the verified identity.'
+            ) $caught
+        }
+
+        function Invoke-ConsentTargetFixture([scriptblock]$Body) {
+            $blocked = @(
+                'Get-ADAnalyzerRemediationAuthorityDirectory'
+                'Enter-ADAnalyzerJournalLease'
+                'Get-ADAnalyzerOperationCurrentObject'
+                'Get-ADObject'
+                'Get-ADGroup'
+                'Disable-ADAccount'
+                'Enable-ADAccount'
+            )
+            $saved = @{}
+            $script:ConsentTargetEffectCalls = [Collections.Generic.List[string]]::new()
+            try {
+                foreach ($name in $blocked) {
+                    $path = 'Function:script:' + $name
+                    $saved[$path] = (Get-Command -Name $name -CommandType Function -ErrorAction Stop).ScriptBlock
+                    Set-Item -LiteralPath $path -Value {
+                        $script:ConsentTargetEffectCalls.Add($MyInvocation.MyCommand.Name)
+                        throw 'The consent target fixture reached a forbidden effect.'
+                    }
+                }
+                & $Body
+                Assert-Equal 0 $script:ConsentTargetEffectCalls.Count
+            }
+            finally {
+                foreach ($item in $saved.GetEnumerator()) {
+                    Set-Item -LiteralPath $item.Key -Value $item.Value
+                }
+            }
+        }
+
+        Invoke-Test 'Apply validates the displayed distinguished name against the checked target before effects' {
+            $executor = [ADAnalyzerRemediationExecutor]::new()
+            $server = 'dc.example.invalid'
+            Invoke-ConsentTargetFixture {
+                $script:ConsentGetterReads = 0
+                $cases = @(
+                    'Mismatched'
+                    'SavedMismatch'
+                    'Missing'
+                    'Blank'
+                    'NonString'
+                    'GuidFields'
+                    'DateFields'
+                    'ComputedField'
+                    'MissingPrecondition'
+                    'LaterMismatch'
+                )
+                foreach ($case in $cases) {
+                    if ($case -eq 'LaterMismatch') {
+                        $plan = New-ActionIdentityFixturePlan
+                    }
+                    else {
+                        $plan = New-FixturePlan
+                    }
+                    $action = $plan.Actions[-1]
+                    switch ($case) {
+                        { $_ -in 'Mismatched', 'SavedMismatch' } {
+                            $action.DistinguishedName = 'CN=Different Fixture,DC=example,DC=invalid'
+                        }
+                        'Missing' {
+                            $action.PSObject.Properties.Remove('DistinguishedName')
+                        }
+                        'Blank' {
+                            $action.DistinguishedName = ' '
+                        }
+                        'NonString' {
+                            $action.DistinguishedName = @($script:Current.DistinguishedName)
+                        }
+                        'GuidFields' {
+                            $value = [guid]'20000000-0000-4000-8000-000000000001'
+                            $action.DistinguishedName = $value
+                            $action.Preconditions.DistinguishedName = $value
+                        }
+                        'DateFields' {
+                            $value = [datetime]'2025-02-01T00:00:00Z'
+                            $action.DistinguishedName = $value
+                            $action.Preconditions.DistinguishedName = $value
+                        }
+                        'ComputedField' {
+                            $action.PSObject.Properties.Remove('DistinguishedName')
+                            $action | Add-Member -MemberType ScriptProperty -Name DistinguishedName -Value {
+                                $script:ConsentGetterReads++
+                                return $script:Current.DistinguishedName
+                            }
+                        }
+                        'MissingPrecondition' {
+                            $action.Preconditions.PSObject.Properties.Remove('DistinguishedName')
+                        }
+                        'LaterMismatch' {
+                            $action.DistinguishedName = $plan.Actions[0].DistinguishedName
+                        }
+                    }
+                    $planInput = $plan
+                    if ($case -eq 'SavedMismatch') {
+                        $planInput = Join-Path $script:Temporary 'inconsistent reviewed plan.json'
+                        $json = ConvertTo-Json -InputObject $plan -Depth 30 -Compress
+                        [IO.File]::WriteAllText($planInput, $json)
+                    }
+                    $parameters = @{
+                        Plan = $planInput
+                        Server = $server
+                        JournalPath = $script:Journal
+                    }
+                    Assert-ConsentTargetRejection { Invoke-ADAnalyzerRemediationPlan @parameters -WhatIf }
+                    Assert-ConsentTargetRejection { Invoke-ADAnalyzerRemediationPlan @parameters -Confirm:$false }
+                    Assert-ConsentTargetRejection { $executor.Preview($planInput, $server, $script:Journal) }
+                    Assert-ConsentTargetRejection {
+                        $executor.Apply($planInput, $server, $script:Journal, @($plan.Actions.ActionId))
+                    }
+                }
+                Assert-Equal 0 $script:ConsentGetterReads
+
+                $plan = New-FixturePlan
+                $action = $plan.Actions[0]
+                $action.DistinguishedName = $action.DistinguishedName.ToLowerInvariant()
+                Assert-True ($action.DistinguishedName -cne $action.Preconditions.DistinguishedName)
+                $native = @(Invoke-ADAnalyzerRemediationPlan -Plan $plan -Server $server -JournalPath $script:Journal -WhatIf)
+                $direct = @($executor.Preview($plan, $server, $script:Journal))
+                foreach ($row in @($native + $direct)) {
+                    Assert-Equal $action.ActionId $row.ActionId
+                    Assert-Equal $action.ObjectGuid $row.ObjectGuid
+                    Assert-Equal 'Skipped' $row.Status
+                }
+                Assert-Equal 1 $native.Count
+                Assert-Equal 1 $direct.Count
+                Assert-Equal $false ([IO.File]::Exists($script:Journal))
+                Assert-Equal $false ([IO.File]::Exists($script:Journal + '.lock'))
+            }
+        }
+
+        Invoke-Test 'Undo validates the displayed distinguished name against both journal states before effects' {
+            $executor = [ADAnalyzerRemediationExecutor]::new()
+            $server = 'dc.example.invalid'
+            $plan = New-FixturePlan
+            $action = $plan.Actions[0]
+            Invoke-ConsentTargetFixture {
+                $cases = @('DifferentBefore', 'DifferentAfter', 'Missing', 'Blank', 'NonString', 'LaterMismatch', 'CaseOnly')
+                foreach ($case in $cases) {
+                    $after = $action.Preconditions.PSObject.Copy()
+                    $after.Enabled = $false
+                    $entry = [pscustomobject]@{
+                        EntryId = '44444444-4444-4444-8444-444444444444'
+                        ActionId = $action.ActionId
+                        ObjectGuid = $action.ObjectGuid
+                        SID = $action.SID
+                        DistinguishedName = $action.DistinguishedName
+                        ObjectClass = $action.ObjectClass
+                        AccountType = $action.AccountType
+                        Action = 'DisableAccount'
+                        Before = $action.Preconditions.PSObject.Copy()
+                        After = $after
+                        Status = 'Succeeded'
+                        Undo = $null
+                    }
+                    switch ($case) {
+                        'DifferentBefore' {
+                            $entry.Before.DistinguishedName = 'CN=Different Fixture,DC=example,DC=invalid'
+                        }
+                        'DifferentAfter' {
+                            $entry.After.DistinguishedName = 'CN=Different Fixture,DC=example,DC=invalid'
+                        }
+                        'Missing' {
+                            $entry.PSObject.Properties.Remove('DistinguishedName')
+                        }
+                        'Blank' {
+                            $entry.DistinguishedName = ' '
+                        }
+                        'NonString' {
+                            $entry.DistinguishedName = @($script:Current.DistinguishedName)
+                        }
+                        'CaseOnly' {
+                            $entry.DistinguishedName = $entry.DistinguishedName.ToLowerInvariant()
+                        }
+                    }
+                    $entries = @($entry)
+                    if ($case -eq 'LaterMismatch') {
+                        $later = $entry.PSObject.Copy()
+                        $later.EntryId = '44444444-4444-4444-8444-444444444445'
+                        $later.DistinguishedName = 'CN=Different Fixture,DC=example,DC=invalid'
+                        $entries += $later
+                    }
+                    $journal = [pscustomobject]@{
+                        SchemaVersion = 1
+                        JournalType = 'ADAnalyzerRemediationJournal'
+                        JournalId = '55555555-5555-4555-8555-555555555555'
+                        PlanId = $plan.PlanId
+                        Server = $server
+                        Remediation = $plan.Remediation
+                        Entries = $entries
+                    }
+                    $json = ConvertTo-Json -InputObject $journal -Depth 30 -Compress
+                    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+                    [IO.File]::WriteAllBytes($script:Journal, $bytes)
+                    $parameters = @{
+                        Server = $server
+                        JournalPath = $script:Journal
+                    }
+                    if ($case -eq 'CaseOnly') {
+                        Assert-True ($entry.DistinguishedName -cne $entry.Before.DistinguishedName)
+                        $native = @(Undo-ADAnalyzerRemediation @parameters -WhatIf)
+                        $direct = @($executor.PreviewUndo($script:Journal, $server))
+                        Assert-Equal 1 $native.Count
+                        Assert-Equal 1 $direct.Count
+                        foreach ($row in @($native + $direct)) {
+                            Assert-Equal $entry.EntryId $row.EntryId
+                            Assert-Equal $entry.ObjectGuid $row.ObjectGuid
+                            Assert-Equal 'Skipped' $row.Status
+                        }
+                    }
+                    else {
+                        Assert-ConsentTargetRejection { Undo-ADAnalyzerRemediation @parameters -WhatIf }
+                        Assert-ConsentTargetRejection { Undo-ADAnalyzerRemediation @parameters -Confirm:$false }
+                        Assert-ConsentTargetRejection { $executor.PreviewUndo($script:Journal, $server) }
+                        Assert-ConsentTargetRejection {
+                            $executor.Undo($script:Journal, $server, @($entries.EntryId))
+                        }
+                    }
+                    Assert-Equal ([Convert]::ToBase64String($bytes)) (
+                        [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:Journal))
+                    )
+                    Assert-Equal $false ([IO.File]::Exists($script:Journal + '.lock'))
+                }
+            }
+        }
+    }
     Invoke-Test 'plan execution WhatIf performs no query mutation or journal write' {
         $null = Invoke-ADAnalyzerRemediationPlan -Plan (New-FixturePlan) -Server dc.example.invalid -JournalPath $script:Journal -WhatIf
         Assert-Equal 0 $script:Reads
@@ -2217,7 +2459,8 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
             [string]$Field,
             [string]$ChangedValue,
             [string]$ExpectedMessage,
-            [switch]$JournalField
+            [switch]$JournalField,
+            [switch]$AfterField
         ) {
             Reset-Fixture
             $plan = New-FixturePlan
@@ -2252,7 +2495,10 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
             $originalBytes = [IO.File]::ReadAllBytes($script:Journal)
             $edited = [IO.File]::ReadAllText($script:Journal) | ConvertFrom-Json
             $subject = $edited
-            if (-not $JournalField) {
+            if ($AfterField) {
+                $subject = $edited.Entries[0].After
+            }
+            elseif (-not $JournalField) {
                 $subject = $edited.Entries[0]
             }
             $property = $subject.PSObject.Properties[$Field]
@@ -2349,6 +2595,13 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
                 Assert-UndoReviewBinding $item.Key $item.Value 'Journal entry identity changed after undo review'
             }
             Assert-UndoReviewBinding 'Status' 'Undone' ''
+            $nestedBinding = @{
+                Field = 'DistinguishedName'
+                ChangedValue = 'CN=Changed Fixture,DC=offline,DC=invalid'
+                ExpectedMessage = 'Remediation target distinguished name is missing or differs from the verified identity.'
+                AfterField = $true
+            }
+            Assert-UndoReviewBinding @nestedBinding
         }
     }
     Invoke-Test 'undo rejects concurrent state changes and new privileged membership' {

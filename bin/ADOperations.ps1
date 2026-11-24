@@ -3413,6 +3413,55 @@ class ADAnalyzerRemediationGuard {
         return $Expected -ieq $Actual
     }
 
+    hidden [object] ReadConsentField([object]$Record, [string]$Field) {
+        if ($Record -is [Collections.IDictionary]) {
+            return $Record[$Field]
+        }
+        if ($null -ne $Record) {
+            $property = $Record.PSObject.Properties[$Field]
+            if ($property -is [Management.Automation.PSNoteProperty]) {
+                return $property.Value
+            }
+            if ($null -ne $property) {
+                throw 'Remediation target distinguished name is missing or differs from the verified identity.'
+            }
+        }
+        return $null
+    }
+
+    hidden [void] AssertConsentTarget([object]$Displayed, [object]$Recorded) {
+        if ($Displayed -isnot [string] -or [string]::IsNullOrWhiteSpace($Displayed) -or
+            $Recorded -isnot [string] -or [string]::IsNullOrWhiteSpace($Recorded) -or
+            -not $this.IdentityMatches($Displayed, $Recorded)) {
+            throw 'Remediation target distinguished name is missing or differs from the verified identity.'
+        }
+    }
+
+    hidden [void] AssertApplyConsentTargets([object]$Plan) {
+        $actions = $this.ReadConsentField($Plan, 'Actions')
+        foreach ($action in @($actions)) {
+            if ($null -ne $action) {
+                $preconditions = $this.ReadConsentField($action, 'Preconditions')
+                $null = $this.GetApplyConsentTarget($action, $preconditions)
+            }
+        }
+    }
+
+    hidden [string] GetApplyConsentTarget([object]$Action, [object]$Preconditions) {
+        $target = $this.ReadConsentField($Action, 'DistinguishedName')
+        $this.AssertConsentTarget($target, $this.ReadConsentField($Preconditions, 'DistinguishedName'))
+        return $target
+    }
+
+    hidden [string] GetUndoConsentTarget([object]$Entry) {
+        $target = $this.ReadConsentField($Entry, 'DistinguishedName')
+        $before = $this.ReadConsentField($Entry, 'Before')
+        $after = $this.ReadConsentField($Entry, 'After')
+        $this.AssertConsentTarget($target, $this.ReadConsentField($before, 'DistinguishedName'))
+        $this.AssertConsentTarget($target, $this.ReadConsentField($after, 'DistinguishedName'))
+        return $target
+    }
+
     hidden [bool] IsReviewPlanType([object]$Type) {
         return -not ($Type -ne 'ADAnalyzerRemediationPlan')
     }
@@ -4780,9 +4829,11 @@ class ADAnalyzerRemediationExecutor {
     [object[]] PreviewUndo([string]$JournalPath, [string]$Server) {
         $ErrorActionPreference = 'Stop'
         $target = $this.ReadUndoTarget($JournalPath, $Server, [pscredential]::Empty)
+        $guard = [ADAnalyzerRemediationGuard]::new()
         $rows = [Collections.Generic.List[object]]::new()
         foreach ($entry in @($target.Journal.Entries)) {
             if ($this.IsReviewedUndoEntry($entry)) {
+                $null = $guard.GetUndoConsentTarget($entry)
                 $rows.Add($this.SkippedUndo($entry.EntryId, $entry.ObjectGuid))
             }
         }
@@ -4820,6 +4871,7 @@ class ADAnalyzerRemediationExecutor {
                     $rows.Add($this.SkippedUndo($candidate.EntryId, $candidate.ObjectGuid))
                     continue
                 }
+                $reviewedTarget = $guard.GetUndoConsentTarget($candidate)
 
                 if ($null -eq $journal) {
                     $journal = $owner.OpenExisting(
@@ -4844,6 +4896,7 @@ class ADAnalyzerRemediationExecutor {
                         throw 'Journal entry identity changed after undo review'
                     }
                 }
+                $guard.AssertConsentTarget($reviewedTarget, $guard.GetUndoConsentTarget($entry))
                 $reservation = $null
                 $admitting = $false
                 try {
@@ -4866,6 +4919,7 @@ class ADAnalyzerRemediationExecutor {
                     }
                     $current = Get-ADAnalyzerOperationCurrentObject $account $connection $plan $commands.Read
                     $state = $guard.AssertPreconditions($entry.After, $current, $false)
+                    $guard.AssertConsentTarget($reviewedTarget, $state.DistinguishedName)
                     $guard.AssertPrivilege($current, $entry, $plan, $Server, $Credential)
                     $this.PrepareUndoEntry($entry, $state)
                     $owner.WriteExisting($journal)
@@ -4965,6 +5019,7 @@ class ADAnalyzerRemediationExecutor {
         }
         $reviewed = $this.IndexUndoEntries($Journal)
         $approved = @{}
+        $guard = [ADAnalyzerRemediationGuard]::new()
         foreach ($value in $Requested) {
             $id = $this.UndoEntryId($value)
             if (-not $id -or -not $reviewed.ContainsKey($id)) {
@@ -4980,6 +5035,7 @@ class ADAnalyzerRemediationExecutor {
             if ($approved.ContainsKey($id)) {
                 throw 'Approved undo entry IDs must be unique'
             }
+            $null = $guard.GetUndoConsentTarget($entry)
             $approved[$id] = $true
         }
         return $approved
@@ -5231,9 +5287,12 @@ class ADAnalyzerRemediationExecutor {
     ) {
         $reader = [ADAnalyzerOperationDocumentReader]::new()
         $projector = [ADAnalyzerEvidenceProjector]::new()
-        $planObject = $projector.Project($reader.Read($Plan, 'Plan'))
         $guard = [ADAnalyzerRemediationGuard]::new()
+        $reviewedPlan = $reader.Read($Plan, 'Plan')
+        $guard.AssertApplyConsentTargets($reviewedPlan)
+        $planObject = $projector.Project($reviewedPlan)
         $guard.AssertPlan($planObject)
+        $guard.AssertApplyConsentTargets($planObject)
         $path = Resolve-ADAnalyzerOperationFilePath $JournalPath
         $connection = Get-ADAnalyzerOperationConnection $Server $Credential
         $context = Get-ADAnalyzerOperationValue $planObject @('Context')
@@ -5381,10 +5440,12 @@ function Invoke-ADAnalyzerRemediationPlan {
     $JournalPath = Resolve-ADAnalyzerOperationFilePath $JournalPath
     $connection = Get-ADAnalyzerOperationConnection $Server $Credential
     $executor = [ADAnalyzerRemediationExecutor]::new()
+    $guard = [ADAnalyzerRemediationGuard]::new()
     $reviewedServer = [string](Get-ADAnalyzerOperationValue (Get-ADAnalyzerOperationValue $planObject @('Context')) @('Server'))
     if (-not $executor.IsReviewedServer($reviewedServer, $Server)) {
         throw 'Server differs from the DC recorded in the reviewed assessment'
     }
+    $guard.AssertApplyConsentTargets($planObject)
     $journal = $null
     $lease = $null
     try {
@@ -5393,7 +5454,9 @@ function Invoke-ADAnalyzerRemediationPlan {
                 continue
             }
             $objectGuid = $action.ObjectGuid
-            $distinguishedName = $action.DistinguishedName
+            $account = [guid]$objectGuid
+            $preconditions = $guard.ReadConsentField($action, 'Preconditions')
+            $distinguishedName = $guard.GetApplyConsentTarget($action, $preconditions)
             if (-not $PSCmdlet.ShouldProcess($distinguishedName, 'Disable account from explicit reviewed plan')) {
                 $skipped = @{
                     ActionId = $action.ActionId
@@ -5402,6 +5465,7 @@ function Invoke-ADAnalyzerRemediationPlan {
                 $executor.SkippedAction($skipped.ActionId, $skipped.ObjectGuid)
                 continue
             }
+            $guard.AssertConsentTarget($distinguishedName, $guard.ReadConsentField($preconditions, 'DistinguishedName'))
             if ($null -eq $journal) {
                 $lease = Enter-ADAnalyzerJournalLease $JournalPath
                 $journal = Get-ADAnalyzerOperationJournal $planObject $Server $JournalPath
@@ -5422,12 +5486,12 @@ function Invoke-ADAnalyzerRemediationPlan {
                 InactivityDays = $action.InactivityDays
             }
             $entry = $executor.BuildEntry($header, $fields)
-            $account = [guid]$objectGuid
             $reservation = $executor.ReserveAccount($account, $false)
             $added = $false
             try {
                 $current = Get-ADAnalyzerOperationCurrentObject $account $connection $planObject
-                $entry.Before = Assert-ADAnalyzerOperationPreconditions $action.Preconditions $current $true
+                $entry.Before = Assert-ADAnalyzerOperationPreconditions $preconditions $current $true
+                $guard.AssertConsentTarget($distinguishedName, $entry.Before.DistinguishedName)
                 Assert-ADAnalyzerOperationPrivilege $current $action $planObject $connection
                 Assert-ADAnalyzerOperationInactivity $current $action
                 $executor.PrepareEntry($journal, $entry)
@@ -5483,12 +5547,19 @@ function Undo-ADAnalyzerRemediation {
     }
     $connection = Get-ADAnalyzerOperationConnection $Server $Credential
     $executor = [ADAnalyzerRemediationExecutor]::new()
+    $guard = [ADAnalyzerRemediationGuard]::new()
+    $reviewedEntries = @($journal.Entries | Where-Object {
+            $executor.IsUndoAction($_.Action) -and $executor.IsUndoStatus($_.Status)
+        })
+    foreach ($candidate in $reviewedEntries) {
+        $null = $guard.GetUndoConsentTarget($candidate)
+    }
+
     $lease = $null
     try {
-        foreach ($candidate in @($journal.Entries | Where-Object {
-                    $executor.IsUndoAction($_.Action) -and $executor.IsUndoStatus($_.Status)
-                })) {
-            if (-not $PSCmdlet.ShouldProcess($candidate.DistinguishedName, 'Undo a journaled account disable')) {
+        foreach ($candidate in $reviewedEntries) {
+            $distinguishedName = $guard.GetUndoConsentTarget($candidate)
+            if (-not $PSCmdlet.ShouldProcess($distinguishedName, 'Undo a journaled account disable')) {
                 $executor.SkippedUndo($candidate.EntryId, $candidate.ObjectGuid)
                 continue
             }
@@ -5525,6 +5596,7 @@ function Undo-ADAnalyzerRemediation {
                     throw 'Journal entry identity changed after undo review'
                 }
             }
+            $guard.AssertConsentTarget($distinguishedName, $guard.GetUndoConsentTarget($entry))
             $reservation = $null
             $admitting = $false
             try {
@@ -5543,6 +5615,7 @@ function Undo-ADAnalyzerRemediation {
                 $admitting = $false
                 $current = Get-ADAnalyzerOperationCurrentObject $account $connection $plan
                 $state = Assert-ADAnalyzerOperationPreconditions $entry.After $current $false
+                $guard.AssertConsentTarget($distinguishedName, $state.DistinguishedName)
                 Assert-ADAnalyzerOperationPrivilege $current $entry $plan $connection
                 $executor.PrepareUndoEntry($entry, $state)
                 Save-ADAnalyzerOperationJournal $journal $JournalPath
