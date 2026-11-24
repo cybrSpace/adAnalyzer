@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Native', 'Construction', 'Direct', 'Isolation', 'Composition')]
+    [ValidateSet('Native', 'Construction', 'Direct', 'Isolation', 'Composition', 'HostRegistryCoverage', 'HostRegistryReturnCodes')]
     [string]$Case,
     [Parameter(Mandatory)][string]$RepositoryRoot
 )
@@ -1450,6 +1450,7 @@ function Install-AssessmentCompositionMocks([string]$RepositoryRoot) {
     $script:CompositionDomainDn = 'DC=assessment,DC=fixture,DC=invalid'
     $script:CompositionRequestedServer = 'alias.' + $script:CompositionDomain
     $script:CompositionPinnedServer = 'dc.' + $script:CompositionDomain
+    $script:CompositionHealthyHost = 'healthy.' + $script:CompositionDomain
     $script:CompositionSearchBase = 'OU=People,' + $script:CompositionDomainDn
     $script:CompositionCredential = [pscredential]::new('fixture\composition', [Security.SecureString]::new())
     $script:CompositionGpoIds = @(
@@ -1591,10 +1592,17 @@ Invoke-CompositionProvider 'COMPOSITION_COMMAND' $PSBoundParameters
         [CmdletBinding()]
         param([string]$ComputerName, [pscredential]$Credential, [uint32]$OperationTimeoutSec)
 
-        Assert-Fixture ($ComputerName -ceq $script:CompositionPinnedServer -and
+        $isExpectedHost = $ComputerName -ceq $script:CompositionPinnedServer -or
+            ($script:CompositionPairedHosts -and $ComputerName -ceq $script:CompositionHealthyHost)
+        Assert-Fixture ($isExpectedHost -and
             $OperationTimeoutSec -eq 17 -and $PSBoundParameters['ErrorAction'] -eq 'Stop' -and
             [object]::ReferenceEquals($Credential, $script:CompositionCredential) -and $null -eq $script:CompositionSession) 'Host collection changed credential, target, timeout or session ownership.'
-        Add-CompositionEvent CimOpen
+        if ($script:CompositionPairedHosts) {
+            Add-CompositionEvent CimOpen $ComputerName
+        }
+        else {
+            Add-CompositionEvent CimOpen
+        }
         $script:CompositionSession = [pscustomobject]@{ ComputerName = $ComputerName }
         $script:CompositionSession
     }
@@ -1622,6 +1630,49 @@ Invoke-CompositionProvider 'COMPOSITION_COMMAND' $PSBoundParameters
             $Arguments.hDefKey -eq [uint32]2147483650 -and
             $PSBoundParameters['ErrorAction'] -eq 'Stop') 'Registry observation changed its bound session or request.'
         Add-CompositionEvent CimRegistry $MethodName
+        if ($script:CompositionRegistryReturnCase -and
+            $Arguments.sSubKeyName -ceq 'SYSTEM\CurrentControlSet\Services\W32Time\Parameters') {
+            Assert-Fixture ($MethodName -ceq 'GetStringValue') 'Synthetic returned registry results require the intended getter.'
+            if ($Arguments.sValueName -ceq 'NtpServer' -and $CimSession.ComputerName -ceq $script:CompositionPinnedServer) {
+                Add-CompositionEvent CimRegistryResponse $script:CompositionRegistryReturnCase
+                return New-CompositionRegistryResponse $script:CompositionRegistryReturnCase
+            }
+            if ($Arguments.sValueName -ceq 'Type') {
+                Add-CompositionEvent CimRegistryReachedType $CimSession.ComputerName
+                return [pscustomobject]@{
+                    ReturnValue = [uint32]0
+                    sValue = 'NTP'
+                }
+            }
+        }
+        if ($script:CompositionRegistryDenied -and
+            $Arguments.sSubKeyName -ceq 'SYSTEM\CurrentControlSet\Services\W32Time\Parameters') {
+            if ($Arguments.sValueName -ceq 'NtpServer' -and $CimSession.ComputerName -ceq $script:CompositionPinnedServer) {
+                Assert-Fixture ($MethodName -ceq 'GetStringValue') 'The denial did not bind to the planned registry method.'
+                Add-CompositionEvent CimRegistryDenied $Arguments.sValueName
+                throw [UnauthorizedAccessException]::new('Fixture composed registry read denied.')
+            }
+            if ($Arguments.sValueName -ceq 'Type') {
+                return [pscustomobject]@{
+                    ReturnValue = 0
+                    sValue = 'NTP'
+                }
+            }
+        }
+        if ($script:CompositionRegistryTimeout -and $Arguments.sSubKeyName -ceq 'SYSTEM\CurrentControlSet\Services\W32Time\Parameters') {
+            if ($Arguments.sValueName -ceq 'NtpServer') {
+                Assert-Fixture ($MethodName -ceq 'GetStringValue') 'The timeout substitute did not bind to the expected registry method.'
+                Add-CompositionEvent CimRegistryTimeout $Arguments.sValueName
+                throw [TimeoutException]::new('Fixture composed CIM operation timeout.')
+            }
+            if ($Arguments.sValueName -ceq 'Type') {
+                Add-CompositionEvent CimRegistryContinued $Arguments.sValueName
+                return [pscustomobject]@{
+                    ReturnValue = 0
+                    sValue = 'NTP'
+                }
+            }
+        }
         [pscustomobject]@{ ReturnValue = 2 }
     }
 
@@ -1631,8 +1682,16 @@ Invoke-CompositionProvider 'COMPOSITION_COMMAND' $PSBoundParameters
 
         Assert-Fixture ([object]::ReferenceEquals($CimSession, $script:CompositionSession) -and
             $PSBoundParameters['ErrorAction'] -eq 'SilentlyContinue') 'CIM cleanup used the wrong session or preference.'
-        Add-CompositionEvent CimClose
+        if ($script:CompositionPairedHosts) {
+            Add-CompositionEvent CimClose $CimSession.ComputerName
+        }
+        else {
+            Add-CompositionEvent CimClose
+        }
         $script:CompositionSession = $null
+        if ($script:CompositionCimCleanupError) {
+            Write-Error -Message 'Fixture composed CIM cleanup diagnostic.' -ErrorId 'Fixture.AssessmentHostCleanup'
+        }
     }
 
     function script:Get-ADAnalyzerAuditPolicy {
@@ -1698,6 +1757,9 @@ function Invoke-CompositionProvider([string]$Command, [Collections.IDictionary]$
         }
         'Get-ADDomainController' {
             [pscustomobject]@{ HostName = $script:CompositionPinnedServer }
+            if ($script:CompositionPairedHosts) {
+                [pscustomobject]@{ HostName = $script:CompositionHealthyHost }
+            }
         }
         'Get-ADObject' {
             if ($Bound['LDAPFilter'] -ceq '(objectClass=groupPolicyContainer)') {
@@ -1724,18 +1786,330 @@ function Invoke-CompositionProvider([string]$Command, [Collections.IDictionary]$
     }
 }
 
-function Invoke-AssessmentCompositionFixture(
-    [string]$Transport,
-    [object]$Collector,
-    [switch]$FailEvaluation,
-    [switch]$SkipGpo,
-    [switch]$DisableGpoInProfile
+function Assert-CompositionRegistryTimeout([object]$Assessment) {
+    $directory = $Assessment.Data.Directory
+    $hostRow = $directory.Hosts[0]
+    $observations = @($Assessment.Checks | Where-Object RuleId -CEQ 'HOST.OBSERVATIONS')
+    $service = @($Assessment.Checks | Where-Object RuleId -CEQ 'HOST.SERVICE')
+    $timedRegistry = @($hostRow.Registry | Where-Object Name -CEQ 'NtpServer')
+    $laterRegistry = @($hostRow.Registry | Where-Object Name -CEQ 'Type')
+    Assert-Fixture (
+        $observations.Count -eq 1 -and $observations[0].Target -ceq $script:CompositionPinnedServer -and
+        $observations[0].Status -ceq 'Unknown' -and $service.Count -eq 1 -and $service[0].Status -ceq 'Pass' -and
+        $timedRegistry.Count -eq 1 -and $timedRegistry[0].Status -ceq 'Unknown' -and $null -eq $timedRegistry[0].Value -and
+        $timedRegistry[0].Message -ceq 'Fixture composed CIM operation timeout.' -and
+        $laterRegistry.Count -eq 1 -and $laterRegistry[0].Status -ceq 'Observed' -and $laterRegistry[0].Value -ceq 'NTP'
+    ) 'Assessment lost valid service or registry evidence after the registry timeout.'
+    $trace = $script:CompositionTrace.ToArray()
+    $timeoutStep = [array]::IndexOf($trace, 'CimRegistryTimeout|NtpServer')
+    $continuationStep = [array]::IndexOf($trace, 'CimRegistryContinued|Type')
+    $cleanupStep = [array]::IndexOf($trace, 'CimClose|')
+    $finalStages = @($trace | Select-Object -Last 4)
+    Assert-Fixture (
+        $timeoutStep -gt 0 -and $trace[$timeoutStep - 1] -ceq 'CimRegistry|GetStringValue' -and
+        $continuationStep -gt $timeoutStep -and $cleanupStep -gt $continuationStep -and
+        ($finalStages -join ',') -ceq 'CimClose|,DirectoryRestore|,DirectoryRemove|,Audit|' -and
+        @($trace | Where-Object { $_ -clike 'CimRegistryTimeout|*' }).Count -eq 1 -and
+        $script:CompositionImports -eq 2 -and $script:CompositionForeignCalls -eq 0 -and
+        $script:CompositionOwned.Count -eq 0 -and $null -eq $script:CompositionSession -and
+        (Microsoft.PowerShell.Management\Get-Location).Path -ceq $script:CompositionCallerPath
+    ) 'The timed registry attempt, later observation, cleanup or assessment order changed.'
+
+    Assert-Fixture (
+        $directory.Coverage.Hosts -ceq 'Partial' -and $hostRow.Status -ceq 'Partial'
+    ) 'The recognized registry timeout did not mark composed host coverage Partial.'
+    $hostTiming = $hostRow.CollectionTiming
+    $checkTiming = $observations[0].Observed.CollectionTiming
+    Assert-Fixture (
+        $hostTiming.OperationTimeoutSeconds -eq 17 -and $hostTiming.LocalCleanup -ceq 'Completed' -and
+        $hostTiming.RemoteSettlement -ceq 'Unknown' -and $hostTiming.TimedOutOperations -is [array] -and
+        $hostTiming.TimedOutOperations.Count -eq 1 -and $hostTiming.TimedOutOperations[0].Phase -ceq 'Registry' -and
+        $hostTiming.TimedOutOperations[0].Operation -ceq 'GetStringValue' -and
+        $hostTiming.TimedOutOperations[0].Elapsed -is [long] -and
+        $hostTiming.TimedOutOperations[0].Elapsed -ge 0 -and
+        -not [object]::ReferenceEquals($hostTiming, $checkTiming)
+    ) 'The composed timing or its local/remote outcomes are missing or aliased.'
+
+    $report = [ADAnalyzerAssessmentReport]::new().Render($Assessment, 'Json') | ConvertFrom-Json
+    $reportObservation = @($report.Checks | Where-Object RuleId -CEQ 'HOST.OBSERVATIONS')[0].Observed
+    $reportTiming = $report.Data.Directory.Hosts[0].CollectionTiming
+    $expected = ConvertTo-Json -InputObject $hostTiming -Depth 10 -Compress
+    Assert-Fixture (
+        $report.Data.Directory.Coverage.Hosts -ceq 'Partial' -and
+        (ConvertTo-Json -InputObject $checkTiming -Depth 10 -Compress) -ceq $expected -and
+        (ConvertTo-Json -InputObject $reportTiming -Depth 10 -Compress) -ceq $expected -and
+        (ConvertTo-Json -InputObject $reportObservation.CollectionTiming -Depth 10 -Compress) -ceq $expected
+    ) 'The assessment observations or rendered JSON lost the composed coverage and timing.'
+}
+
+function Assert-CompositionFailedRegistryCoverage([object]$Assessment, [object]$Report) {
+    $directory = $Assessment.Data.Directory
+    $failedHost, $healthyHost = $directory.Hosts
+    Assert-Fixture (
+        $failedHost.ComputerName -ceq $script:CompositionPinnedServer -and
+        $healthyHost.ComputerName -ceq $script:CompositionHealthyHost -and
+        $failedHost.Status -ceq 'Observed' -and $healthyHost.Status -ceq 'Observed' -and
+        $null -eq $failedHost.PSObject.Properties['CollectionTiming'] -and
+        $null -eq $healthyHost.PSObject.Properties['CollectionTiming']
+    ) 'Registry failure changed the established host records or was misclassified as timeout.'
+
+    $failed = @($failedHost.Registry | Where-Object Name -CEQ 'NtpServer')
+    $knownAbsence = @($healthyHost.Registry | Where-Object Name -CEQ 'NtpServer')
+    $available = @(
+        foreach ($hostRow in $directory.Hosts) {
+            $hostRow.Registry | Where-Object Name -CEQ 'Type'
+        }
+    )
+    Assert-Fixture (
+        $failed.Count -eq 1 -and $failed[0].Status -ceq 'Unknown' -and
+        $null -eq $failed[0].Value -and $failed[0].Message -ceq 'Fixture composed registry read denied.' -and
+        $knownAbsence.Count -eq 1 -and $knownAbsence[0].Status -ceq 'Unknown' -and
+        $knownAbsence[0].ReturnValue -eq 2 -and $null -eq $knownAbsence[0].PSObject.Properties['Message'] -and
+        $available.Count -eq 2 -and ($available.Status -join ',') -ceq 'Observed,Observed' -and
+        ($available.Value -join ',') -ceq 'NTP,NTP'
+    ) 'Composition lost the denied row, ordinary missing override, or valid sibling values.'
+
+    $services = @($Assessment.Checks | Where-Object RuleId -CEQ 'HOST.SERVICE')
+    $diagnostics = @($Assessment.Errors | Where-Object {
+            $collector = $_.PSObject.Properties['Collector']
+            $null -ne $collector -and $collector.Value -clike 'Host*'
+        })
+    Assert-Fixture (
+        $services.Count -eq 2 -and ($services.Status -join ',') -ceq 'Pass,Pass' -and
+        $services[0].Target -ceq ($script:CompositionPinnedServer + '/Service/W32Time') -and
+        $services[1].Target -ceq ($script:CompositionHealthyHost + '/Service/W32Time') -and
+        $diagnostics.Count -eq 0
+    ) 'Registry failure changed healthy service results or escaped its existing diagnostic boundary.'
+
+    $trace = $script:CompositionTrace.ToArray()
+    $fault = [array]::IndexOf($trace, 'CimRegistryDenied|NtpServer')
+    $close = [array]::IndexOf($trace, ('CimClose|' + $script:CompositionPinnedServer))
+    $healthy = [array]::IndexOf($trace, ('CimOpen|' + $script:CompositionHealthyHost))
+    Assert-Fixture (
+        $fault -gt 0 -and $trace[$fault - 1] -ceq 'CimRegistry|GetStringValue' -and
+        $close -gt $fault -and $healthy -gt $close -and
+        @($trace | Where-Object { $_ -ceq 'CimRegistryDenied|NtpServer' }).Count -eq 1 -and
+        @($trace | Where-Object { $_ -clike 'CimOpen|*' }).Count -eq 2 -and
+        @($trace | Where-Object { $_ -clike 'CimClose|*' }).Count -eq 2 -and
+        @($trace | Where-Object { $_ -match '^(AD3/|Sysvol|Audit)' }).Count -eq 0 -and
+        $script:CompositionImports -eq 2 -and $script:CompositionForeignCalls -eq 0 -and
+        $script:CompositionOwned.Count -eq 0 -and $null -eq $script:CompositionSession -and
+        (Microsoft.PowerShell.Management\Get-Location).Path -ceq $script:CompositionCallerPath
+    ) 'Failure handling repeated work, missed a healthy host, changed cleanup, or escaped the fixture.'
+
+    foreach ($result in $Assessment, $Report) {
+        $coverage = $result.Data.Directory.Coverage.Hosts
+        $checks = @($result.Checks | Where-Object RuleId -CEQ 'COLLECTION.HOSTS')
+        Assert-Fixture ($coverage -ceq 'Partial' -and $checks.Count -eq 1) (
+            'Expected aggregate Hosts=Partial and one COLLECTION.HOSTS check. Observed Hosts={0} and {1} check(s).' -f
+                $coverage, $checks.Count
+        )
+        Assert-Fixture (
+            $checks[0].Status -ceq 'Unknown' -and $checks[0].Observed -ceq 'Partial' -and
+            $checks[0].Expected -ceq 'Collected'
+        ) 'Coverage check did not retain the explicit partial observation.'
+    }
+}
+
+function New-CompositionRegistryResponse([string]$Scenario) {
+    $result = [ordered]@{
+        sValue = 'fixture provider value'
+    }
+    switch ($Scenario) {
+        'Success' {
+            $result.ReturnValue = [uint32]0
+        }
+        'Absent' {
+            $result.ReturnValue = [uint32]2
+        }
+        'AccessDenied' {
+            $result.ReturnValue = [uint32]5
+        }
+        'UnexpectedFailure' {
+            $result.ReturnValue = [uint32]87
+        }
+        'NullCode' {
+            $result.ReturnValue = $null
+        }
+        'TextZero' {
+            $result.ReturnValue = '0'
+        }
+        'SingletonZero' {
+            $result.ReturnValue = [uint32[]]@(0)
+        }
+    }
+    return [pscustomobject]$result
+}
+
+function Assert-CompositionRegistryReturnRows(
+    [object[]]$Hosts,
+    [string]$Scenario,
+    [string]$Label,
+    [switch]$FromJson
 ) {
+    Assert-Fixture (
+        $Hosts.Count -eq 2 -and
+        $Hosts[0].ComputerName -ceq $script:CompositionPinnedServer -and
+        $Hosts[1].ComputerName -ceq $script:CompositionHealthyHost -and
+        $Hosts[0].Status -ceq 'Observed' -and $Hosts[1].Status -ceq 'Observed' -and
+        $null -eq $Hosts[0].PSObject.Properties['CollectionTiming'] -and
+        $null -eq $Hosts[1].PSObject.Properties['CollectionTiming']
+    ) "$Label changed the host records or classified a returned registry result as a timeout."
+
+    $primary = @($Hosts[0].Registry | Where-Object Name -CEQ 'NtpServer')
+    $absent = @($Hosts[1].Registry | Where-Object Name -CEQ 'NtpServer')
+    $later = @(
+        foreach ($hostRow in $Hosts) {
+            $hostRow.Registry | Where-Object Name -CEQ 'Type'
+        }
+    )
+    Assert-Fixture ($primary.Count -eq 1 -and $absent.Count -eq 1 -and $later.Count -eq 2) "$Label lost a planned read."
+    Assert-Fixture (
+        $absent[0].Status -ceq 'Unknown' -and $absent[0].ReturnValue -eq 2 -and
+        $null -eq $absent[0].Value -and $null -eq $absent[0].PSObject.Properties['Message'] -and
+        ($later.Status -join ',') -ceq 'Observed,Observed' -and ($later.Value -join ',') -ceq 'NTP,NTP'
+    ) "$Label changed known absence or a later registry result."
+
+    $expected = if ($Scenario -ceq 'Success') {
+        'Observed'
+    }
+    else {
+        'Unknown'
+    }
+    Assert-Fixture ($primary[0].Status -ceq $expected) (
+        '{0} expected registry status {1}, got {2}.' -f $Label, $expected, $primary[0].Status
+    )
+    $expectedValue = if ($Scenario -ceq 'Success') {
+        'fixture provider value'
+    }
+    Assert-Fixture (
+        $primary[0].Value -ceq $expectedValue -and
+        ($null -ne $expectedValue -or $null -eq $primary[0].Value)
+    ) "$Label accepted a value from an unsuccessful or malformed response."
+
+    $typedCases = @{
+        Success = 0
+        Absent = 2
+        AccessDenied = 5
+        UnexpectedFailure = 87
+    }
+    if ($typedCases.ContainsKey($Scenario)) {
+        Assert-Fixture (
+            ($FromJson -or $primary[0].ReturnValue -is [uint32]) -and
+            $primary[0].ReturnValue -eq $typedCases[$Scenario]
+        ) "$Label changed the well-formed provider return code."
+    }
+}
+
+function Assert-CompositionRegistryReturnTrace([string]$Scenario, [string]$Label) {
+    $trace = $script:CompositionTrace.ToArray()
+    $selected = [array]::IndexOf($trace, ('CimRegistryResponse|' + $Scenario))
+    $later = [array]::IndexOf($trace, ('CimRegistryReachedType|' + $script:CompositionPinnedServer))
+    $close = [array]::IndexOf($trace, ('CimClose|' + $script:CompositionPinnedServer))
+    $healthy = [array]::IndexOf($trace, ('CimOpen|' + $script:CompositionHealthyHost))
+    $healthyClose = [array]::IndexOf($trace, ('CimClose|' + $script:CompositionHealthyHost))
+    Assert-Fixture (
+        $selected -gt 0 -and $trace[$selected - 1] -ceq 'CimRegistry|GetStringValue' -and
+        $later -gt $selected -and $close -gt $later -and $healthy -gt $close -and $healthyClose -gt $healthy -and
+        @($trace | Where-Object { $_ -clike 'CimRegistryResponse|*' }).Count -eq 1 -and
+        @($trace | Where-Object { $_ -clike 'CimOpen|*' }).Count -eq 2 -and
+        @($trace | Where-Object { $_ -clike 'CimClose|*' }).Count -eq 2 -and
+        @($trace | Where-Object { $_ -match '^(AD3/|Sysvol|Audit)' }).Count -eq 0 -and
+        $null -eq $script:CompositionSession -and $script:CompositionOwned.Count -eq 0 -and
+        $script:CompositionForeignCalls -eq 0 -and
+        (Microsoft.PowerShell.Management\Get-Location).Path -ceq $script:CompositionCallerPath
+    ) "$Label did not continue registry reads, close owned sessions, or stay within the synthetic fixture."
+}
+
+function Assert-CompositionRegistryReturnCoverage([object]$Assessment, [object]$Report, [string]$Scenario) {
+    Assert-CompositionRegistryReturnTrace $Scenario 'Composed route'
+    Assert-Fixture ($script:CompositionImports -eq 2) 'The composed registry case loaded an unexpected provider.'
+    $services = @($Assessment.Checks | Where-Object RuleId -CEQ 'HOST.SERVICE')
+    Assert-Fixture (
+        $services.Count -eq 2 -and ($services.Status -join ',') -ceq 'Pass,Pass' -and
+        $services[0].Target -ceq ($script:CompositionPinnedServer + '/Service/W32Time') -and
+        $services[1].Target -ceq ($script:CompositionHealthyHost + '/Service/W32Time')
+    ) 'A returned registry result changed the healthy service checks.'
+
+    $computers = @($script:CompositionPinnedServer, $script:CompositionHealthyHost)
+    $profile = @{
+        Host = @{
+            Services = @(
+                @{
+                    Name = 'W32Time'
+                    State = 'Running'
+                }
+            )
+        }
+    }
+    $script:CompositionTrace.Clear()
+    $nativeArguments = @{
+        ComputerNames = $computers
+        Errors = [Collections.Generic.List[object]]::new()
+        Credential = $script:CompositionCredential
+        TimeoutSeconds = 17
+        Profile = $profile
+    }
+    $native = @(Get-ADAnalyzerHostData @nativeArguments)
+    Assert-CompositionRegistryReturnTrace $Scenario 'Host command'
+    $script:CompositionTrace.Clear()
+    $direct = [ADAnalyzerHostCollector]::new().Collect($computers, $script:CompositionCredential, 17, $profile)
+    Assert-CompositionRegistryReturnTrace $Scenario 'Host class'
+    Assert-Fixture (
+        $nativeArguments.Errors.Count -eq 0 -and $direct.Errors.Count -eq 0
+    ) 'A returned registry result escaped its per-value diagnostic boundary.'
+    Assert-CompositionRegistryReturnRows $native $Scenario 'Host command'
+    Assert-CompositionRegistryReturnRows $direct.Hosts $Scenario 'Host class'
+    Assert-CompositionRegistryReturnRows $Assessment.Data.Directory.Hosts $Scenario 'Composed route'
+    Assert-CompositionRegistryReturnRows $Report.Data.Directory.Hosts $Scenario 'Saved JSON' -FromJson
+
+    $expectedCoverage = if ($Scenario -cin 'Success', 'Absent') {
+        'Collected'
+    }
+    else {
+        'Partial'
+    }
+    $expectedCount = [int]($expectedCoverage -ceq 'Partial')
+    foreach ($result in $Assessment, $Report) {
+        $actual = $result.Data.Directory.Coverage.Hosts
+        $checks = @($result.Checks | Where-Object RuleId -CEQ 'COLLECTION.HOSTS')
+        Assert-Fixture ($actual -ceq $expectedCoverage -and $checks.Count -eq $expectedCount) (
+            'Expected aggregate Hosts={0} and {1} COLLECTION.HOSTS check(s), observed Hosts={2} and {3} check(s).' -f
+                $expectedCoverage, $expectedCount, $actual, $checks.Count
+        )
+        if ($expectedCount) {
+            Assert-Fixture (
+                $checks[0].Status -ceq 'Unknown' -and
+                $checks[0].Observed -ceq 'Partial' -and
+                $checks[0].Expected -ceq 'Collected'
+            ) 'Coverage check lost the explicit partial observation.'
+        }
+    }
+}
+
+function Invoke-AssessmentCompositionFixture {
+    param(
+        [string]$Transport,
+        [object]$Collector,
+        [switch]$FailEvaluation,
+        [switch]$CimCleanupError,
+        [switch]$CimRegistryTimeout,
+        [switch]$CimRegistryDenied,
+        [string]$CimRegistryReturnCase,
+        [switch]$SkipGpo,
+        [switch]$DisableGpoInProfile
+    )
+
     $script:CompositionImports = 0
     $script:CompositionTrace.Clear()
     $script:CompositionForeignCalls = 0
     $script:CompositionCallerPath = (Microsoft.PowerShell.Management\Get-Location).Path
     $script:CompositionSession = $null
+    $script:CompositionCimCleanupError = [bool]$CimCleanupError
+    $script:CompositionRegistryTimeout = [bool]$CimRegistryTimeout
+    $script:CompositionRegistryDenied = [bool]$CimRegistryDenied
+    $script:CompositionRegistryReturnCase = $CimRegistryReturnCase
+    $script:CompositionPairedHosts = $CimRegistryDenied -or $CimRegistryReturnCase
     $script:CompositionTemp = [IO.Path]::Combine([IO.Path]::GetTempPath(), ('assessment-composition-' + [guid]::NewGuid().ToString('N')))
     $nativeService = $null
     try {
@@ -1820,8 +2194,11 @@ function Invoke-AssessmentCompositionFixture(
                 }
             }
         }
-        if ($FailEvaluation -or $SkipGpo) {
+        if ($FailEvaluation -or $SkipGpo -or $script:CompositionPairedHosts) {
             $options.SkipGpo = $true
+        }
+        if ($script:CompositionPairedHosts) {
+            $options.Profile.Host.AuditRules = @()
         }
         if ($DisableGpoInProfile) {
             $options.Profile.Analysis.IncludeGpo = $false
@@ -1845,13 +2222,14 @@ function Invoke-AssessmentCompositionFixture(
             return
         }
         $result = $Collector.Collect($options, $script:CompositionCredential)
-        $expectedIncludeGpo = -not ($SkipGpo -or $DisableGpoInProfile)
+        $expectedIncludeGpo = -not ($SkipGpo -or $DisableGpoInProfile -or $script:CompositionPairedHosts)
         $includeGpo = $result.Context.PSObject.Properties['IncludeGpo']
         Assert-Fixture (
             $null -ne $includeGpo -and $includeGpo.Value -is [bool] -and $includeGpo.Value -eq $expectedIncludeGpo
         ) 'The direct result did not record the effective GPO collection selection.'
         $json = [ADAnalyzerAssessmentReport]::new().Render($result, 'JSON')
-        $reported = (ConvertFrom-Json -InputObject $json).Context.IncludeGpo
+        $report = ConvertFrom-Json -InputObject $json
+        $reported = $report.Context.IncludeGpo
         Assert-Fixture (
             $reported -is [bool] -and $reported -eq $expectedIncludeGpo
         ) 'The JSON report did not preserve the GPO collection selection as a Boolean.'
@@ -1869,13 +2247,56 @@ function Invoke-AssessmentCompositionFixture(
         else {
             'Direct'
         }
+        $expectedHostCount = if ($script:CompositionPairedHosts) {
+            2
+        }
+        else {
+            1
+        }
         Assert-Fixture (
             $directory.DirectoryConnection.Mode -ceq $Transport -and
             $directory.DirectoryConnection.Status -ceq $status -and
             $directory.Domain.MachineAccountQuota -eq 0 -and
-            $directory.Coverage.Hosts -ceq 'Collected' -and
-            @($directory.Hosts).Count -eq 1
+            @($directory.Hosts).Count -eq $expectedHostCount
         ) 'Composed directory, host, or transport data changed.'
+        if ($CimRegistryReturnCase) {
+            Assert-CompositionRegistryReturnCoverage $result $report $CimRegistryReturnCase
+            return
+        }
+        if ($CimRegistryDenied) {
+            Assert-CompositionFailedRegistryCoverage $result $report
+            return
+        }
+        if ($CimRegistryTimeout) {
+            Assert-CompositionRegistryTimeout $result
+            Assert-Fixture (
+                @($result.Data.Policies).Count -eq 0 -and
+                @($script:CompositionTrace | Where-Object { $_ -match '^(AD3/|Sysvol)' }).Count -eq 0
+            ) 'The host timeout scenario acquired policies despite SkipGpo.'
+            return
+        }
+        Assert-Fixture (
+            $directory.Coverage.Hosts -ceq 'Collected' -and
+            $null -eq $directory.Hosts[0].PSObject.Properties['CollectionTiming']
+        ) 'Healthy CIM coverage or the host field contract changed.'
+        $isCleanupError = {
+            $collectorField = $_.PSObject.Properties['Collector']
+            $null -ne $collectorField -and $collectorField.Value -ceq 'Host.Cleanup'
+        }
+        $directoryCleanupErrors = @($directory.Errors | Where-Object $isCleanupError)
+        $assessmentCleanupErrors = @($result.Errors | Where-Object $isCleanupError)
+        $expectedCleanupCount = [int]$CimCleanupError.IsPresent
+        Assert-Fixture (
+            $directoryCleanupErrors.Count -eq $expectedCleanupCount -and
+            $assessmentCleanupErrors.Count -eq $expectedCleanupCount
+        ) 'CIM cleanup observations were omitted, duplicated, or retained from a prior assessment.'
+        foreach ($cleanup in ($directoryCleanupErrors + $assessmentCleanupErrors)) {
+            Assert-Fixture (
+                $cleanup.Target -ceq $script:CompositionPinnedServer -and
+                $cleanup.Status -ceq 'Unknown' -and
+                $cleanup.Message -ceq 'Fixture composed CIM cleanup diagnostic.'
+            ) 'Assessment composition changed the CIM cleanup diagnostic.'
+        }
         $services = @($result.Checks | Where-Object RuleId -CEQ 'HOST.SERVICE')
         $audit = @($result.Checks | Where-Object RuleId -CEQ 'HOST.AUDIT_POLICY')
         Assert-Fixture (
@@ -1980,7 +2401,7 @@ function Invoke-AssessmentCompositionFixture(
     }
 }
 
-if ($Case -eq 'Composition') {
+if ($Case -in 'Composition', 'HostRegistryCoverage', 'HostRegistryReturnCodes') {
     Install-AssessmentCompositionMocks $RepositoryRoot
     foreach ($name in @(
             'Get-ADAnalyzerAssessment',
@@ -1995,10 +2416,43 @@ if ($Case -eq 'Composition') {
         }
     }
     $compositionCollector = [ADAnalyzerAssessmentCollector]::new()
+}
+
+if ($Case -eq 'HostRegistryCoverage') {
+    Test-Fixture 'a failed planned non-timeout registry read makes host coverage partial' {
+        Invoke-AssessmentCompositionFixture PSDrive $compositionCollector -CimRegistryDenied
+    }
+}
+
+if ($Case -eq 'HostRegistryReturnCodes') {
+    $failures = [Collections.Generic.List[string]]::new()
+    foreach ($scenario in 'Success', 'Absent', 'AccessDenied', 'UnexpectedFailure', 'NullCode', 'MissingCode', 'TextZero', 'SingletonZero') {
+        try {
+            Test-Fixture ('returned registry response ' + $scenario) {
+                Invoke-AssessmentCompositionFixture Direct $compositionCollector -CimRegistryReturnCase $scenario
+            }
+        }
+        catch {
+            $failures.Add(('{0}: {1}' -f $scenario, $_.Exception.Message))
+        }
+    }
+    if ($failures.Count) {
+        throw ('Returned registry cases passed: {0}. Failures:{1}{2}' -f
+            $script:passed, [Environment]::NewLine, ($failures -join [Environment]::NewLine))
+    }
+}
+
+if ($Case -eq 'Composition') {
     foreach ($transport in 'PSDrive', 'Direct') {
         Test-Fixture ('actual composition with ' + $transport) {
             Invoke-AssessmentCompositionFixture $transport $compositionCollector
         }
+    }
+    Test-Fixture 'actual composition retains recoverable CIM cleanup evidence' {
+        Invoke-AssessmentCompositionFixture Direct $compositionCollector -CimCleanupError
+    }
+    Test-Fixture 'composed assessment and JSON retain incomplete CIM timing' {
+        Invoke-AssessmentCompositionFixture PSDrive $compositionCollector -CimRegistryTimeout -SkipGpo
     }
     Test-Fixture 'actual strict composition retains unreadable and healthy GPOs' {
         Set-StrictMode -Version Latest

@@ -11,6 +11,13 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')
 $script:Reads = 0
 
+function Get-ADAnalyzerRemediationAuthorityDirectory {
+    if ([string]::IsNullOrWhiteSpace($Coordination) -or -not [IO.Directory]::Exists($Coordination)) {
+        throw 'The concurrent fixture has no shared remediation authority.'
+    }
+    return [IO.Path]::GetFullPath($Coordination)
+}
+
 function Wait-FixtureFile([string]$Name) {
     $watch = [Diagnostics.Stopwatch]::StartNew()
     while (-not (Test-Path -LiteralPath (Join-Path $Coordination $Name))) {

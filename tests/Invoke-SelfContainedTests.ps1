@@ -321,5 +321,33 @@ try {
 finally {
     Remove-Item -LiteralPath $temporary -Recurse -Force
 }
+$inspectionCommand = $module.ExportedFunctions['Get-ADAnalyzerRemediationReservation']
+if ($inspectionCommand -isnot [Management.Automation.FunctionInfo]) {
+    throw 'Missing packaged reservation inspection command'
+}
+$inspectionRoot = Join-Path ([IO.Path]::GetTempPath()) ('ad-reservation-bootstrap-' + [guid]::NewGuid().ToString('N'))
+$null = [IO.Directory]::CreateDirectory($inspectionRoot)
+try {
+    & $module {
+        param([string]$InspectionRoot)
+
+        $script:InspectionFixtureRoot = $InspectionRoot
+        function script:Get-ADAnalyzerRemediationAuthorityDirectory {
+            $script:InspectionFixtureRoot
+        }
+    } $inspectionRoot
+    $account = [guid]'20000000-0000-4000-8000-000000000001'
+    $result = & $inspectionCommand -ObjectGuid $account
+    if ($result.ObjectGuid -isnot [guid] -or
+        $result.ObjectGuid -ne $account -or
+        $result.Status -cne 'NotObserved' -or
+        [IO.Directory]::GetFileSystemEntries($inspectionRoot).Length -ne 0) {
+        throw 'Packaged inspection changed the local authority or returned an unexpected observation'
+    }
+}
+finally {
+    [IO.Directory]::Delete($inspectionRoot)
+}
+Write-Host 'PASS packaged reservation inspection observes local state without RSAT'
 Write-Host 'PASS manifest registers bundled AD commands and provider without installed RSAT'
 Write-Host 'PASS package exports its own offline GPO reader without GPMC'

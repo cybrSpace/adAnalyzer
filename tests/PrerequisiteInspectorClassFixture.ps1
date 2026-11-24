@@ -1,9 +1,14 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Native', 'Standalone', 'Direct', 'Isolation', 'Online')]
+    [ValidateSet('Native', 'Standalone', 'Direct', 'Isolation', 'Online', 'RootDse', 'RootDseCli')]
     [string]$Case,
-    [Parameter(Mandatory)][string]$RepositoryRoot
+    [Parameter(Mandatory)][string]$RepositoryRoot,
+
+    [string]$ScratchRoot = [IO.Path]::GetTempPath(),
+
+    [ValidateSet('Success', 'MissingDnsHostName', 'AmbiguousRootDse', 'RootTypedError')]
+    [string]$CliScenario = 'Success'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -324,7 +329,48 @@ function Invoke-InspectorOnlineWitness([string]$Scenario, [string]$Route, [objec
     }
 }
 
-$temporary = Join-Path ([IO.Path]::GetTempPath()) ('prerequisite-class-' + [guid]::NewGuid().ToString('N'))
+function Invoke-InspectorOnlineStream([string]$Scenario, [string]$Action, [object]$Package) {
+    $script:onlineScenario = $Scenario
+    $script:fixtureWindows = $true
+    $script:fixtureRootCause = $null
+    $script:onlineTrace = [Collections.Generic.List[string]]::new()
+    $captured = @()
+    $items = [Collections.Generic.List[object]]::new()
+    $caught = $null
+    $Error.Clear()
+    try {
+        Get-ADAnalyzerPrerequisite -RepositoryRoot (Join-Path '.' $Package.Name) -Server caller.fixture.invalid `
+            -Online -ErrorAction $Action -ErrorVariable +captured 2>&1 |
+            ForEach-Object { $items.Add($_) }
+    }
+    catch {
+        $caught = $_
+    }
+    return [pscustomobject]@{
+        Checks = @($items | Where-Object { $_ -isnot [Management.Automation.ErrorRecord] })
+        ErrorStream = @($items | Where-Object { $_ -is [Management.Automation.ErrorRecord] })
+        Caught = $caught
+        Captured = @($captured)
+        History = @($Error)
+        Cause = $script:fixtureRootCause
+    }
+}
+
+function Get-InspectorErrorRecords([object[]]$Values) {
+    foreach ($value in $Values) {
+        if ($value -is [Management.Automation.ErrorRecord]) {
+            $value
+        }
+        elseif ($value -is [Management.Automation.IContainsErrorRecord]) {
+            $value.ErrorRecord
+        }
+        elseif ($value -is [Collections.IList]) {
+            Get-InspectorErrorRecords @($value)
+        }
+    }
+}
+
+$temporary = Join-Path $ScratchRoot ('prerequisite-class-' + [guid]::NewGuid().ToString('N'))
 $originalLocation = (Get-Location).Path
 $originalDirectory = [Environment]::CurrentDirectory
 $ownedDrive = $null
@@ -541,7 +587,7 @@ $ErrorActionPreference = 'Stop'
         }
     }
 
-    if ($Case -eq 'Online') {
+    if ($Case -in 'Online', 'RootDse', 'RootDseCli') {
         $fixture = New-InspectorPackage $temporary
         Set-Location -LiteralPath $temporary
         $script:fixturePhysicalPackage = $fixture.Dll
@@ -617,12 +663,219 @@ $ErrorActionPreference = 'Stop'
             if ($script:onlineScenario -eq 'RootError') {
                 throw 'fixture RootDSE denied'
             }
-            if ($script:onlineScenario -in 'MissingDnsHostName', 'StrictMissingDnsHostName') {
-                return [pscustomobject]@{}
+            switch ($script:onlineScenario) {
+                'MissingDnsHostName' { return [pscustomobject]@{} }
+                'StrictMissingDnsHostName' { return [pscustomobject]@{} }
+                'NoRootDse' { return }
+                'NullHostname' { return [pscustomobject]@{ DnsHostName = $null } }
+                'EmptyHostname' { return [pscustomobject]@{ DnsHostName = '' } }
+                'MalformedHostname' {
+                    return [pscustomobject]@{ DnsHostName = ('PRE01_INVALID_FIXTURE_PAYLOAD.invalid' + [char]10) }
+                }
+                'UnderscoreHostname' { return [pscustomobject]@{ DnsHostName = 'invalid_name.fixture.invalid' } }
+                'TrailingHyphenHostname' { return [pscustomobject]@{ DnsHostName = 'invalid-.fixture.invalid' } }
+                'NumericHostname' { return [pscustomobject]@{ DnsHostName = 14 } }
+                'SingletonHostnameArray' {
+                    return [pscustomobject]@{ DnsHostName = [string[]]@('selected.fixture.invalid') }
+                }
+                'SingletonRootCollection' {
+                    $records = [Collections.Generic.HashSet[object]]::new()
+                    [void]$records.Add([pscustomobject]@{ DnsHostName = 'selected.fixture.invalid' })
+                    Write-Output -NoEnumerate $records
+                    return
+                }
+                'AmbiguousRootDse' {
+                    [pscustomobject]@{ DnsHostName = 'selected.fixture.invalid' }
+                    return [pscustomobject]@{ DnsHostName = 'other.fixture.invalid' }
+                }
+                'RootTypedError' {
+                    $script:fixtureRootCause = [UnauthorizedAccessException]::new('fixture RootDSE typed denial')
+                    $fault = [Management.Automation.ErrorRecord]::new(
+                        $script:fixtureRootCause, 'Fixture.RootDseDenied',
+                        [Management.Automation.ErrorCategory]::PermissionDenied, $Server
+                    )
+                    $PSCmdlet.ThrowTerminatingError($fault)
+                }
             }
             [pscustomobject]@{
                 DnsHostName = 'selected.fixture.invalid'
             }
+        }
+        if ($Case -eq 'RootDseCli') {
+            # Run the actual prerequisite first using the same provider substitute
+            # as the paired tests. The CLI receives those exact returned checks.
+            $witness = Invoke-InspectorOnlineWitness $CliScenario Command $fixture
+            Assert-Inspector (
+                @($witness.Trace | Where-Object { $_ -ceq 'ExactRootDse|False' }).Count -eq 1
+            ) 'CLI witness did not use the controlled provider exactly once.'
+
+            $cliRoot = Join-Path $temporary 'cli-package'
+            $entry = Join-Path $cliRoot 'bin/Start-ADAnalyzer.ps1'
+            $null = [IO.Directory]::CreateDirectory((Split-Path -Parent $entry))
+            [IO.File]::Copy((Join-Path $RepositoryRoot 'bin/Start-ADAnalyzer.ps1'), $entry)
+
+            $global:Pre01CliFixtureState = @{
+                Root = $cliRoot
+                Checks = $witness.Checks
+                Calls = 0
+            }
+            function script:Get-ADAnalyzerPrerequisite {
+                param($RepositoryRoot, $Server, $Credential, [switch]$Online, $Profile)
+
+                Assert-InspectorEqual $global:Pre01CliFixtureState.Root $RepositoryRoot
+                Assert-InspectorEqual 'caller.fixture.invalid' $Server
+                Assert-Inspector $Online.IsPresent 'The CLI lost its Online flag.'
+                $global:Pre01CliFixtureState.Calls++
+                $global:Pre01CliFixtureState.Checks
+            }
+            $global:Pre01CliFixtureState.Command = Microsoft.PowerShell.Core\Get-Command Get-ADAnalyzerPrerequisite -ListImported
+            function script:Get-Command {
+                [CmdletBinding()]
+                param([Parameter(Position = 0)][string]$Name, [switch]$ListImported)
+
+                Assert-Inspector ($Name -ceq 'Get-ADAnalyzerPrerequisite' -and $ListImported.IsPresent) 'The CLI tried unexpected command discovery.'
+                return $global:Pre01CliFixtureState.Command
+            }
+
+            $global:LASTEXITCODE = 0
+            $rows = @(& $entry -Operation prerequisites -Server caller.fixture.invalid -Online -PassThru)
+            $code = $LASTEXITCODE
+            Assert-Inspector ($global:Pre01CliFixtureState.Calls -eq 1) 'The CLI did not consume the already observed checks exactly once.'
+            Assert-InspectorEqual 'CONNECTIVITY.TCP.9389,CONNECTIVITY.TCP.445,CONNECTIVITY.DIRECTORY' ($rows[-3..-1].RuleId -join ',')
+            Assert-InspectorEqual 'caller.fixture.invalid' $rows[-1].Target
+            'PRE-01 CLI verdict {0}' -f $rows[-1].Status
+            exit $code
+        }
+
+        if ($Case -eq 'RootDse') {
+            $badCases = @(
+                'MissingDnsHostName'
+                'NoRootDse'
+                'NullHostname'
+                'EmptyHostname'
+                'MalformedHostname'
+                'UnderscoreHostname'
+                'TrailingHyphenHostname'
+                'NumericHostname'
+                'SingletonHostnameArray'
+                'SingletonRootCollection'
+                'AmbiguousRootDse'
+            )
+            $failed = [Collections.Generic.List[string]]::new()
+            foreach ($scenario in $badCases) {
+                try {
+                    Test-Inspector ('invalid RootDSE ' + $scenario) {
+                        $command = Invoke-InspectorOnlineWitness $scenario Command $fixture
+                        $direct = Invoke-InspectorOnlineWitness $scenario Method $fixture
+                        Assert-InspectorEqual (Get-InspectorJson $command) (Get-InspectorJson $direct)
+                        Assert-InspectorEqual 7 $command.Checks.Count
+                        Assert-InspectorEqual 'CONNECTIVITY.TCP.9389,CONNECTIVITY.TCP.445,CONNECTIVITY.DIRECTORY' ($command.Checks[-3..-1].RuleId -join ',')
+                        Assert-InspectorEqual 'Pass,Pass' ($command.Checks[-3..-2].Status -join ',')
+                        Assert-InspectorEqual 'Import,ExactRootDse|False' ($command.Trace[-2..-1] -join ',')
+                        $check = $command.Checks[-1]
+                        Assert-InspectorEqual 'caller.fixture.invalid' $check.Target
+                        Assert-InspectorEqual 'Unreadable' $check.Status
+                        Assert-Inspector (
+                            $null -eq $check.Observed -and
+                            $check.Message -is [string] -and -not [string]::IsNullOrWhiteSpace($check.Message) -and
+                            $check.Message -notlike '*PRE01_INVALID_FIXTURE_PAYLOAD*'
+                        ) 'Malformed provider output was retained or had no useful diagnostic.'
+                    }
+                }
+                catch {
+                    $failed.Add($scenario + ': ' + $_.Exception.Message)
+                }
+            }
+
+            foreach ($action in 'Continue', 'Stop', 'Ignore') {
+                Test-Inspector ('native typed provider failure under ' + $action) {
+                    $command = Invoke-InspectorOnlineStream 'RootTypedError' $action $fixture
+                    $direct = Invoke-InspectorOnlineWitness 'RootTypedError' Method $fixture
+                    Assert-InspectorEqual (Get-InspectorJson $command.Checks) (Get-InspectorJson $direct.Checks)
+                    Assert-InspectorEqual 'CONNECTIVITY.TCP.9389,CONNECTIVITY.TCP.445,CONNECTIVITY.DIRECTORY' ($command.Checks[-3..-1].RuleId -join ',')
+                    Assert-InspectorEqual 'Unreadable' $command.Checks[-1].Status
+                    Assert-InspectorEqual 'fixture RootDSE typed denial' $command.Checks[-1].Message
+                    Assert-Inspector ($null -eq $command.Caught -and $command.ErrorStream.Count -eq 0) 'Provider cause escaped onto an unexpected native stream.'
+                    $matching = @(Get-InspectorErrorRecords @($command.Captured + $command.History) | Where-Object {
+                            $_.FullyQualifiedErrorId -like 'Fixture.RootDseDenied*' -and
+                            $_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::PermissionDenied -and
+                            [object]::ReferenceEquals($_.Exception.GetBaseException(), $command.Cause)
+                        })
+                    Assert-Inspector ($matching.Count -gt 0) 'The native caller lost the injected error ID, category or actual exception.'
+                }
+
+                try {
+                    Test-Inspector ('silent synthetic invalid response under ' + $action) {
+                        $command = Invoke-InspectorOnlineStream 'SingletonHostnameArray' $action $fixture
+                        Assert-InspectorEqual 'Unreadable' $command.Checks[-1].Status
+                        Assert-Inspector (
+                            $null -eq $command.Caught -and $command.ErrorStream.Count -eq 0 -and
+                            $command.Captured.Count -eq 0 -and $command.History.Count -eq 0
+                        ) 'Classifying an invalid observation raised an extra PowerShell error.'
+                    }
+                }
+                catch {
+                    $failed.Add($action + ': ' + $_.Exception.Message)
+                }
+            }
+
+            foreach ($scenario in 'Success', 'MissingDnsHostName', 'AmbiguousRootDse', 'RootTypedError') {
+                try {
+                    Test-Inspector ('online CLI ' + $scenario) {
+                        $shell = (Get-Process -Id $PID).Path
+                        $arguments = @(
+                            '-NoLogo'
+                            '-NoProfile'
+                            '-NonInteractive'
+                            '-File'
+                            $PSCommandPath
+                            '-RepositoryRoot'
+                            $RepositoryRoot
+                            '-ScratchRoot'
+                            $ScratchRoot
+                            '-Case'
+                            'RootDseCli'
+                            '-CliScenario'
+                            $scenario
+                        )
+                        $process = & {
+                            $ErrorActionPreference = 'Continue'
+                            $PSNativeCommandUseErrorActionPreference = $false
+                            $output = @(& $shell @arguments 2>&1)
+                            [pscustomobject]@{
+                                Code = $LASTEXITCODE
+                                Output = $output
+                            }
+                        }
+                        $expectedExit = 2
+                        $expectedStatus = 'Unreadable'
+                        if ($scenario -ceq 'Success') {
+                            $expectedExit = 0
+                            $expectedStatus = 'Pass'
+                        }
+                        $marker = 'PRE-01 CLI verdict ' + $expectedStatus
+                        Assert-Inspector (
+                            $process.Code -eq $expectedExit -and
+                            @($process.Output | Where-Object { [string]$_ -ceq $marker }).Count -eq 1
+                        ) ('Expected CLI exit {0} and {1}, observed exit {2} with {3}' -f
+                            $expectedExit, $expectedStatus, $process.Code, ($process.Output -join '|'))
+                    }
+                }
+                catch {
+                    $failed.Add('CLI ' + $scenario + ': ' + $_.Exception.Message)
+                }
+            }
+
+            if ($failed.Count) {
+                foreach ($failure in $failed) {
+                    Write-Host ('PRE-01 expected-red witness ' + $failure)
+                }
+                throw ('PRE-01 RootDSE fixture failed {0} case(s); passed {1}.' -f $failed.Count, $script:passed)
+            }
+        }
+        if ($Case -eq 'RootDse') {
+            Write-Output ('PASS prerequisite inspector {0} {1}' -f $Case, $script:passed)
+            return
         }
 
         $onlineCases = [ordered]@{
@@ -637,7 +890,7 @@ $ErrorActionPreference = 'Stop'
             ModuleError = 'Pass,Pass,Pass,NotConfigured,Pass,Pass,Unreadable'
             MissingCapability = 'Pass,Pass,Pass,NotConfigured,Pass,Pass,Unreadable'
             RootError = 'Pass,Pass,Pass,NotConfigured,Pass,Pass,Unreadable'
-            MissingDnsHostName = 'Pass,Pass,Pass,NotConfigured,Pass,Pass,Pass'
+            MissingDnsHostName = 'Pass,Pass,Pass,NotConfigured,Pass,Pass,Unreadable'
             StrictMissingDnsHostName = 'Pass,Pass,Pass,NotConfigured,Pass,Pass,Unreadable'
         }
         foreach ($scenario in $onlineCases.Keys) {
@@ -648,6 +901,9 @@ $ErrorActionPreference = 'Stop'
                 Assert-InspectorEqual $onlineCases[$scenario] ($command.Checks.Status -join ',')
                 Assert-InspectorEqual 'CONNECTIVITY.TCP.9389,CONNECTIVITY.TCP.445,CONNECTIVITY.DIRECTORY' ($command.Checks[-3..-1].RuleId -join ',')
                 Assert-InspectorEqual 'caller.fixture.invalid' $command.Checks[-1].Target
+                if ($command.Checks[-1].Status -ceq 'Pass') {
+                    Assert-InspectorEqual 'selected.fixture.invalid' $command.Checks[-1].Observed
+                }
                 $expectedTrace = [Collections.Generic.List[string]]::new()
                 foreach ($port in 9389, 445) {
                     $expectedTrace.Add(('Begin|caller.fixture.invalid|{0}' -f $port))

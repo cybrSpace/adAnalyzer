@@ -15,6 +15,7 @@ $script:mode = $Case
 $script:expectedDll = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'lib/Microsoft.ActiveDirectory.Management.dll'))
 $script:allowProvider = $false
 $script:fault = $null
+$script:RemediationAuthorityDirectory = $null
 
 if ($Case -eq 'Standalone') {
     . (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')
@@ -27,6 +28,14 @@ foreach ($name in @('Invoke-Command', 'New-PSDrive', 'Get-ADRootDSE', 'Get-ADDom
     Set-Item -LiteralPath ('Function:script:' + $name) -Value {
         throw 'The synthetic Apply fixture encountered an external effect.'
     }
+}
+
+function Get-ADAnalyzerRemediationAuthorityDirectory {
+    if ([string]::IsNullOrEmpty($script:RemediationAuthorityDirectory) -or
+        -not [IO.Directory]::Exists($script:RemediationAuthorityDirectory)) {
+        throw 'The fixture has no disposable remediation authority.'
+    }
+    return $script:RemediationAuthorityDirectory
 }
 
 function Assert-Fixture([bool]$Condition, [string]$Message) {
@@ -109,6 +118,8 @@ function New-FixtureInput([string]$Name, [string]$Fault = '', [bool]$UseCredenti
     $script:expectCredential = $UseCredential
     $script:objects = @{}
     $script:findingsById = @{}
+    $script:RemediationAuthorityDirectory = Join-Path $script:temporary ('authority-' + [guid]::NewGuid().ToString('N'))
+    $null = [IO.Directory]::CreateDirectory($script:RemediationAuthorityDirectory)
     $script:root = Join-Path $script:temporary $Name
     $null = [IO.Directory]::CreateDirectory($script:root)
     $script:path = Join-Path $script:root 'journal [apply].json'

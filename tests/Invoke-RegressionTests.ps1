@@ -163,6 +163,7 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
     $script:Exports = 0
     $script:FailScan = $false
     $script:FailExport = $false
+    $script:ReferenceReplacement = $null
 
     function Get-ADAnalyzerAssessment {
         param(
@@ -180,6 +181,9 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
         $script:ScanArguments = $PSBoundParameters
         if ($script:FailScan) {
             throw 'fixture scan failure'
+        }
+        if ($null -ne $script:ReferenceReplacement) {
+            [IO.File]::WriteAllBytes($script:ReferenceReplacement.Path, $script:ReferenceReplacement.Bytes)
         }
         [pscustomobject]@{
             SchemaVersion = 1
@@ -273,13 +277,16 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
         & {
             . (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')
             $reference = Join-Path $temporary 'comparison-reference.json'
+            $referenceRunId = 'reference & <run>'
+            $findingTarget = 'fixture-object & <finding>'
+            $comparisonHeading = '<h2 id="assessment-comparison">Assessment comparison</h2>'
             @{
                 SchemaVersion = 1
                 Target = 'actual.example.invalid'
-                RunId = 'reference'
+                RunId = $referenceRunId
                 Checks = @(@{
-                        RuleId = 'FIXTURE.CHECK'
-                        Target = 'fixture-object'
+                        RuleId = 'GPO.FIXTURE.CHECK'
+                        Target = $findingTarget
                         Status = 'Fail'
                         Evidence = @{
                             Value = 0
@@ -287,6 +294,8 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
                     })
                 Findings = @()
             } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reference
+            $originalReference = [Convert]::ToBase64String([IO.File]::ReadAllBytes($reference))
+            $report = [ADAnalyzerAssessmentReport]::new()
             foreach ($operation in @('assess', 'report')) {
                 $path = Join-Path $temporary ('comparison-' + $operation)
                 $result = Start-ADAnalyzer -Operation $operation -OutputPath $path -ReferencePath $reference
@@ -311,17 +320,251 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
                         -Depth 100 `
                         -Compress)
                 Assert-Equal ([datetimeoffset]$result.Comparison.Timestamp).UtcDateTime.Ticks ([datetimeoffset]$saved.Comparison.Timestamp).UtcDateTime.Ticks
-                Assert-Equal 'reference' $saved.Comparison.ReferenceRunId
-                Assert-True ((Get-Content `
-                            -LiteralPath ($path + '.html') `
-                            -Raw) -match 'ADAnalyzerAssessmentComparison') 'HTML snapshot lost comparison'
+                Assert-Equal $referenceRunId $saved.Comparison.ReferenceRunId
+                Assert-Equal 'fixture' $saved.Comparison.DifferenceRunId
+
+                $html = Get-Content -LiteralPath ($path + '.html') -Raw
+                Assert-True ($html.Contains('ADAnalyzerAssessmentComparison')) 'HTML snapshot lost comparison'
+                $sectionStart = $html.IndexOf($comparisonHeading, [StringComparison]::Ordinal)
+                $snapshotStart = $html.IndexOf('<details><summary>Full assessment snapshot', [StringComparison]::Ordinal)
+                Assert-True ($sectionStart -ge 0 -and $snapshotStart -gt $sectionStart) 'Saved comparison is missing from the visible HTML report'
+                $section = $html.Substring($sectionStart, $snapshotStart - $sectionStart)
+                foreach ($expected in @(
+                        'Reference run'
+                        'Difference run'
+                        [Net.WebUtility]::HtmlEncode($referenceRunId)
+                        '<dd>fixture</dd>'
+                        '<dt>New</dt><dd>0</dd>'
+                        '<dt>Resolved</dt><dd>0</dd>'
+                        '<dt>Changed</dt><dd>1</dd>'
+                        '<dt>Unchanged</dt><dd>0</dd>'
+                        'GPO.FIXTURE.CHECK'
+                        [Net.WebUtility]::HtmlEncode($findingTarget)
+                        'NotObservedInDifference'
+                        'Check coverage and collect fresh evidence for this rule and target.'
+                    )) {
+                    Assert-True ($section.Contains($expected)) "Visible HTML comparison lost $expected"
+                }
+                Assert-True (-not $section.Contains($referenceRunId) -and
+                    -not $section.Contains($findingTarget)) 'Visible HTML comparison contains unescaped values'
+                Assert-True ([string]::Equals($html,
+                        $report.Render($result, 'Html'),
+                        [StringComparison]::Ordinal)) 'Direct render and native HTML export disagree'
             }
+
+            $unattached = $result.PSObject.Copy()
+            $unattached.PSObject.Properties.Remove('Comparison')
+            Assert-True (-not $report.Render($unattached, 'Html').Contains($comparisonHeading)) 'HTML invented an absent comparison'
+            $unsupported = $unattached.PSObject.Copy()
+            $unsupported | Add-Member -NotePropertyName Comparison -NotePropertyValue ([pscustomobject]@{
+                    ComparisonType = 'UnsupportedComparison'
+                    SchemaVersion = 1
+                    Summary = @{ Changed = 1 }
+                })
+            Assert-True (-not $report.Render($unsupported, 'Html').Contains($comparisonHeading)) 'HTML interpreted an unsupported comparison'
+
+            $partial = $unattached.PSObject.Copy()
+            $partial | Add-Member -NotePropertyName Comparison -NotePropertyValue ([pscustomobject]@{
+                    ComparisonType = 'ADAnalyzerAssessmentComparison'
+                    SchemaVersion = 1
+                })
+            $partialHtml = $report.Render($partial, 'Html')
+            Assert-True ($partialHtml.Contains('<dt>Changed</dt><dd>Unavailable</dd>')) 'HTML invented a missing comparison count'
+            Assert-True ($partialHtml.Contains('Recorded comparison rows are unavailable.')) 'HTML hid missing comparison rows'
+
+            $saved.Comparison.Changes[0].Reason = 'RulePredicateChanged'
+            $predicateHtml = $report.Render($saved, 'Html')
+            $predicateSection = $predicateHtml.Substring(
+                $predicateHtml.IndexOf($comparisonHeading, [StringComparison]::Ordinal)
+            ).Split([string[]]@('</section>'), [StringSplitOptions]::None)[0]
+            Assert-True ($predicateSection.Contains(
+                    'RulePredicateChanged Review the recorded rule requirements before interpreting the status change.'
+                )) 'HTML hid why the recorded predicate change needs review'
+
             $result = Start-ADAnalyzer -ReferencePath $reference
-            Assert-Equal 'reference' $result.Comparison.ReferenceRunId
+            Assert-Equal $referenceRunId $result.Comparison.ReferenceRunId
             $path = Join-Path $temporary 'comparison-whatif'
             $result = Start-ADAnalyzer -OutputPath $path -ReferencePath $reference -WhatIf
-            Assert-Equal 'reference' $result.Comparison.ReferenceRunId
+            Assert-Equal $referenceRunId $result.Comparison.ReferenceRunId
             Assert-Equal 0 @(Get-ChildItem -LiteralPath $temporary -Filter 'comparison-whatif*').Count
+            Assert-True ([string]::Equals($originalReference,
+                    [Convert]::ToBase64String([IO.File]::ReadAllBytes($reference)),
+                    [StringComparison]::Ordinal)) 'Saved comparison input was modified'
+        }
+    }
+    Invoke-Test 'CLI report exports preserve the normalized saved comparison reference' {
+        & {
+            . (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')
+            $root = Join-Path $temporary 'comparison reference preservation'
+            $null = [IO.Directory]::CreateDirectory($root)
+            $driveName = 'ADAnalyzerReferenceFixture'
+            $null = New-PSDrive -Name $driveName -PSProvider FileSystem -Root $root -Scope Script -ErrorAction Stop
+            try {
+                $separator = [IO.Path]::DirectorySeparatorChar
+                $referenceBytes = [Text.Encoding]::UTF8.GetBytes(
+                    '{"SchemaVersion":1,"Target":"actual.example.invalid","RunId":"saved-reference","Checks":[],"Findings":[]}'
+                )
+                $cases = @(
+                    @{
+                        Name = 'literal JSON'
+                        Operation = 'assess'
+                        Extension = '.json'
+                    }
+                    @{
+                        Name = 'later HTML'
+                        Operation = 'report'
+                        Extension = '.html'
+                        PathForm = 'TrailingDots'
+                        Preview = $true
+                    }
+                    @{
+                        Name = 'qualified CSV'
+                        Operation = 'assess'
+                        Extension = '.csv'
+                        PathForm = 'QualifiedReference'
+                    }
+                    @{
+                        Name = 'relative parent segment'
+                        Operation = 'report'
+                        Extension = '.json'
+                        PathForm = 'RelativeReference'
+                    }
+                    @{
+                        Name = 'mapped reference'
+                        Operation = 'report'
+                        Extension = '.json'
+                        PathForm = 'MappedReference'
+                    }
+                    @{
+                        Name = 'mapped destination'
+                        Operation = 'assess'
+                        Extension = '.html'
+                        PathForm = 'MappedDestination'
+                    }
+                )
+                if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                    $cases += @{
+                        Name = 'Windows case alias'
+                        Operation = 'report'
+                        Extension = '.json'
+                        PathForm = 'CaseReference'
+                    }
+                }
+
+                $differences = [Collections.Generic.List[string]]::new()
+                foreach ($case in $cases) {
+                    $directory = Join-Path $root $case.Name
+                    $null = [IO.Directory]::CreateDirectory((Join-Path $directory 'child'))
+                    $stem = 'report [literal]'
+                    $prefix = Join-Path $directory $stem
+                    $reference = $prefix + $case.Extension
+                    $referencePath = $reference
+                    $outputPath = $prefix
+                    switch ($case.PathForm) {
+                        'TrailingDots' {
+                            $outputPath += '...'
+                        }
+                        'QualifiedReference' {
+                            $referencePath = 'FileSystem::' + $reference
+                        }
+                        'RelativeReference' {
+                            $referencePath = 'child' + $separator + '..' + $separator + $stem + $case.Extension
+                        }
+                        'MappedReference' {
+                            $referencePath = $driveName + ':' + $separator + $case.Name + $separator + $stem + $case.Extension
+                        }
+                        'MappedDestination' {
+                            $outputPath = $driveName + ':' + $separator + $case.Name + $separator + $stem
+                        }
+                        'CaseReference' {
+                            $referencePath = Join-Path $directory (($stem + $case.Extension).ToUpperInvariant())
+                        }
+                    }
+                    $otherExtensions = @('.json', '.html', '.csv' | Where-Object { $_ -ne $case.Extension })
+                    $sibling = $prefix + $otherExtensions[0]
+                    $absent = $prefix + $otherExtensions[1]
+                    $siblingBytes = [byte[]]@(0, 1, 239, 255)
+                    [IO.File]::WriteAllBytes($reference, $referenceBytes)
+                    [IO.File]::WriteAllBytes($sibling, $siblingBytes)
+                    $expectedReference = [Convert]::ToBase64String($referenceBytes)
+                    $expectedSibling = [Convert]::ToBase64String($siblingBytes)
+                    $arguments = @{
+                        Operation = $case.Operation
+                        OutputPath = $outputPath
+                        ReferencePath = $referencePath
+                        ErrorAction = 'Stop'
+                    }
+                    $rows = [Collections.Generic.List[object]]::new()
+                    $failure = $null
+                    Push-Location -LiteralPath $directory
+                    try {
+                        if ($case.Preview) {
+                            $preview = Start-ADAnalyzer @arguments -WhatIf
+                            Assert-Equal 'saved-reference' $preview.Comparison.ReferenceRunId
+                            Assert-Equal $expectedReference ([Convert]::ToBase64String([IO.File]::ReadAllBytes($reference)))
+                            Assert-Equal $expectedSibling ([Convert]::ToBase64String([IO.File]::ReadAllBytes($sibling)))
+                            Assert-True (-not [IO.File]::Exists($absent)) 'Preview published an uncreated report sibling.'
+                        }
+                        try {
+                            Start-ADAnalyzer @arguments | ForEach-Object {
+                                $rows.Add($_)
+                            }
+                        }
+                        catch {
+                            $failure = $_
+                        }
+                    }
+                    finally {
+                        Pop-Location
+                    }
+                    if ($null -eq $failure -or
+                        $failure.Exception.GetBaseException().Message -cne 'A report destination matches the saved comparison reference.') {
+                        $diagnostic = if ($null -eq $failure) {
+                            'no failure'
+                        }
+                        else {
+                            $failure.Exception.GetBaseException().Message
+                        }
+                        $differences.Add(('{0}: expected reference collision, got {1}' -f $case.Name, $diagnostic))
+                    }
+                    if ($rows.Count -ne 0) {
+                        $differences.Add(($case.Name + ': returned a completed result'))
+                    }
+                    if (-not [IO.File]::Exists($reference) -or
+                        [Convert]::ToBase64String([IO.File]::ReadAllBytes($reference)) -cne $expectedReference) {
+                        $differences.Add(($case.Name + ': saved reference bytes changed'))
+                    }
+                    if (-not [IO.File]::Exists($sibling) -or
+                        [Convert]::ToBase64String([IO.File]::ReadAllBytes($sibling)) -cne $expectedSibling) {
+                        $differences.Add(($case.Name + ': existing sibling bytes changed'))
+                    }
+                    if ([IO.File]::Exists($absent)) {
+                        $differences.Add(($case.Name + ': fresh sibling was created'))
+                    }
+                    Assert-Equal 0 @(Get-ChildItem -LiteralPath $directory -Force -Filter '.ad-analyzer-*.tmp').Count
+                }
+
+                $reference = Join-Path $root 'distinct-reference.json'
+                $prefix = Join-Path $root 'distinct-output'
+                [IO.File]::WriteAllBytes($reference, $referenceBytes)
+                foreach ($extension in '.json', '.html', '.csv') {
+                    [IO.File]::WriteAllText(($prefix + $extension), 'old output')
+                }
+                $result = Start-ADAnalyzer -Operation report -ReferencePath $reference -OutputPath $prefix
+                $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($prefix + '.json'))
+                Assert-Equal 'saved-reference' $result.Comparison.ReferenceRunId
+                Assert-Equal 'saved-reference' $saved.Comparison.ReferenceRunId
+                Assert-Equal ([Convert]::ToBase64String($referenceBytes)) (
+                    [Convert]::ToBase64String([IO.File]::ReadAllBytes($reference))
+                )
+                foreach ($extension in '.json', '.html', '.csv') {
+                    Assert-True ([IO.File]::ReadAllText($prefix + $extension) -cne 'old output') 'Distinct output was not replaced.'
+                }
+                Assert-True ($differences.Count -eq 0) ($differences -join [Environment]::NewLine)
+            }
+            finally {
+                Remove-PSDrive -Name $driveName -Scope Script -Force -ErrorAction Stop
+            }
         }
     }
     Invoke-Test 'invalid comparison references preserve existing reports and create no fresh reports' {
@@ -344,6 +587,181 @@ if($counts.Help -ne 1 -or $counts.Directory -ne 0){throw 'Help did not remain lo
             $fresh = Join-Path $temporary 'invalid-comparison-fresh'
             Assert-Throws { Start-ADAnalyzer -OutputPath $fresh -ReferencePath (Join-Path $temporary 'missing-reference.json') }
             Assert-Equal 0 @(Get-ChildItem -LiteralPath $temporary -Filter 'invalid-comparison-fresh*').Count
+        }
+    }
+    Invoke-Test 'CLI admits the saved comparison reference before acquisition' {
+        & {
+            . (Join-Path $RepositoryRoot 'bin/ADOperations.ps1')
+            $root = Join-Path $temporary 'comparison reference admission'
+            $null = [IO.Directory]::CreateDirectory($root)
+            $extensions = '.json', '.html', '.csv'
+            $invalid = [ordered]@{
+                Missing = $null
+                Malformed = '{"SchemaVersion":'
+                Unsupported = '{"SchemaVersion":2,"Target":"actual.example.invalid","Checks":[]}'
+                NonObject = '42'
+            }
+            $failures = [Collections.Generic.List[string]]::new()
+            foreach ($operation in 'assess', 'report') {
+                foreach ($preview in $false, $true) {
+                    foreach ($name in $invalid.Keys) {
+                        $label = '{0}/WhatIf={1}/{2}' -f $operation, $preview, $name
+                        try {
+                            $directory = Join-Path $root ('{0}-{1}-{2}' -f $operation, $preview, $name)
+                            $null = [IO.Directory]::CreateDirectory($directory)
+                            $reference = Join-Path $directory 'reference.json'
+                            $output = Join-Path $directory 'snapshot'
+                            if ($null -ne $invalid[$name]) {
+                                [IO.File]::WriteAllText($reference, $invalid[$name])
+                            }
+                            foreach ($extension in $extensions) {
+                                [IO.File]::WriteAllText(($output + $extension), ('previous ' + $extension))
+                            }
+                            $before = ([IO.Directory]::GetFileSystemEntries($directory) | Sort-Object) -join '|'
+                            $expectedError = switch ($name) {
+                                'Missing' { 'Assessment file does not exist' }
+                                'Unsupported' { 'Unsupported Assessment SchemaVersion' }
+                                'NonObject' { 'Assessment must be a structured object or JSON file' }
+                                'Malformed' {
+                                    # Compare the existing parser's wording on the selected engine.
+                                    $parseFailure = $null
+                                    try {
+                                        $null = Read-ADAnalyzerOperationDocument $reference
+                                    }
+                                    catch {
+                                        $parseFailure = $_
+                                    }
+                                    Assert-True ($null -ne $parseFailure) 'The fixture JSON unexpectedly parsed.'
+                                    $parseFailure.Exception.GetBaseException().Message
+                                }
+                            }
+                            $scans = $script:ScanCalls
+                            $failure = $null
+                            $results = [Collections.Generic.List[object]]::new()
+                            try {
+                                Start-ADAnalyzer -Operation $operation -ReferencePath $reference `
+                                    -OutputPath $output -IncludeHostChecks -WhatIf:$preview |
+                                    ForEach-Object { $results.Add($_) }
+                            }
+                            catch {
+                                $failure = $_
+                            }
+                            Assert-True ($null -ne $failure) 'Invalid reference returned without terminating.'
+                            Assert-Equal $expectedError $failure.Exception.GetBaseException().Message
+                            Assert-Equal 0 $results.Count
+                            Assert-Equal $before (([IO.Directory]::GetFileSystemEntries($directory) | Sort-Object) -join '|')
+                            foreach ($extension in $extensions) {
+                                Assert-Equal ('previous ' + $extension) ([IO.File]::ReadAllText($output + $extension))
+                            }
+                            Assert-True ($script:ScanCalls -eq $scans) 'Invalid reference reached assessment acquisition.'
+                        }
+                        catch {
+                            $failures.Add(('{0}: {1}' -f $label, $_.Exception.GetBaseException().Message))
+                        }
+                    }
+
+                    $label = '{0}/WhatIf={1}/Replacement' -f $operation, $preview
+                    try {
+                        $directory = Join-Path $root ('{0}-{1}-replacement' -f $operation, $preview)
+                        $null = [IO.Directory]::CreateDirectory($directory)
+                        $reference = Join-Path $directory 'reference.json'
+                        $output = Join-Path $directory 'snapshot'
+                        $original = @{
+                            SchemaVersion = 1
+                            Target = 'actual.example.invalid'
+                            RunId = 'admitted-reference'
+                            Checks = @(@{
+                                    RuleId = 'ACCOUNT.FIXTURE.CHECK'
+                                    Target = 'original-finding'
+                                    Status = 'Fail'
+                                })
+                            Findings = @()
+                        }
+                        [IO.File]::WriteAllText($reference, (ConvertTo-Json -InputObject $original -Depth 8))
+                        $replacement = [Text.Encoding]::UTF8.GetBytes(
+                            '{"SchemaVersion":1,"Target":"actual.example.invalid","RunId":"acquisition-replacement","Checks":[],"Findings":[]}'
+                        )
+                        $scans = $script:ScanCalls
+                        $script:ReferenceReplacement = @{
+                            Path = $reference
+                            Bytes = $replacement
+                        }
+                        try {
+                            $results = @(Start-ADAnalyzer -Operation $operation -ReferencePath $reference `
+                                    -OutputPath $output -IncludeHostChecks -WhatIf:$preview)
+                        }
+                        finally {
+                            $script:ReferenceReplacement = $null
+                        }
+                        Assert-Equal ($scans + 1) $script:ScanCalls
+                        Assert-True $script:ScanArguments.IncludeHostChecks 'Valid reference lost the host assessment option.'
+                        Assert-Equal ([Convert]::ToBase64String($replacement)) (
+                            [Convert]::ToBase64String([IO.File]::ReadAllBytes($reference))
+                        )
+                        Assert-Equal 1 $results.Count
+                        $comparisons = @($results[0].Comparison)
+                        if ($preview) {
+                            Assert-Equal 1 ([IO.Directory]::GetFileSystemEntries($directory).Length)
+                        }
+                        else {
+                            Assert-Equal 4 ([IO.Directory]::GetFileSystemEntries($directory).Length)
+                            foreach ($extension in $extensions) {
+                                Assert-True ([IO.File]::Exists($output + $extension)) 'A selected report format was not published.'
+                            }
+                            $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($output + '.json'))
+                            $comparisons += $saved.Comparison
+                        }
+                        foreach ($comparison in $comparisons) {
+                            Assert-Equal 'ADAnalyzerAssessmentComparison' $comparison.ComparisonType
+                            Assert-Equal 'fixture' $comparison.DifferenceRunId
+                            Assert-Equal 'admitted-reference' $comparison.ReferenceRunId
+                            Assert-Equal 1 $comparison.Changes.Count
+                            Assert-Equal 'original-finding' $comparison.Changes[0].Target
+                            Assert-Equal 'NotObservedInDifference' $comparison.Changes[0].Reason
+                        }
+                    }
+                    catch {
+                        $failures.Add(('{0}: {1}' -f $label, $_.Exception.GetBaseException().Message))
+                    }
+                }
+            }
+            $reference = Join-Path $root 'legacy-version.json'
+            [IO.File]::WriteAllText($reference, '{"SchemaVersion":[],"Target":"actual.example.invalid","RunId":"legacy-empty-version","Checks":[]}')
+            try {
+                $result = Start-ADAnalyzer -ReferencePath $reference
+                Assert-Equal 'legacy-empty-version' $result.Comparison.ReferenceRunId
+            }
+            catch {
+                $failures.Add(('Legacy empty version: ' + $_.Exception.GetBaseException().Message))
+            }
+
+            if ($PSVersionTable.PSVersion.Major -ge 7) {
+                $defaults = $PSDefaultParameterValues
+                $PSDefaultParameterValues = [Management.Automation.DefaultParameterDictionary]::new($defaults)
+                $PSDefaultParameterValues['ConvertFrom-Json:AsHashtable'] = $true
+                try {
+                    $reference = Join-Path $root 'hashtable-unsupported-version.json'
+                    [IO.File]::WriteAllText($reference, '{"SchemaVersion":2,"Target":"actual.example.invalid","Checks":[]}')
+                    $scans = $script:ScanCalls
+                    $failure = $null
+                    try {
+                        $null = Start-ADAnalyzer -Operation report -ReferencePath $reference -WhatIf
+                    }
+                    catch {
+                        $failure = $_
+                    }
+                    Assert-Equal 'Unsupported Assessment SchemaVersion' $failure.Exception.GetBaseException().Message
+                    Assert-Equal $scans $script:ScanCalls
+                }
+                catch {
+                    $failures.Add(('Hashtable version admission: ' + $_.Exception.GetBaseException().Message))
+                }
+                finally {
+                    $PSDefaultParameterValues = $defaults
+                }
+            }
+
+            Assert-True ($failures.Count -eq 0) ($failures -join [Environment]::NewLine)
         }
     }
     Invoke-Test 'credential is forwarded by reference and collectors remain opt-in' {
@@ -661,6 +1079,84 @@ if($null -eq $caught -or $caught.Exception.Message -ne 'Value baselines for secr
         Assert-Equal $a.CheckId $b.CheckId
         Assert-True ($a.CheckId -ne $c.CheckId) 'Different targets collided'
     }
+    Invoke-Test 'cold offline prerequisites only look for an already loaded command' {
+        $fixture = Join-Path $temporary 'offline-prerequisite-discovery.ps1'
+        $body = @'
+param([Parameter(Mandatory)][string]$RepositoryRoot)
+
+$ErrorActionPreference = 'Stop'
+$entryPoint = Join-Path $RepositoryRoot 'bin/Start-ADAnalyzer.ps1'
+. $entryPoint
+
+$loaded = Microsoft.PowerShell.Core\Get-Command -Name Get-ADAnalyzerPrerequisite -ListImported -ErrorAction SilentlyContinue
+if ($loaded) {
+    throw 'The cold fixture started with a prerequisite command already loaded.'
+}
+
+$script:prerequisiteLookups = [Collections.Generic.List[bool]]::new()
+$script:explicitImportAttempts = 0
+function script:Get-Command {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, Position = 0)][string]$Name,
+        [switch]$ListImported
+    )
+
+    if ($Name -cne 'Get-ADAnalyzerPrerequisite') {
+        throw 'The offline prerequisite path tried to discover an unexpected command.'
+    }
+    $script:prerequisiteLookups.Add($ListImported.IsPresent)
+    # Simulate no loaded match. Never run native discovery or load a module here.
+}
+
+function script:Import-Module {
+    $script:explicitImportAttempts++
+    throw 'The offline prerequisite path tried to import a module explicitly.'
+}
+
+# Calibrate the mock with an unrestricted request that cannot reach discovery.
+$null = Get-Command Get-ADAnalyzerPrerequisite -ErrorAction SilentlyContinue
+if ($script:prerequisiteLookups.Count -ne 1 -or $script:prerequisiteLookups[0]) {
+    throw 'The fixture failed to distinguish unrestricted discovery.'
+}
+$script:prerequisiteLookups.Clear()
+
+$checks = @(Start-ADAnalyzer -Operation prerequisites)
+if ($script:prerequisiteLookups.Count -ne 1 -or -not $script:prerequisiteLookups[0]) {
+    throw 'Cold offline prerequisites did not restrict discovery to loaded commands.'
+}
+if ($script:explicitImportAttempts) {
+    throw 'Cold offline prerequisites attempted an explicit module import.'
+}
+
+$powershell = @($checks | Where-Object RuleId -EQ 'PACKAGE.POWERSHELL')
+$assembly = @($checks | Where-Object RuleId -EQ 'PACKAGE.BUNDLED_AD')
+if ($powershell.Count -ne 1 -or $powershell[0].Target -ne $RepositoryRoot -or
+    $assembly.Count -ne 1 -or $assembly[0].Status -ne 'Pass') {
+    throw 'Cold offline prerequisites did not run the package-owned fallback.'
+}
+if (@($checks | Where-Object RuleId -NotLike 'PACKAGE.*').Count) {
+    throw 'The offline check emitted a non-package result.'
+}
+
+'PASS offline prerequisite fetched package checks using loaded-only discovery'
+'@
+        Set-Content -LiteralPath $fixture -Value $body -Encoding UTF8
+
+        $engine = (Get-Process -Id $PID).Path
+        $arguments = @(
+            '-NoLogo'
+            '-NoProfile'
+            '-NonInteractive'
+            '-File'
+            $fixture
+            '-RepositoryRoot'
+            $RepositoryRoot
+        )
+        $output = @(& $engine @arguments)
+        Assert-Equal 0 $LASTEXITCODE
+        Assert-True (($output -join ' ') -match 'PASS offline prerequisite fetched package checks using loaded-only discovery') ($output -join [Environment]::NewLine)
+    }
     Invoke-Test 'prerequisite CLI honors the same domain target argument' {
 
         function Get-ADAnalyzerPrerequisite {
@@ -674,10 +1170,12 @@ if($null -eq $caught -or $caught.Exception.Message -ne 'Value baselines for secr
             ) [pscustomobject]@{
                 Observed = $Server
                 Status = 'Pass'
+                Online = $Online.IsPresent
             }
         }
         $result = Start-ADAnalyzer -Operation prerequisites -FQDN target.example.invalid -Online
         Assert-Equal target.example.invalid $result.Observed
+        Assert-Equal $true $result.Online
     }
     $harness = Join-Path $temporary 'cli-harness.ps1'
     $harnessSource = @'

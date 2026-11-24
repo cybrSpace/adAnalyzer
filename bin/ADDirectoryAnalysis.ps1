@@ -1,5 +1,6 @@
 # Read-only directory assessment. No managed password values are requested.
 . (Join-Path $PSScriptRoot 'ADSecret.ps1')
+. (Join-Path $PSScriptRoot 'ADAccountControl.ps1')
 
 # Hidden PowerShell fields serialize; the private .NET capsule has no properties.
 if (-not ('ADAnalyzer.InternalState' -as [type])) {
@@ -27,6 +28,27 @@ function Get-ADAnalyzerDirectoryField {
         return $property.Value
     }
     return $Default
+}
+
+function Get-ADAnalyzerDirectoryObservationField {
+    param($Record, [string]$Name)
+
+    # Preserve the original shape and the caller's PowerShell error scope.
+    if ($null -eq $Record) {
+        return $null
+    }
+    if ($Record -is [Collections.IDictionary]) {
+        if (([Collections.IDictionary]$Record).Contains($Name)) {
+            return , ($Record[$Name])
+        }
+        return $null
+    }
+
+    $property = $Record.PSObject.Properties[$Name]
+    if ($null -ne $property) {
+        return , $property.Value
+    }
+    return $null
 }
 
 function ConvertTo-ADAnalyzerSid {
@@ -494,7 +516,12 @@ class ADAnalyzerDirectoryObjectProjector {
         $ErrorActionPreference = 'Stop'
         $result = $this.BeginObject($Kind)
         foreach ($name in $this.StandardProperties()) {
-            $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+            if ($Kind -eq 'User' -and $name -eq 'UserAccountControl') {
+                $result[$name] = Get-ADAnalyzerDirectoryObservationField $Record $name
+            }
+            else {
+                $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+            }
         }
         $result['SID'] = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $Record 'SID')
         foreach ($name in @('BuildNumber', 'EsuStatus', 'EsuValidUntil') + $AdditionalProperties) {
@@ -502,7 +529,12 @@ class ADAnalyzerDirectoryObjectProjector {
                 continue
             }
             if ($name -notin 'ObjectClass', 'SID') {
-                $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+                if ($Kind -eq 'User' -and $name -eq 'UserAccountControl') {
+                    $result[$name] = Get-ADAnalyzerDirectoryObservationField $Record $name
+                }
+                else {
+                    $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+                }
                 continue
             }
             $null = Get-ADAnalyzerDirectoryField $Record $name
@@ -517,7 +549,7 @@ class ADAnalyzerDirectoryObjectProjector {
         foreach ($name in @('WhenChanged', 'WhenCreated', 'LastLogonDate', 'PasswordLastSet')) {
             $result[$name] = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $Record $name)
         }
-        $result['PasswordNeverExpires'] = Get-ADAnalyzerDirectoryField $Record 'PasswordNeverExpires'
+        $result['PasswordNeverExpires'] = Get-ADAnalyzerDirectoryObservationField $Record 'PasswordNeverExpires'
         $result['SIDHistory'] = @(Get-ADAnalyzerDirectoryField $Record 'SIDHistory' @() | ForEach-Object { ConvertTo-ADAnalyzerSid $_ })
         $resultantDn = @(Get-ADAnalyzerDirectoryField $Record 'msDS-ResultantPSO' @())
         $result['ResultantPasswordPolicyDN'] = $this.ResultantPolicyDn($resultantDn)
@@ -529,8 +561,13 @@ class ADAnalyzerDirectoryObjectProjector {
         else {
             [bool]$result['ProtectedFromAccidentalDeletion']
         }
-        $uac = if ($null -ne $result['UserAccountControl']) {
-            [long]$result['UserAccountControl']
+        $projectedControl = $result['UserAccountControl']
+        if ($Kind -eq 'User') {
+            # Preserve the legacy cast and error scope without discarding the raw User observation.
+            $projectedControl = $($projectedControl)
+        }
+        $uac = if ($null -ne $projectedControl) {
+            [long]$projectedControl
         }
         else {
             0
@@ -705,7 +742,12 @@ function ConvertTo-ADAnalyzerDirectoryObject {
     $projector = [ADAnalyzerDirectoryObjectProjector]::new()
     $result = $projector.BeginObject($Kind)
     foreach ($name in $projector.StandardProperties()) {
-        $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+        if ($Kind -eq 'User' -and $name -eq 'UserAccountControl') {
+            $result[$name] = Get-ADAnalyzerDirectoryObservationField $Record $name
+        }
+        else {
+            $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+        }
     }
     $result['SID'] = ConvertTo-ADAnalyzerSid (Get-ADAnalyzerDirectoryField $Record 'SID')
     $rawAttributes = $null
@@ -714,7 +756,12 @@ function ConvertTo-ADAnalyzerDirectoryObject {
             continue
         }
         if ($name -notin 'ObjectClass', 'SID') {
-            $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+            if ($Kind -eq 'User' -and $name -eq 'UserAccountControl') {
+                $result[$name] = Get-ADAnalyzerDirectoryObservationField $Record $name
+            }
+            else {
+                $result[$name] = Get-ADAnalyzerDirectoryField $Record $name
+            }
             continue
         }
         if ($PreserveClassificationInput) {
@@ -737,7 +784,7 @@ function ConvertTo-ADAnalyzerDirectoryObject {
     foreach ($name in @('WhenChanged', 'WhenCreated', 'LastLogonDate', 'PasswordLastSet')) {
         $result[$name] = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $Record $name)
     }
-    $result['PasswordNeverExpires'] = Get-ADAnalyzerDirectoryField $Record 'PasswordNeverExpires'
+    $result['PasswordNeverExpires'] = Get-ADAnalyzerDirectoryObservationField $Record 'PasswordNeverExpires'
     $result['SIDHistory'] = @(Get-ADAnalyzerDirectoryField $Record 'SIDHistory' @() | ForEach-Object { ConvertTo-ADAnalyzerSid $_ })
     $resultantDn = @(Get-ADAnalyzerDirectoryField $Record 'msDS-ResultantPSO' @())
     $result['ResultantPasswordPolicyDN'] = $projector.ResultantPolicyDn($resultantDn)
@@ -749,8 +796,13 @@ function ConvertTo-ADAnalyzerDirectoryObject {
     else {
         [bool]$result['ProtectedFromAccidentalDeletion']
     }
-    $uac = if ($null -ne $result['UserAccountControl']) {
-        [long]$result['UserAccountControl']
+    $projectedControl = $result['UserAccountControl']
+    if ($Kind -eq 'User') {
+        # Preserve the legacy cast and error scope without discarding the raw User observation.
+        $projectedControl = $($projectedControl)
+    }
+    $uac = if ($null -ne $projectedControl) {
+        [long]$projectedControl
     }
     else {
         0
@@ -765,6 +817,84 @@ function ConvertTo-ADAnalyzerDirectoryObject {
     $result['LegacyLapsExpiration'] = ConvertTo-ADAnalyzerDirectoryDate (Get-ADAnalyzerDirectoryField $Record 'ms-Mcs-AdmPwdExpirationTime') `
         -FileTime
     $projector.FinishObject($result, $rawAttributes)
+}
+
+class ADAnalyzerHostCollectionTiming {
+    hidden [uint32] $OperationTimeoutSeconds
+    hidden [Diagnostics.Stopwatch] $Clock
+    hidden [string] $Phase
+    hidden [string] $Operation
+    hidden [string] $LocalCleanup = 'NotAttempted'
+    hidden [Collections.Generic.List[object]] $TimedOutOperations
+
+    ADAnalyzerHostCollectionTiming([uint32]$OperationTimeoutSeconds) {
+        $this.OperationTimeoutSeconds = $OperationTimeoutSeconds
+        $this.Clock = [Diagnostics.Stopwatch]::new()
+    }
+
+    hidden [void] StartOperation([string]$Phase, [string]$Operation) {
+        $this.Phase = $Phase
+        $this.Operation = $Operation
+        $this.Clock.Restart()
+    }
+
+    hidden [void] CompleteOperation() {
+        $this.Clock.Reset()
+    }
+
+    hidden [bool] IsTimeout([Management.Automation.ErrorRecord]$Failure) {
+        if ($Failure.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::OperationTimeout) {
+            return $true
+        }
+        for ($cause = $Failure.Exception; $null -ne $cause; $cause = $cause.InnerException) {
+            if ($cause -is [TimeoutException]) {
+                return $true
+            }
+        }
+        return $false
+    }
+
+    hidden [void] RecordFailure([Management.Automation.ErrorRecord]$Failure) {
+        if (-not $this.Clock.IsRunning) {
+            return
+        }
+        $this.Clock.Stop()
+        if (-not $this.IsTimeout($Failure)) {
+            return
+        }
+        if ($null -eq $this.TimedOutOperations) {
+            $this.TimedOutOperations = [Collections.Generic.List[object]]::new()
+        }
+        $this.TimedOutOperations.Add([pscustomobject][ordered]@{
+                Phase = $this.Phase
+                Operation = $this.Operation
+                Elapsed = $this.Clock.ElapsedMilliseconds
+            })
+    }
+
+    hidden [bool] HasTimeouts() {
+        return $null -ne $this.TimedOutOperations
+    }
+
+    hidden [void] RecordCleanup([bool]$ReportedErrors) {
+        $this.LocalCleanup = if ($ReportedErrors) {
+            'ReportedFailure'
+        }
+        else {
+            'Completed'
+        }
+    }
+
+    hidden [void] AddToReport([Collections.Specialized.OrderedDictionary]$Report) {
+        if ($this.HasTimeouts()) {
+            $Report['CollectionTiming'] = [pscustomobject][ordered]@{
+                OperationTimeoutSeconds = $this.OperationTimeoutSeconds
+                TimedOutOperations = $this.TimedOutOperations.ToArray()
+                LocalCleanup = $this.LocalCleanup
+                RemoteSettlement = 'Unknown'
+            }
+        }
+    }
 }
 
 class ADAnalyzerHostCollector {
@@ -1018,13 +1148,28 @@ class ADAnalyzerHostCollector {
         return 'uValue'
     }
 
+    hidden [bool] RegistryReturnCodeIs([object]$Value, [uint32]$Expected) {
+        if ($Value -isnot [ValueType] -or $Value -is [Enum] -or [type]::GetTypeCode($Value.GetType()) -notin @(
+                [TypeCode]::SByte,
+                [TypeCode]::Byte,
+                [TypeCode]::Int16,
+                [TypeCode]::UInt16,
+                [TypeCode]::Int32,
+                [TypeCode]::UInt32,
+                [TypeCode]::Int64,
+                [TypeCode]::UInt64
+            )) {
+            return $false
+        }
+        return [decimal]$Value -eq $Expected
+    }
+
     hidden [pscustomobject] RegistryObservation(
         [hashtable]$Setting,
         [object]$Type,
-        [object]$StatusCode,
         [object]$ReturnCode
     ) {
-        $status = if ($StatusCode -eq 0) {
+        $status = if ($this.RegistryReturnCodeIs($ReturnCode, 0)) {
             'Observed'
         }
         else {
@@ -1060,6 +1205,21 @@ class ADAnalyzerHostCollector {
         }
     }
 
+    hidden [void] RecordCleanupFailures(
+        [object]$Errors,
+        [string]$ComputerName,
+        [Management.Automation.ErrorRecord[]]$CleanupErrors
+    ) {
+        if ($null -eq $Errors) {
+            return
+        }
+
+        foreach ($cleanupError in $CleanupErrors) {
+            $failure = $this.CollectorFailure('Host.Cleanup', $ComputerName, $cleanupError.Exception.Message)
+            [void]$Errors.Add($failure)
+        }
+    }
+
     hidden [void] CompleteReport(
         [Collections.Specialized.OrderedDictionary]$Report,
         [object[]]$Registry,
@@ -1084,33 +1244,56 @@ class ADAnalyzerHostCollector {
         $session = $null
         $initialErrorCount = $Errors.Count
         $report = $this.CreateReport($ComputerName)
+        $timing = [ADAnalyzerHostCollectionTiming]::new($TimeoutSeconds)
         try {
             $arguments = $this.SessionArguments($ComputerName, $Credential, $TimeoutSeconds)
+            $timing.StartOperation('Session', 'New-CimSession')
             $session = New-CimSession @arguments
+            $timing.CompleteOperation()
             foreach ($query in $Plan.Queries) {
                 try {
                     $arguments = $this.QueryArguments($session, $query, $TimeoutSeconds)
+                    $timing.StartOperation('Query', $query.ClassName)
                     $report[$query.Key] = @(Get-CimInstance @arguments)
+                    $timing.CompleteOperation()
                 }
                 catch {
+                    $timing.RecordFailure($_)
                     $Errors.Add($this.CollectorFailure(('Host.' + $query.Key), $ComputerName, $_.Exception.Message))
                 }
             }
-            $registry = $this.CollectRegistry($session, $Plan.RegistrySettings, $TimeoutSeconds)
-            $this.CompleteReport($report, $registry, ($Errors.Count -gt $initialErrorCount))
+            $registry = $this.CollectRegistry($session, $Plan.RegistrySettings, $TimeoutSeconds, $timing)
+            $this.CompleteReport($report, $registry, ($Errors.Count -gt $initialErrorCount -or $timing.HasTimeouts()))
         }
         catch {
+            $timing.RecordFailure($_)
             $Errors.Add($this.CollectorFailure('Host', $ComputerName, $_.Exception.Message))
         }
         finally {
             if ($null -ne $session) {
-                Remove-CimSession -CimSession $session -ErrorAction SilentlyContinue
+                $cleanupErrors = $null
+                Remove-CimSession -CimSession $session -ErrorAction SilentlyContinue -ErrorVariable cleanupErrors
+                $timing.RecordCleanup([bool]$cleanupErrors)
+                if ($cleanupErrors) {
+                    $this.RecordCleanupFailures($Errors, $ComputerName, $cleanupErrors)
+                }
             }
         }
+        $timing.AddToReport($report)
         return [pscustomobject]$report
     }
 
     hidden [object[]] CollectRegistry([object]$Session, [hashtable[]]$Settings, [uint32]$TimeoutSeconds) {
+        $timing = [ADAnalyzerHostCollectionTiming]::new($TimeoutSeconds)
+        return $this.CollectRegistry($Session, $Settings, $TimeoutSeconds, $timing)
+    }
+
+    hidden [object[]] CollectRegistry(
+        [object]$Session,
+        [hashtable[]]$Settings,
+        [uint32]$TimeoutSeconds,
+        [ADAnalyzerHostCollectionTiming]$Timing
+    ) {
         $registry = [Collections.Generic.List[object]]::new()
         $typeCache = @{}
         foreach ($setting in $Settings) {
@@ -1120,10 +1303,13 @@ class ADAnalyzerHostCollector {
                 if (-not $method) {
                     $arguments = $this.RegistryMetadataArguments($typeCache, $Session, $setting, $TimeoutSeconds)
                     if ($null -ne $arguments) {
+                        $Timing.StartOperation('Registry', 'EnumValues')
                         $typeCache[$setting.Path] = Invoke-CimMethod @arguments
+                        $Timing.CompleteOperation()
                     }
                     $metadata = $typeCache[$setting.Path]
-                    if ($metadata.ReturnValue -ne 0) {
+                    $metadataCode = Get-ADAnalyzerDirectoryObservationField $metadata 'ReturnValue'
+                    if (-not $this.RegistryReturnCodeIs($metadataCode, 0)) {
                         throw 'Registry value type metadata is unavailable'
                     }
                     $names = @($metadata.sNames)
@@ -1142,15 +1328,19 @@ class ADAnalyzerHostCollector {
                 }
 
                 $arguments = $this.RegistryArguments($Session, $setting, $method, $TimeoutSeconds)
+                $Timing.StartOperation('Registry', $method)
                 $value = Invoke-CimMethod @arguments
-                $record = $this.RegistryObservation($setting, $type, $value.ReturnValue, $value.ReturnValue)
-                if ($value.ReturnValue -eq 0) {
+                $Timing.CompleteOperation()
+                $returnCode = Get-ADAnalyzerDirectoryObservationField $value 'ReturnValue'
+                $record = $this.RegistryObservation($setting, $type, $returnCode)
+                if ($record.Status -eq 'Observed') {
                     $property = $this.RegistryValueProperty($type)
                     $record.Value = $value.$property
                 }
                 $registry.Add($record)
             }
             catch {
+                $Timing.RecordFailure($_)
                 $registry.Add($this.RegistryFailure($setting, $type, $_.Exception.Message))
             }
         }
@@ -1176,15 +1366,21 @@ function Get-ADAnalyzerHostData {
         $session = $null
         $initialErrorCount = $Errors.Count
         $data = $collector.CreateReport($computer)
+        $timing = [ADAnalyzerHostCollectionTiming]::new($TimeoutSeconds)
         try {
             $arguments = $collector.SessionArguments($computer, $Credential, $TimeoutSeconds)
+            $timing.StartOperation('Session', 'New-CimSession')
             $session = New-CimSession @arguments
+            $timing.CompleteOperation()
             foreach ($query in $plan.Queries) {
                 try {
                     $splat = $collector.QueryArguments($session, $query, $TimeoutSeconds)
+                    $timing.StartOperation('Query', $query.ClassName)
                     $data[$query.Key] = @(Get-CimInstance @splat)
+                    $timing.CompleteOperation()
                 }
                 catch {
+                    $timing.RecordFailure($_)
                     $Errors.Add($collector.CollectorFailure(('Host.' + $query.Key), $computer, $_.Exception.Message)) > $null
                 }
             }
@@ -1198,10 +1394,13 @@ function Get-ADAnalyzerHostData {
                     if (-not $method) {
                         $splat = $collector.RegistryMetadataArguments($typeCache, $session, $setting, $TimeoutSeconds)
                         if ($null -ne $splat) {
+                            $timing.StartOperation('Registry', 'EnumValues')
                             $typeCache[$setting.Path] = Invoke-CimMethod @splat
+                            $timing.CompleteOperation()
                         }
                         $metadata = $typeCache[$setting.Path]
-                        if ($metadata.ReturnValue -ne 0) {
+                        $metadataCode = Get-ADAnalyzerDirectoryObservationField $metadata 'ReturnValue'
+                        if (-not $collector.RegistryReturnCodeIs($metadataCode, 0)) {
                             throw 'Registry value type metadata is unavailable'
                         }
                         $names = @($metadata.sNames)
@@ -1220,28 +1419,39 @@ function Get-ADAnalyzerHostData {
                     }
 
                     $splat = $collector.RegistryArguments($session, $setting, $method, $TimeoutSeconds)
+                    $timing.StartOperation('Registry', $method)
                     $value = Invoke-CimMethod @splat
-                    $record = $collector.RegistryObservation($setting, $type, $value.ReturnValue, $value.ReturnValue)
-                    if ($value.ReturnValue -eq 0) {
+                    $timing.CompleteOperation()
+                    $returnCode = Get-ADAnalyzerDirectoryObservationField $value 'ReturnValue'
+                    $record = $collector.RegistryObservation($setting, $type, $returnCode)
+                    if ($record.Status -eq 'Observed') {
                         $property = $collector.RegistryValueProperty($type)
                         $record.Value = $value.$property
                     }
                     $registry.Add($record)
                 }
                 catch {
+                    $timing.RecordFailure($_)
                     $registry.Add($collector.RegistryFailure($setting, $type, $_.Exception.Message))
                 }
             }
-            $collector.CompleteReport($data, $registry.ToArray(), ($Errors.Count -gt $initialErrorCount))
+            $collector.CompleteReport($data, $registry.ToArray(), ($Errors.Count -gt $initialErrorCount -or $timing.HasTimeouts()))
         }
         catch {
+            $timing.RecordFailure($_)
             $Errors.Add($collector.CollectorFailure('Host', $computer, $_.Exception.Message)) > $null
         }
         finally {
             if ($null -ne $session) {
-                Remove-CimSession -CimSession $session -ErrorAction SilentlyContinue
+                $cleanupErrors = $null
+                Remove-CimSession -CimSession $session -ErrorAction SilentlyContinue -ErrorVariable cleanupErrors
+                $timing.RecordCleanup([bool]$cleanupErrors)
+                if ($cleanupErrors) {
+                    $collector.RecordCleanupFailures($Errors, $computer, $cleanupErrors)
+                }
             }
         }
+        $timing.AddToReport($data)
         [pscustomobject]$data
     }
 }
@@ -2005,7 +2215,8 @@ class ADAnalyzerDirectoryCollector {
 
     hidden [void] CompleteAclCoverage([Collections.IDictionary]$Coverage, [pscustomobject]$Plan) {
         $Coverage['Acl'] = if ($Plan.Enabled) {
-            if (@($Plan.Observations | Where-Object Status -ne 'Collected').Count) {
+            if ($Coverage['AclOUs'] -eq 'Unreadable' -or
+                @($Plan.Observations | Where-Object Status -ne 'Collected').Count) {
                 'Partial'
             }
             else {
@@ -2051,15 +2262,93 @@ class ADAnalyzerDirectoryCollector {
     ) {
         if (-not $Enabled) {
             $Coverage['Hosts'] = 'NotConfigured'
+            return
         }
-        elseif (@($Hosts | Where-Object Status -ne 'Observed').Count) {
-            $Coverage['Hosts'] = 'Partial'
-        }
-        elseif ($Hosts.Count) {
-            $Coverage['Hosts'] = 'Collected'
-        }
-        else {
+        if (-not $Hosts.Count) {
             $Coverage['Hosts'] = 'Unreadable'
+            return
+        }
+
+        $status = 'Collected'
+        $hostCollector = [ADAnalyzerHostCollector]::new()
+        :scanHosts foreach ($hostRecord in $Hosts) {
+            if ($hostRecord.Status -ne 'Observed') {
+                $status = 'Partial'
+                break scanHosts
+            }
+
+            $registry = $hostRecord.PSObject.Properties['Registry']
+            if ($null -eq $registry) {
+                continue
+            }
+            foreach ($record in $registry.Value) {
+                if ($null -eq $record -or $record.Status -ne 'Unknown') {
+                    continue
+                }
+
+                $members = $record.PSObject.Properties
+                $returnCode = $members['ReturnValue']
+                if ($null -ne $returnCode) {
+                    # Win32 code 2 is the established missing-value observation.
+                    if ($hostCollector.RegistryReturnCodeIs($returnCode.Value, 2)) {
+                        continue
+                    }
+                }
+                elseif ($null -eq $members['Message']) {
+                    continue
+                }
+
+                $status = 'Partial'
+                break scanHosts
+            }
+        }
+
+        $Coverage['Hosts'] = $status
+    }
+
+    hidden [object] DescribeUsersObservation(
+        [string]$RequestedSearchBase,
+        [string]$SearchBase,
+        [string]$Server,
+        [object]$RootDse,
+        [string]$Mode,
+        [Collections.IDictionary]$Coverage
+    ) {
+        if ([string]::IsNullOrWhiteSpace($RequestedSearchBase)) {
+            return $null
+        }
+
+        $observedAt = $null
+        $status = 'Unreadable'
+        if ($Coverage['Users'] -eq 'Collected') {
+            $status = 'Completed'
+            $observedAt = [datetime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+        }
+        elseif ($Mode -eq 'PSDrive' -and $Coverage['DirectoryConnection'] -ne 'Collected') {
+            $status = 'Unobserved'
+        }
+
+        $controller = $null
+        $ErrorActionPreference = 'Stop'
+        try {
+            $reportedServer = Get-ADAnalyzerDirectoryObservationField $RootDse 'DnsHostName'
+            if ($reportedServer -is [string] -and
+                [string]::Equals($reportedServer, $Server, [StringComparison]::OrdinalIgnoreCase)) {
+                $controller = $Server
+            }
+        }
+        catch {
+            # A missing controller witness does not change the query outcome.
+            $controller = $null
+        }
+        return [pscustomobject][ordered]@{
+            Version = 1
+            RequestedSearchBase = $RequestedSearchBase
+            SearchBase = $SearchBase
+            Server = $controller
+            Mode = $Mode
+            ObservedAt = $observedAt
+            Status = $status
         }
     }
 
@@ -2068,7 +2357,7 @@ class ADAnalyzerDirectoryCollector {
         if ($Observations.ConnectionMode -eq 'PSDrive' -and $Observations.Coverage['DirectoryConnection'] -ne 'Collected') {
             $connectionStatus = 'Unreadable'
         }
-        return [pscustomobject]@{
+        $snapshot = [ordered]@{
             Server = $Observations.Server
             Domain = [pscustomobject]@{
                 DistinguishedName = $Observations.DomainDn
@@ -2104,6 +2393,10 @@ class ADAnalyzerDirectoryCollector {
             Errors = $Observations.Errors.ToArray()
             Coverage = $Observations.Coverage
         }
+        if ($null -ne $Observations.UsersObservation) {
+            $snapshot['UsersObservation'] = $Observations.UsersObservation
+        }
+        return [pscustomobject]$snapshot
     }
 }
 
@@ -2158,13 +2451,22 @@ function Get-ADAnalyzerDirectoryObservation {
                 $schema = @(& $query $request.Command $request.Arguments $request.Key)
             }
             $available = @($schema | ForEach-Object { [string](Get-ADAnalyzerDirectoryField $_ 'lDAPDisplayName') })
-            $searchBase = [string](Get-ADAnalyzerDirectoryField $Context 'SearchBase')
+            $requestedSearchBase = [string](Get-ADAnalyzerDirectoryField $Context 'SearchBase')
+            $searchBase = $requestedSearchBase
             if ([string]::IsNullOrWhiteSpace($searchBase)) {
                 $searchBase = $domainDn
             }
 
             $accountPlan = $collector.AccountPlan($searchBase, $domainDn, $available, $Profile, $coverage, $errors, $server)
             $rawUsers = @(& $query 'Get-ADUser' $accountPlan.UserArguments 'Users')
+            $usersObservation = $collector.DescribeUsersObservation(
+                $requestedSearchBase,
+                $accountPlan.UserArguments.SearchBase,
+                $server,
+                $root,
+                $connectionMode,
+                $coverage
+            )
             $rawComputers = @(& $query 'Get-ADComputer' $accountPlan.ComputerArguments 'Computers')
             $groups = @(& $query 'Get-ADGroup' $accountPlan.GroupArguments 'Groups')
             $trusts = @(& $query 'Get-ADTrust' $accountPlan.TrustArguments 'Trusts')
@@ -2181,6 +2483,9 @@ function Get-ADAnalyzerDirectoryObservation {
                 $settings = @(& $query 'Get-ADObject' $policyPlan.SettingsArguments 'DomainSettings') | Select-Object -First 1
                 $defaultPolicy = @(& $query 'Get-ADDefaultDomainPasswordPolicy' $policyPlan.DefaultArguments 'DefaultPasswordPolicy') |
                     Select-Object -First 1
+                if ($null -eq $defaultPolicy -and $coverage['DefaultPasswordPolicy'] -eq 'Collected') {
+                    $coverage['DefaultPasswordPolicy'] = 'Unreadable'
+                }
                 $fineGrained = @(& $query 'Get-ADFineGrainedPasswordPolicy' $policyPlan.FineGrainedArguments 'FineGrainedPasswordPolicies')
                 $optional = @(& $query 'Get-ADOptionalFeature' $policyPlan.OptionalArguments 'OptionalFeatures')
             }
@@ -2208,6 +2513,11 @@ function Get-ADAnalyzerDirectoryObservation {
                     $effective = @(& $query 'Get-ADUserResultantPasswordPolicy' $policyPlan.Arguments $policyPlan.Key) |
                         Select-Object -First 1
                 }
+                if ($null -eq $effective -and $null -eq $defaultPolicy -and
+                    $coverage[$policyPlan.Key] -eq 'Collected') {
+                    $coverage[$policyPlan.Key] = 'Unreadable'
+                }
+
                 $resultant.Add($collector.CreateResultantPolicyRecord(
                         $user.DistinguishedName, $effective, $defaultPolicy, $coverage[$policyPlan.Key]
                     ))
@@ -2327,6 +2637,7 @@ function Get-ADAnalyzerDirectoryObservation {
                     Hosts = $hosts
                     Errors = $errors
                     Coverage = $coverage
+                    UsersObservation = $usersObservation
                 })
         }
         catch {
@@ -2862,6 +3173,63 @@ class ADAnalyzerDirectoryPolicyEvaluator {
         })
     }
 
+    hidden [hashtable] GetScopedUserEvidence([object]$Data) {
+        $observation = Get-ADAnalyzerDirectoryObservationField $Data 'UsersObservation'
+        $version = Get-ADAnalyzerDirectoryObservationField $observation 'Version'
+        $outcome = Get-ADAnalyzerDirectoryObservationField $observation 'Status'
+        $scope = Get-ADAnalyzerDirectoryObservationField $observation 'SearchBase'
+        $requestedScope = Get-ADAnalyzerDirectoryObservationField $observation 'RequestedSearchBase'
+        $coverage = Get-ADAnalyzerDirectoryObservationField $Data 'Coverage'
+        $usersCoverage = Get-ADAnalyzerDirectoryObservationField $coverage 'Users'
+        $users = Get-ADAnalyzerDirectoryObservationField $Data 'Users'
+        if (($version -isnot [int] -and $version -isnot [long]) -or $version -ne 1 -or
+            $outcome -isnot [string] -or $outcome -cne 'Completed' -or
+            $usersCoverage -isnot [string] -or $usersCoverage -cne 'Collected' -or
+            $scope -isnot [string] -or [string]::IsNullOrWhiteSpace($scope) -or
+            $requestedScope -isnot [string] -or -not $scope.Equals($requestedScope, [StringComparison]::OrdinalIgnoreCase) -or
+            $users -isnot [Collections.IList]) {
+            return $null
+        }
+
+        $index = [Collections.Generic.Dictionary[guid, object]]::new()
+        foreach ($user in $users) {
+            $identity = ConvertTo-ADAnalyzerDirectorySubjectGuid (Get-ADAnalyzerDirectoryObservationField $user 'ObjectGuid')
+            if ($identity -eq [guid]::Empty) {
+                continue
+            }
+            if ($index.ContainsKey($identity)) {
+                $index[$identity] = $null
+                continue
+            }
+            $index.Add($identity, $user)
+        }
+        return @{
+            Scope = $scope
+            Users = $index
+        }
+    }
+
+    hidden [object] FindScopedUser([object]$Object, [hashtable]$Evidence) {
+        if ($null -eq $Evidence) {
+            return $null
+        }
+        $identity = ConvertTo-ADAnalyzerDirectorySubjectGuid (Get-ADAnalyzerDirectoryObservationField $Object 'ObjectGuid')
+        $user = $null
+        if ($identity -eq [guid]::Empty -or -not $Evidence.Users.TryGetValue($identity, [ref]$user) -or $null -eq $user) {
+            return $null
+        }
+
+        $dn = Get-ADAnalyzerDirectoryObservationField $Object 'DistinguishedName'
+        $userDn = Get-ADAnalyzerDirectoryObservationField $user 'DistinguishedName'
+        $kind = Get-ADAnalyzerDirectoryObservationField $user 'ObjectClass'
+        if ($kind -is [string] -and $kind -ieq 'User' -and $dn -is [string] -and $userDn -is [string] -and
+            $dn.Equals($userDn, [StringComparison]::OrdinalIgnoreCase) -and
+            (Test-ADAnalyzerDirectorySubjectInScope $dn $Evidence.Scope)) {
+            return $user
+        }
+        return $null
+    }
+
     hidden [void] EvaluateAccounts([hashtable]$Evaluation) {
         $Data = $Evaluation.Data
         $Profile = $Evaluation.Profile
@@ -2869,6 +3237,16 @@ class ADAnalyzerDirectoryPolicyEvaluator {
         $domain = $Evaluation.Domain
         $domainTarget = $Evaluation.DomainTarget
         $coverage = $Evaluation.Coverage
+        $scopedUsers = if ($Data -is [Collections.IDictionary]) {
+            ([Collections.IDictionary]$Data).Contains('UsersObservation')
+        }
+        else {
+            $null -ne $Data -and $null -ne $Data.PSObject.Properties['UsersObservation']
+        }
+        $scopedEvidence = $null
+        if ($scopedUsers) {
+            $scopedEvidence = $this.GetScopedUserEvidence($Data)
+        }
 
         $allObjects = @(Get-ADAnalyzerDirectoryField $Data 'Objects' @())
         if (-not $allObjects.Count) {
@@ -2887,6 +3265,9 @@ class ADAnalyzerDirectoryPolicyEvaluator {
         foreach ($object in $allObjects) {
             $target = Get-ADAnalyzerDirectoryTarget $object
             $kind = [string](Get-ADAnalyzerDirectoryField $object 'ObjectClass')
+            $scopedUser = $scopedUsers -and $kind -eq 'User'
+            $scopedControl = $null
+            $recordedEnabled = $null
             $classification = [string](Get-ADAnalyzerDirectoryField $object 'AccountType' 'Unknown')
             if ($kind -in @('User', 'ServiceAccount')) {
                 $classificationEvidence = Get-ADAnalyzerDirectoryField $object 'AccountClassification'
@@ -2931,7 +3312,13 @@ class ADAnalyzerDirectoryPolicyEvaluator {
                 else {
                     $null
                 }
-                $enabled = Get-ADAnalyzerDirectoryField $object 'Enabled'
+                $enabled = if ($scopedUser) {
+                    $recordedEnabled = Get-ADAnalyzerDirectoryObservationField $object 'Enabled'
+                    $recordedEnabled
+                }
+                else {
+                    Get-ADAnalyzerDirectoryField $object 'Enabled'
+                }
                 $status = if ($null -eq $enabled -or $null -eq $age) {
                     'Unknown'
                 }
@@ -3014,9 +3401,39 @@ class ADAnalyzerDirectoryPolicyEvaluator {
                     Object = $object
                     Applicability = 'Configured'
                 })
-                $never = Get-ADAnalyzerDirectoryField $object 'PasswordNeverExpires'
+                $never = Get-ADAnalyzerDirectoryObservationField $object 'PasswordNeverExpires'
                 $allowed = Get-ADAnalyzerDirectoryField $policy 'AllowPasswordNeverExpires'
-                $status = if ($null -eq $never -or $null -eq $allowed) {
+                $disabled = $false
+                if ($scopedUser) {
+                    $observation = @{
+                        Value = Get-ADAnalyzerDirectoryObservationField $object 'UserAccountControl'
+                        Enabled = $recordedEnabled
+                        ExpirationFlag = $never
+                    }
+                    $scopedControl = Get-ADAnalyzerAccountControlObservation @observation
+                    $user = $this.FindScopedUser($object, $scopedEvidence)
+                    $subjectControl = $null
+                    if ($null -ne $user) {
+                        $subjectControl = $scopedControl
+                        if (-not [object]::ReferenceEquals($user, $object)) {
+                            $observed = @{
+                                Value = Get-ADAnalyzerDirectoryObservationField $user 'UserAccountControl'
+                                Enabled = Get-ADAnalyzerDirectoryObservationField $user 'Enabled'
+                                ExpirationFlag = Get-ADAnalyzerDirectoryObservationField $user 'PasswordNeverExpires'
+                            }
+                            $subjectControl = Get-ADAnalyzerAccountControlObservation @observed
+                        }
+                    }
+                    $never = $null
+                    if ($null -ne $subjectControl -and $subjectControl.Consistent) {
+                        $never = $subjectControl.PasswordNeverExpires
+                        $disabled = -not $subjectControl.Enabled
+                    }
+                }
+                $status = if ($disabled) {
+                    'NotApplicable'
+                }
+                elseif ($never -isnot [bool] -or $null -eq $allowed) {
                     'Unknown'
                 }
                 elseif ($never -and -not $allowed) {
@@ -3039,7 +3456,14 @@ class ADAnalyzerDirectoryPolicyEvaluator {
                     Applicability = 'Configured'
                 })
             }
-            $uac = Get-ADAnalyzerDirectoryField $object 'UserAccountControl'
+            $uac = if ($scopedUser) {
+                if ($null -ne $scopedControl) {
+                    $scopedControl.Flags
+                }
+            }
+            else {
+                Get-ADAnalyzerDirectoryField $object 'UserAccountControl'
+            }
             $unconstrained = Get-ADAnalyzerDirectoryField $object 'TrustedForDelegation'
             if ($null -ne $uac) {
                 $unconstrained = ([long]$uac -band 524288) -ne 0
@@ -3364,21 +3788,26 @@ class ADAnalyzerDirectoryPolicyEvaluator {
         $coverage = $Evaluation.Coverage
 
         foreach ($trust in @(Get-ADAnalyzerDirectoryField $Data 'Trusts' @())) {
-            $intraForest = Get-ADAnalyzerDirectoryField $trust 'IntraForest'
-            $forestTrust = Get-ADAnalyzerDirectoryField $trust 'ForestTransitive'
-            $filtering = if ($forestTrust) {
-                Get-ADAnalyzerDirectoryField $trust 'SIDFilteringForestAware'
+            $intraForest = Get-ADAnalyzerDirectoryObservationField $trust 'IntraForest'
+            $forestTrust = Get-ADAnalyzerDirectoryObservationField $trust 'ForestTransitive'
+            $filtering = $null
+            if ($forestTrust -is [bool]) {
+                $flagName = if ($forestTrust) {
+                    'SIDFilteringForestAware'
+                }
+                else {
+                    'SIDFilteringQuarantined'
+                }
+                $filtering = Get-ADAnalyzerDirectoryObservationField $trust $flagName
             }
-            else {
-                Get-ADAnalyzerDirectoryField $trust 'SIDFilteringQuarantined'
-            }
-            $status = if ($intraForest -eq $true) {
+
+            $status = if ($intraForest -is [bool] -and $intraForest) {
                 'NotApplicable'
             }
-            elseif ($null -eq $intraForest -or $null -eq $forestTrust -or $null -eq $filtering) {
+            elseif ($intraForest -isnot [bool] -or $forestTrust -isnot [bool] -or $filtering -isnot [bool]) {
                 'Unknown'
             }
-            elseif ([bool]$filtering) {
+            elseif ($filtering) {
                 'Pass'
             }
             else {

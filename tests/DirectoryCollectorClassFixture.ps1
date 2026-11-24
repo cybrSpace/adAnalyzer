@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Native', 'Construction', 'Direct', 'Isolation')]
+    [ValidateSet('Native', 'Construction', 'Direct', 'Isolation', 'UsersCoverage', 'AclCoverage', 'ResultantPolicyCoverage')]
     [string]$Case,
     [Parameter(Mandatory)][string]$RepositoryRoot
 )
@@ -41,6 +41,13 @@ $script:ImportAllowed = $false
 $script:Fault = ''
 $script:PsoDn = 'CN=FixturePolicy,' + $script:DomainDn
 $script:RootDomainDn = $script:DomainDn
+$script:UsersScenario = ''
+$script:UsersQueryStart = $null
+$script:UsersNextQuery = $null
+$script:UsersGuids = @(
+    [guid]'50000000-0000-4000-8000-000000000001'
+    [guid]'50000000-0000-4000-8000-000000000002'
+)
 
 function Assert-DirectoryCollector($Condition, [string]$Message) {
     if (-not $Condition) {
@@ -161,7 +168,7 @@ function New-FixtureUser([string]$Name, [string]$PsoDn) {
     else {
         512
     }
-    [pscustomobject][ordered]@{
+    $record = [pscustomobject][ordered]@{
         Name = $Name
         SamAccountName = $Name
         DistinguishedName = ('CN={0},{1}' -f $Name, $script:SearchBase)
@@ -180,6 +187,18 @@ function New-FixtureUser([string]$Name, [string]$PsoDn) {
         ProtectedFromAccidentalDeletion = $false
         'msDS-ResultantPSO' = $PsoDn
     }
+    if ($script:UsersScenario) {
+        $identity = $script:UsersGuids[1]
+        if ($Name -ceq 'Cached') {
+            $identity = $script:UsersGuids[0]
+        }
+        $record | Add-Member -NotePropertyMembers @{
+            ObjectGuid = $identity
+            Enabled = $true
+            PasswordNeverExpires = ($Name -ceq 'Cached')
+        }
+    }
+    return $record
 }
 
 function New-FixturePolicy([string]$Name, [int]$Length) {
@@ -226,14 +245,31 @@ function Invoke-FixtureProvider([string]$Command, [Collections.IDictionary]$Boun
         Write-Error -Message 'Fixture directory query denied.' -ErrorId 'Fixture.DirectoryDenied' -ErrorAction Stop
     }
 
+    if ($script:UsersScenario -and $Command -ceq 'Get-ADComputer') {
+        $script:UsersNextQuery = [datetimeoffset]::UtcNow
+    }
     switch ($Command) {
         'Get-ADRootDSE' {
-            [pscustomobject][ordered]@{
-                DnsHostName = ('returned.' + $script:Domain)
+            $server = 'returned.' + $script:Domain
+            if ($script:UsersScenario) {
+                $server = $script:SelectedServer
+            }
+            $root = [pscustomobject][ordered]@{
+                DnsHostName = $server
                 DefaultNamingContext = $script:RootDomainDn
                 SchemaNamingContext = 'CN=Schema,CN=Configuration,' + $script:DomainDn
                 ConfigurationNamingContext = 'CN=Configuration,' + $script:DomainDn
             }
+            if ($script:UsersScenario -ceq 'ControllerArray') {
+                $root.DnsHostName = @($server)
+            }
+            elseif ($script:UsersScenario -ceq 'ControllerUnreadable') {
+                $root.PSObject.Properties.Remove('DnsHostName')
+                $root | Add-Member -MemberType ScriptProperty -Name DnsHostName -Value {
+                    throw 'Fixture controller witness is unreadable.'
+                }
+            }
+            $root
         }
         'Get-ADDomain' {
             [pscustomobject][ordered]@{
@@ -250,6 +286,19 @@ function Invoke-FixtureProvider([string]$Command, [Collections.IDictionary]$Boun
             }
         }
         'Get-ADUser' {
+            if ($script:UsersScenario) {
+                $script:UsersQueryStart = [datetimeoffset]::UtcNow
+                switch ($script:UsersScenario) {
+                    'Empty' { return }
+                    'Denied' {
+                        Write-Error -Message 'Fixture Users query Denied' -ErrorId 'Fixture.UsersDenied' -Category PermissionDenied -ErrorAction Stop
+                    }
+                    'Partial' {
+                        New-FixtureUser 'Fallback' ''
+                        Write-Error -Message 'Fixture Users query Partial' -ErrorId 'Fixture.UsersPartial' -Category ReadError -ErrorAction Stop
+                    }
+                }
+            }
             New-FixtureUser 'Cached' $script:PsoDn
             New-FixtureUser 'Fallback' ''
         }
@@ -265,30 +314,61 @@ function Invoke-FixtureProvider([string]$Command, [Collections.IDictionary]$Boun
             [pscustomobject]@{ HostName = $script:SelectedServer }
         }
         'Get-ADDefaultDomainPasswordPolicy' {
-            New-FixturePolicy 'Default' 12
+            if ($script:Fault -ceq 'PasswordDefaultDenied') {
+                $denial = @{
+                    Message = 'Fixture default domain password policy access denied.'
+                    ErrorId = 'Fixture.DefaultPolicyDenied'
+                    Category = 'PermissionDenied'
+                    ErrorAction = 'Stop'
+                }
+                Write-Error @denial
+            }
+            if ($script:Fault -ceq 'PasswordDefaultEmpty') {
+                return
+            }
+            $policy = New-FixturePolicy 'Default' 12
+            if ($script:Fault -clike 'PasswordDefault*') {
+                $policy.DistinguishedName = $script:DomainDn
+            }
+            $policy
         }
         'Get-ADFineGrainedPasswordPolicy' {
             New-FixturePolicy 'Cached policy' 16
         }
         'Get-ADUserResultantPasswordPolicy' {
+            if ($script:Fault -clike 'PasswordDefault*') {
+                return
+            }
             New-FixturePolicy 'Explicit policy' 18
         }
         'Get-ADOptionalFeature' {
             [pscustomobject]@{ FeatureGUID = '766ddcd8-acd0-445e-f3b9-a7f9b6744f2a' }
         }
         'Get-ADOrganizationalUnit' {
+            if ($script:Fault -ceq 'AclDenied') {
+                Write-Error -Message 'Fixture OU ACL discovery denied.' -ErrorId 'Fixture.AclOuDenied' `
+                    -Category PermissionDenied -ErrorAction Stop
+            }
+            if ($script:Fault -ceq 'AclEmpty') {
+                return
+            }
             [pscustomobject]@{ DistinguishedName = $script:SearchBase }
         }
         'Get-ADObject' {
             if ('nTSecurityDescriptor' -in $Bound['Properties']) {
+                $ace = [pscustomobject][ordered]@{
+                    IdentitySid = 'S-1-5-21-1-2-3-9000'
+                    Rights = 'ExtendedRight'
+                    AccessControlType = 'Allow'
+                    ObjectType = '1131f6aa-9c07-11d1-f79f-00c04fc2dcd2'
+                }
+                if ($script:Fault -clike 'Acl*' -and $Bound['Identity'] -like 'CN=AdminSDHolder,*') {
+                    $ace.Rights = 'WriteDacl'
+                    $ace.ObjectType = [guid]::Empty.ToString()
+                }
                 [pscustomobject]@{
                     nTSecurityDescriptor = [pscustomobject]@{
-                        Access = @([pscustomobject][ordered]@{
-                            IdentitySid = 'S-1-5-21-1-2-3-9000'
-                            Rights = 'ExtendedRight'
-                            AccessControlType = 'Allow'
-                            ObjectType = '1131f6aa-9c07-11d1-f79f-00c04fc2dcd2'
-                        })
+                        Access = @($ace)
                     }
                 }
             }
@@ -359,6 +439,268 @@ function Clear-FixtureObservations {
 
 function ConvertTo-FixtureJson($Value) {
     ConvertTo-Json -Depth 28 -Compress -InputObject $Value
+}
+
+function ConvertTo-FixtureSnapshotComparisonJson($Snapshot) {
+    $observation = $Snapshot.PSObject.Properties['UsersObservation']
+    if ($null -eq $observation) {
+        return ConvertTo-FixtureJson $Snapshot
+    }
+
+    $snapshotFields = [ordered]@{}
+    foreach ($property in $Snapshot.PSObject.Properties) {
+        $snapshotFields[$property.Name] = $property.Value
+    }
+
+    $observationFields = [ordered]@{}
+    foreach ($property in $observation.Value.PSObject.Properties) {
+        if ($property.Name -ceq 'ObservedAt') {
+            $observationFields[$property.Name] = '<validated volatile time>'
+        }
+        else {
+            $observationFields[$property.Name] = $property.Value
+        }
+    }
+
+    $snapshotFields['UsersObservation'] = [pscustomobject]$observationFields
+    ConvertTo-FixtureJson ([pscustomobject]$snapshotFields)
+}
+
+function Assert-FixtureUsersObservation(
+    $Snapshot,
+    [string]$Transport,
+    [string]$Status,
+    [string]$Scenario
+) {
+    $property = $Snapshot.PSObject.Properties['UsersObservation']
+
+    Assert-DirectoryCollector ($null -ne $property -and $null -ne $property.Value) 'Missing UsersObservation record.'
+    $record = $property.Value
+    $names = @($record.PSObject.Properties | ForEach-Object Name)
+    Assert-DirectoryCollector (
+        ($names | Sort-Object) -join '|' -ceq 'Mode|ObservedAt|RequestedSearchBase|SearchBase|Server|Status|Version'
+    ) 'Unexpected UsersObservation fields.'
+    Assert-DirectoryCollector (
+        $record.Version -is [int] -and $record.Version -eq 1 -and
+        $record.RequestedSearchBase -is [string] -and $record.RequestedSearchBase -ceq $script:SearchBase -and
+        $record.SearchBase -is [string] -and $record.SearchBase -ceq $script:SearchBase -and
+        $record.Mode -ceq $Transport -and $record.Status -ceq $Status
+    ) 'UsersObservation lost its version, scope, bound controller, mode, or outcome.'
+    if ($Scenario -in 'ControllerArray', 'ControllerUnreadable') {
+        Assert-DirectoryCollector ($null -eq $record.Server) 'An unsupported RootDSE hostname was treated as a controller witness.'
+    }
+    else {
+        Assert-DirectoryCollector (
+            $record.Server -is [string] -and $record.Server -ceq $script:SelectedServer
+        ) 'UsersObservation lost its verified controller witness.'
+    }
+
+    if ($Status -ceq 'Unobserved') {
+        Assert-DirectoryCollector ($null -eq $record.ObservedAt) 'An unattempted Users query has an observation time.'
+        return
+    }
+    if ($Status -ceq 'Unreadable' -and $null -eq $record.ObservedAt) {
+        return
+    }
+
+    $instant = [datetimeoffset]::MinValue
+    if ($record.ObservedAt -is [datetimeoffset]) {
+        $instant = $record.ObservedAt
+    }
+    else {
+        Assert-DirectoryCollector (
+            $record.ObservedAt -is [string] -and
+            $record.ObservedAt -cmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}(?:Z|\+00:00)$' -and
+            [datetimeoffset]::TryParse(
+                $record.ObservedAt,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::None,
+                [ref]$instant
+            )
+        ) 'UsersObservation did not contain an invariant UTC timestamp.'
+    }
+    Assert-DirectoryCollector (
+        $instant.Offset -eq [timespan]::Zero -and
+        $null -ne $script:UsersQueryStart -and $null -ne $script:UsersNextQuery -and
+        $instant -ge $script:UsersQueryStart -and $instant -le $script:UsersNextQuery
+    ) 'UsersObservation time was not recorded at the Users query boundary.'
+}
+
+function Assert-FixtureUsersResult($Snapshot, [string]$Transport, [string]$Scenario) {
+    $requests = @($script:Trace | Where-Object Step -ceq 'Get-ADUser')
+    $expectedLegacyStatus = 'Collected'
+    $status = 'Completed'
+    $expectedCount = 2
+    switch ($Scenario) {
+        'Empty' { $expectedCount = 0 }
+        'Denied' {
+            $expectedLegacyStatus = 'Unreadable'
+            $status = 'Unreadable'
+            $expectedCount = 0
+        }
+        'Partial' {
+            $expectedLegacyStatus = 'Unreadable'
+            $status = 'Unreadable'
+            $expectedCount = 0
+        }
+        'DriveEntry' {
+            $expectedLegacyStatus = 'Unreadable'
+            $status = 'Unobserved'
+            $expectedCount = 0
+        }
+    }
+
+    Assert-DirectoryCollector (
+        $Snapshot.Coverage.Users -ceq $expectedLegacyStatus -and
+        $Snapshot.Users -is [array] -and $Snapshot.Users.Count -eq $expectedCount
+    ) 'Users collection lost its existing scope or completion result.'
+    if ($expectedCount -eq 2) {
+        Assert-DirectoryCollector (
+            $Snapshot.Users[0].Enabled -is [bool] -and $Snapshot.Users[0].Enabled -eq $true -and
+            $Snapshot.Users[0].PasswordNeverExpires -is [bool] -and $Snapshot.Users[0].PasswordNeverExpires -eq $true -and
+            $Snapshot.Users[1].Enabled -is [bool] -and $Snapshot.Users[1].Enabled -eq $true -and
+            $Snapshot.Users[1].PasswordNeverExpires -is [bool] -and $Snapshot.Users[1].PasswordNeverExpires -eq $false -and
+            [guid]$Snapshot.Users[0].ObjectGuid -eq $script:UsersGuids[0] -and
+            [guid]$Snapshot.Users[1].ObjectGuid -eq $script:UsersGuids[1] -and
+            $Snapshot.Users[0].DistinguishedName -ceq ('CN=Cached,' + $script:SearchBase) -and
+            $Snapshot.Users[1].DistinguishedName -ceq ('CN=Fallback,' + $script:SearchBase)
+        ) 'Users projection changed account identity or its observed Boolean flags.'
+    }
+
+    if ($Scenario -ceq 'DriveEntry') {
+        Assert-DirectoryCollector (
+            $requests.Count -eq 0 -and $null -eq $script:UsersQueryStart -and
+            $Snapshot.DirectoryConnection.Status -ceq 'Unreadable'
+        ) 'The skipped Users query actually entered the provider.'
+    }
+    else {
+        $owned = $Transport -ceq 'PSDrive'
+        Assert-DirectoryCollector (
+            $requests.Count -eq 1 -and [bool]$requests[0].Owned -eq $owned -and
+            $requests[0].Base -ceq $script:SearchBase -and $requests[0].Filter -ceq '*' -and
+            $requests[0].Server -ceq $script:SelectedServer -and
+            $requests[0].SameCredential -and [bool]$requests[0].CredentialBound -ne $owned -and
+            $requests[0].ErrorAction -ceq 'Stop' -and
+            'Enabled' -in $requests[0].Properties.Split(',') -and
+            'PasswordNeverExpires' -in $requests[0].Properties.Split(',')
+        ) 'The scoped Users query changed request arguments, ownership, credential, or cardinality.'
+    }
+
+    $usersErrors = @($Snapshot.Errors | Where-Object Collector -ceq 'Users')
+    if ($Scenario -in 'Denied', 'Partial') {
+        Assert-DirectoryCollector (
+            $usersErrors.Count -eq 1 -and $usersErrors[0].Target -ceq $script:SelectedServer -and
+            $usersErrors[0].Status -ceq 'Unreadable' -and
+            $usersErrors[0].Message -ceq ('Fixture Users query ' + $Scenario)
+        ) 'An unreadable Users query lost its original scoped error.'
+    }
+    if ($Scenario -ceq 'Unrelated') {
+        Assert-DirectoryCollector (
+            $usersErrors.Count -eq 0 -and $Snapshot.Coverage.Trusts -ceq 'Unreadable' -and
+            @($Snapshot.Errors | Where-Object Collector -ceq 'Trusts').Count -eq 1
+        ) 'The unrelated failure changed Users completion or lost its original diagnostic.'
+    }
+
+    Assert-FixtureUsersObservation $Snapshot $Transport $status $Scenario
+}
+
+function Set-FixtureUsersScenario([string]$Scenario) {
+    Clear-FixtureObservations
+    $script:UsersScenario = $Scenario
+    $script:UsersQueryStart = $null
+    $script:UsersNextQuery = $null
+    if ($Scenario -ceq 'DriveEntry') {
+        $script:Fault = 'Enter'
+    }
+    elseif ($Scenario -ceq 'Unrelated') {
+        $script:Fault = 'Denied'
+    }
+}
+
+function Invoke-FixtureUsersCoverage($Collector) {
+    $legacy = (Get-Command Get-ADAnalyzerDirectoryData -CommandType Function).ScriptBlock
+    $failures = [Collections.Generic.List[string]]::new()
+    foreach ($transport in 'PSDrive', 'Direct') {
+        $scenarios = @('Completed', 'Empty', 'Denied', 'Partial', 'Unrelated', 'ControllerArray', 'ControllerUnreadable')
+        if ($transport -ceq 'PSDrive') {
+            $scenarios += 'DriveEntry'
+        }
+
+        foreach ($scenario in $scenarios) {
+            try {
+                Test-DirectoryCollector ($transport + ' Users ' + $scenario) {
+                    Set-FixtureUsersScenario $scenario
+                    $context = New-FixtureContext
+                    $profile = New-FixtureProfile $transport
+                    $native = Invoke-FixtureNative $context $profile
+                    Assert-DirectoryCollector (
+                        $native.Rows.Count -eq 1 -and $native.Restored -and $null -eq $native.Failure -and
+                        $script:Imports.Count -eq 0
+                    ) 'Native did not finish its scoped Users request.'
+                    $nativeTrace = ConvertTo-FixtureJson ($script:Trace.ToArray())
+                    if ($scenario -in 'Denied', 'Partial') {
+                        $expectedId = if ($scenario -ceq 'Denied') {
+                            'Fixture.UsersDenied*'
+                        }
+                        else {
+                            'Fixture.UsersPartial*'
+                        }
+                        Assert-DirectoryCollector (
+                            @(Get-FixtureCapturedError $native.Errors | Where-Object Id -like $expectedId).Count -gt 0
+                        ) 'Native lost its original Users error ID.'
+                    }
+
+                    if ($transport -ceq 'PSDrive') {
+                        Assert-DirectoryCollector ($script:Trace[-1].Step -ceq 'Remove') 'Native failed to remove its owned fixture drive.'
+                    }
+                    else {
+                        Assert-DirectoryCollector (@($script:Trace | Where-Object Step -in 'Create', 'Remove').Count -eq 0) 'Native Direct mounted a drive.'
+                    }
+
+                    Set-Item -LiteralPath Function:script:Get-ADAnalyzerDirectoryData -Value {
+                        throw 'Direct Users coverage called the compatibility command.'
+                    }
+                    try {
+                        # Preserve the independently witnessed native clock before switching stubs.
+                        $nativeStart = $script:UsersQueryStart
+                        $nativeNext = $script:UsersNextQuery
+                        Set-FixtureUsersScenario $scenario
+                        $direct = @(Invoke-FixtureDirect $Collector $context $profile 3>$null)
+                        Assert-DirectoryCollector (
+                            $direct.Count -eq 1 -and $script:Imports.Count -eq 1 -and $script:Ambient.Count -eq 0
+                        ) 'The direct method did not use the selected bundled capabilities.'
+                        Assert-DirectoryCollector (
+                            (ConvertTo-FixtureJson ($script:Trace.ToArray())) -ceq $nativeTrace
+                        ) 'The direct method changed provider arguments, order, or drive lifetime.'
+
+                        $directStart = $script:UsersQueryStart
+                        $directNext = $script:UsersNextQuery
+                        Assert-FixtureUsersResult $direct[0] $transport $scenario
+                        $script:UsersQueryStart = $nativeStart
+                        $script:UsersNextQuery = $nativeNext
+                        Assert-FixtureUsersResult $native.Rows[0] $transport $scenario
+                        $script:UsersQueryStart = $directStart
+                        $script:UsersNextQuery = $directNext
+
+                        Assert-DirectoryCollector (
+                            (ConvertTo-FixtureSnapshotComparisonJson $direct[0]) -ceq
+                            (ConvertTo-FixtureSnapshotComparisonJson $native.Rows[0])
+                        ) 'Normalized native and direct snapshots differ.'
+                    }
+                    finally {
+                        Set-Item -LiteralPath Function:script:Get-ADAnalyzerDirectoryData -Value $legacy
+                    }
+                }
+            }
+            catch {
+                $failures.Add($_.Exception.GetBaseException().Message)
+                Write-Host ('FAIL UsersCoverage {0}/{1} {2}' -f $transport, $scenario, $failures[$failures.Count - 1])
+            }
+        }
+    }
+    if ($failures.Count) {
+        throw ('UsersCoverage failed {0} of 15 scenario pairs.' -f $failures.Count)
+    }
 }
 
 function ConvertTo-FixtureError($Diagnostic) {
@@ -603,9 +945,261 @@ function Assert-FixtureDirectTrace([string]$Server, [bool]$Drive, [bool]$Credent
     }).Count -eq 0) 'Directory collection requested a managed-password value.'
 }
 
+function Assert-FixtureAclCoverage($Snapshot, [string]$Scenario) {
+    $expectedOuStatus = 'Collected'
+    $expectedAggregate = 'Collected'
+    $expectedCount = 0
+    if ($Scenario -ceq 'Denied') {
+        $expectedOuStatus = 'Unreadable'
+        $expectedAggregate = 'Partial'
+        $expectedCount = 1
+    }
+    $ouErrors = @($Snapshot.Errors | Where-Object Collector -CEQ 'AclOUs')
+    Assert-DirectoryCollector ($Snapshot.Coverage.AclOUs -ceq $expectedOuStatus -and
+        $ouErrors.Count -eq $expectedCount) 'The scoped OU observation or its diagnostic changed.'
+    if ($Scenario -ceq 'Denied') {
+        Assert-DirectoryCollector ($ouErrors[0].Target -ceq $script:SelectedServer -and
+            $ouErrors[0].Status -ceq 'Unreadable' -and
+            $ouErrors[0].Message -ceq 'Fixture OU ACL discovery denied.') 'Missing or altered OU denial diagnostic.'
+    }
+
+    $expectedTargets = @($script:DomainDn, ('CN=AdminSDHolder,CN=System,' + $script:DomainDn))
+    if ($Scenario -ceq 'Observed') {
+        $expectedTargets += $script:SearchBase
+    }
+    Assert-DirectoryCollector (($Snapshot.Acl.Targets.Target -join '|') -ceq ($expectedTargets -join '|') -and
+        @($Snapshot.Acl.Targets | Where-Object Status -CNE 'Collected').Count -eq 0 -and
+        ($Snapshot.Acl.Entries.Target -join '|') -ceq ($expectedTargets -join '|') -and
+        -not $Snapshot.Acl.EffectiveAccessCalculated) 'Successful ACL descriptors, ACEs or evidence limits changed.'
+
+    $assessment = Invoke-ADAnalyzerAssessment -DirectoryData $Snapshot
+    $report = [ADAnalyzerAssessmentReport]::new().Render($assessment, 'Json') | ConvertFrom-Json
+    foreach ($result in $assessment, $report) {
+        $findings = @($result.Findings | Where-Object RuleId -CEQ 'ACL.DELEGATED_CONTROL')
+        Assert-DirectoryCollector ($findings.Count -eq 1 -and $findings[0].Status -ceq 'Fail' -and
+            $findings[0].Observed.Target -ceq $expectedTargets[1]) 'A positively observed ACL finding was lost.'
+    }
+
+    $coverage = @($assessment.Checks | Where-Object RuleId -CEQ 'COLLECTION.ACL')
+    $reportCoverage = @($report.Checks | Where-Object RuleId -CEQ 'COLLECTION.ACL')
+    Assert-DirectoryCollector (
+        $Snapshot.Coverage.Acl -ceq $expectedAggregate -and
+        $report.Data.Directory.Coverage.Acl -ceq $expectedAggregate -and
+        $coverage.Count -eq $expectedCount -and $reportCoverage.Count -eq $expectedCount
+    ) ('Expected ACL={0} and {1} coverage checks, observed ACL={2}/{3} and {4}/{5} checks (memory/report).' -f
+        $expectedAggregate, $expectedCount, $Snapshot.Coverage.Acl, $report.Data.Directory.Coverage.Acl,
+        $coverage.Count, $reportCoverage.Count)
+    foreach ($check in ($coverage + $reportCoverage)) {
+        Assert-DirectoryCollector ($check.Status -ceq 'Unknown' -and $check.Observed -ceq 'Partial' -and
+            $check.Expected -ceq 'Collected') 'Incomplete coverage was not visible in the assessment.'
+    }
+}
+
+function Invoke-FixtureAclCoverage($Collector) {
+    $failures = [Collections.Generic.List[string]]::new()
+    foreach ($transport in 'PSDrive', 'Direct') {
+        foreach ($scenario in 'Denied', 'Empty', 'Observed') {
+            $previousFailures = $failures.Count
+            foreach ($route in 'Native', 'Class') {
+                Clear-FixtureObservations
+                $script:Fault = 'Acl' + $scenario
+                $context = New-FixtureContext
+                $profile = New-FixtureProfile $transport
+                $caseName = '{0}/{1}/{2}' -f $transport, $route, $scenario
+                try {
+                    if ($route -ceq 'Native') {
+                        $native = Invoke-FixtureNative $context $profile
+                        Assert-DirectoryCollector ($native.Rows.Count -eq 1 -and $native.Restored -and
+                            $null -eq $native.Failure -and $script:Imports.Count -eq 0) 'Native collection did not complete.'
+                        if ($scenario -ceq 'Denied') {
+                            $diagnostics = @(Get-FixtureCapturedError $native.Errors |
+                                Where-Object Id -like 'Fixture.AclOuDenied*')
+                            Assert-DirectoryCollector ($diagnostics.Count -gt 0) 'Native collection lost its original OU error ID.'
+                        }
+                        $snapshot = $native.Rows[0]
+                    }
+                    else {
+                        $direct = @(Invoke-FixtureDirect $Collector $context $profile)
+                        Assert-DirectoryCollector ($direct.Count -eq 1) 'The class did not produce one snapshot.'
+                        Assert-FixtureDirectTrace $script:SelectedServer ($transport -ceq 'PSDrive')
+                        $snapshot = $direct[0]
+                    }
+                    $lookup = @($script:Trace | Where-Object Step -CEQ 'Get-ADOrganizationalUnit')
+                    Assert-DirectoryCollector ($lookup.Count -eq 1 -and $lookup[0].Base -ceq $script:SearchBase -and
+                        $lookup[0].Server -ceq $script:SelectedServer -and $lookup[0].SameCredential -and
+                        $lookup[0].Owned -eq ($transport -ceq 'PSDrive')) 'Scoped OU lookup binding changed.'
+                    if ($transport -ceq 'PSDrive') {
+                        Assert-DirectoryCollector ($script:Trace[-2].Step -ceq 'Restore' -and
+                            $script:Trace[-1].Step -ceq 'Remove') 'The owned drive was not cleaned up.'
+                    }
+                    else {
+                        Assert-DirectoryCollector (@($script:Trace | Where-Object Step -in 'Create', 'Remove').Count -eq 0) `
+                            'Explicit Direct mounted a drive.'
+                    }
+                    Assert-FixtureAclCoverage $snapshot $scenario
+                    Write-Host ('PASS AclCoverage {0}' -f $caseName)
+                }
+                catch {
+                    $failures.Add($_.Exception.Message)
+                    Write-Host ('FAIL AclCoverage {0} {1}' -f $caseName, $_.Exception.Message)
+                }
+            }
+            if ($failures.Count -eq $previousFailures) {
+                $script:Checks++
+            }
+        }
+    }
+    if ($failures.Count) {
+        throw ('AclCoverage failed {0} of 12 route checks.' -f $failures.Count)
+    }
+}
+
+function Assert-FixtureResultantPolicyCoverage($Snapshot, [string]$Scenario) {
+    $cachedTarget = 'CN=Cached,' + $script:SearchBase
+    $fallbackTarget = 'CN=Fallback,' + $script:SearchBase
+    $cachedKey = 'ResultantPasswordPolicy:' + $cachedTarget
+    $fallbackKey = 'ResultantPasswordPolicy:' + $fallbackTarget
+    $resultant = $Snapshot.PasswordPolicies.Resultant
+    Assert-DirectoryCollector (
+        ($Snapshot.Users.DistinguishedName -join '|') -ceq ($cachedTarget + '|' + $fallbackTarget) -and
+        $resultant.Count -eq 2 -and $resultant[0].Target -ceq $cachedTarget -and $resultant[1].Target -ceq $fallbackTarget -and
+        $Snapshot.Coverage.Users -ceq 'Collected' -and $Snapshot.Groups.Count -eq 1
+    ) 'The snapshot lost the users, their ordered policy records, or sibling group data.'
+
+    $cached = $resultant[0]
+    $fallback = $resultant[1]
+    Assert-DirectoryCollector (
+        $Snapshot.Coverage.FineGrainedPasswordPolicies -ceq 'Collected' -and
+        $Snapshot.PasswordPolicies.FineGrained.Count -eq 1 -and
+        $Snapshot.Coverage[$cachedKey] -ceq 'Collected' -and $cached.Status -ceq 'Collected' -and
+        $cached.Source -ceq 'FineGrained' -and $cached.Policy.DistinguishedName -ceq $script:PsoDn -and
+        $cached.Policy.MinPasswordLength -eq 16 -and $fallback.Source -ceq 'DefaultDomain'
+    ) 'The positive cached policy or fallback source label changed.'
+
+    $failures = @($Snapshot.Errors | Where-Object {
+            $_.Collector -ceq 'DefaultPasswordPolicy' -or $_.Collector -ceq $fallbackKey -or $_.Collector -ceq $cachedKey
+        })
+    if ($Scenario -ceq 'Denied') {
+        Assert-DirectoryCollector (
+            $failures.Count -eq 1 -and $failures[0].Collector -ceq 'DefaultPasswordPolicy' -and
+            $failures[0].Target -ceq $script:SelectedServer -and $failures[0].Status -ceq 'Unreadable' -and
+            $failures[0].Message -ceq 'Fixture default domain password policy access denied.'
+        ) 'The real synthetic provider denial was lost or duplicated.'
+    }
+    else {
+        Assert-DirectoryCollector ($failures.Count -eq 0) 'A successful empty or present lookup acquired a provider error.'
+    }
+
+    $checks = @(Test-ADAnalyzerDirectoryPolicy -Data $Snapshot -Profile @{ Policy = @{ MinimumPasswordLength = 14 } })
+    $lengthChecks = @($checks | Where-Object RuleId -CEQ 'PASSWORD.MIN_LENGTH')
+    $policyCoverage = @($checks | Where-Object RuleId -CEQ 'COLLECTION.RESULTANTPASSWORDPOLICIES')
+    $expectedFallbackCheck = if ($Scenario -ceq 'Present') { 'Fail' } else { 'Unknown' }
+    Assert-DirectoryCollector (
+        $lengthChecks.Count -eq 2 -and $lengthChecks[0].Target -ceq $cachedTarget -and
+        $lengthChecks[0].Status -ceq 'Pass' -and $lengthChecks[0].Observed -eq 16 -and
+        $lengthChecks[1].Target -ceq $fallbackTarget -and $lengthChecks[1].Status -ceq $expectedFallbackCheck
+    ) 'The actual evaluator lost the affected users or their password length observations.'
+
+    if ($Scenario -ceq 'Present') {
+        Assert-DirectoryCollector (
+            $Snapshot.Coverage.DefaultPasswordPolicy -ceq 'Collected' -and
+            $Snapshot.Coverage[$fallbackKey] -ceq 'Collected' -and $fallback.Status -ceq 'Collected' -and
+            $Snapshot.PasswordPolicies.Default.MinPasswordLength -eq 12 -and $fallback.Policy.MinPasswordLength -eq 12 -and
+            $lengthChecks[1].Observed -eq 12 -and
+            $Snapshot.Coverage.ResultantPasswordPolicies -ceq 'Collected' -and $policyCoverage.Count -eq 0
+        ) 'An empty personal lookup lost its readable domain default.'
+        return
+    }
+
+    Assert-DirectoryCollector ($null -eq $Snapshot.PasswordPolicies.Default -and $null -eq $fallback.Policy -and
+        $null -eq $lengthChecks[1].Observed) 'Unavailable default evidence was replaced with policy values.'
+    Assert-DirectoryCollector (
+        $Snapshot.Coverage.DefaultPasswordPolicy -ceq 'Unreadable' -and
+        $Snapshot.Coverage[$fallbackKey] -ceq 'Unreadable' -and $fallback.Status -ceq 'Unreadable' -and
+        $Snapshot.Coverage.ResultantPasswordPolicies -ceq 'Partial' -and $policyCoverage.Count -eq 1
+    ) ('Missing default policy must report Unreadable/Unreadable/Unreadable/Partial and one coverage check. Actual={0}/{1}/{2}/{3}, checks={4}.' -f
+        $Snapshot.Coverage.DefaultPasswordPolicy, $Snapshot.Coverage[$fallbackKey], $fallback.Status,
+        $Snapshot.Coverage.ResultantPasswordPolicies, $policyCoverage.Count)
+    Assert-DirectoryCollector ($policyCoverage[0].Status -ceq 'Unknown' -and $policyCoverage[0].Observed -ceq 'Partial' -and
+        $policyCoverage[0].Expected -ceq 'Collected') 'Incomplete resultant coverage was not visible in the actual evaluator.'
+}
+
+function Invoke-FixtureResultantPolicyCoverage($Collector) {
+    $failures = [Collections.Generic.List[string]]::new()
+    foreach ($transport in 'PSDrive', 'Direct') {
+        foreach ($scenario in 'Present', 'Empty', 'Denied') {
+            $previousFailures = $failures.Count
+            foreach ($route in 'Native', 'Class') {
+                Clear-FixtureObservations
+                $script:Fault = 'PasswordDefault' + $scenario
+                $context = New-FixtureContext
+                $profile = New-FixtureProfile $transport
+                $caseName = '{0}/{1}/{2}' -f $transport, $route, $scenario
+                try {
+                    if ($route -ceq 'Native') {
+                        $native = Invoke-FixtureNative $context $profile
+                        Assert-DirectoryCollector ($native.Rows.Count -eq 1 -and $native.Restored -and
+                            $null -eq $native.Failure -and $script:Imports.Count -eq 0) 'Native collection did not complete.'
+                        if ($scenario -ceq 'Denied') {
+                            $diagnostics = @(Get-FixtureCapturedError $native.Errors |
+                                Where-Object Id -like 'Fixture.DefaultPolicyDenied*')
+                            Assert-DirectoryCollector ($diagnostics.Count -gt 0) 'Native collection lost its original provider error ID.'
+                        }
+                        $snapshot = $native.Rows[0]
+                    }
+                    else {
+                        $direct = @(Invoke-FixtureDirect $Collector $context $profile)
+                        Assert-DirectoryCollector ($direct.Count -eq 1) 'The class did not complete with one snapshot.'
+                        Assert-FixtureDirectTrace $script:SelectedServer ($transport -ceq 'PSDrive')
+                        $snapshot = $direct[0]
+                    }
+                    $lookups = @($script:Trace | Where-Object Step -in @(
+                            'Get-ADDefaultDomainPasswordPolicy'
+                            'Get-ADFineGrainedPasswordPolicy'
+                            'Get-ADUserResultantPasswordPolicy'
+                        ))
+                    Assert-DirectoryCollector (
+                        ($lookups.Step -join '|') -ceq 'Get-ADDefaultDomainPasswordPolicy|Get-ADFineGrainedPasswordPolicy|Get-ADUserResultantPasswordPolicy' -and
+                        $lookups[0].Identity -ceq $script:DomainDn -and
+                        $lookups[2].Identity -ceq ('CN=Fallback,' + $script:SearchBase) -and
+                        @($lookups | Where-Object {
+                                $_.Server -cne $script:SelectedServer -or -not $_.SameCredential -or
+                                $_.Owned -ne ($transport -ceq 'PSDrive') -or $_.ErrorAction -cne 'Stop'
+                            }).Count -eq 0
+                    ) 'Password policy provider order, count, identity, transport or credential binding changed.'
+                    Assert-FixtureResultantPolicyCoverage $snapshot $scenario
+                    Write-Host ('PASS ResultantPolicyCoverage {0}' -f $caseName)
+                }
+                catch {
+                    $failures.Add($_.Exception.Message)
+                    Write-Host ('FAIL ResultantPolicyCoverage {0} {1}' -f $caseName, $_.Exception.Message)
+                }
+            }
+            if ($failures.Count -eq $previousFailures) {
+                $script:Checks++
+            }
+        }
+    }
+    if ($failures.Count) {
+        throw ('ResultantPolicyCoverage failed {0} of 12 route checks.' -f $failures.Count)
+    }
+}
+
 $collector = [ADAnalyzerDirectoryCollector]::new()
 Assert-DirectoryCollector ($script:Imports.Count -eq 0 -and $script:Ambient.Count -eq 0 -and $script:Trace.Count -eq 0) `
     'Loading or construction performed integration calls.'
+
+if ($Case -eq 'UsersCoverage') {
+    Invoke-FixtureUsersCoverage $collector
+}
+
+if ($Case -eq 'AclCoverage') {
+    Invoke-FixtureAclCoverage $collector
+}
+
+if ($Case -eq 'ResultantPolicyCoverage') {
+    Invoke-FixtureResultantPolicyCoverage $collector
+}
 
 if ($Case -eq 'Construction') {
     Test-DirectoryCollector 'constructor is inert' {
@@ -651,7 +1245,7 @@ if ($Case -eq 'Direct') {
         Clear-FixtureObservations
         $reference = Invoke-FixtureNative (New-FixtureContext) (New-FixtureProfile $transport)
         $native[$transport] = @{
-            Snapshot = ConvertTo-FixtureJson $reference.Rows[0]
+            Snapshot = ConvertTo-FixtureSnapshotComparisonJson $reference.Rows[0]
             Queries = ConvertTo-FixtureJson ($script:Trace.ToArray())
         }
     }
@@ -673,7 +1267,7 @@ if ($Case -eq 'Direct') {
             Assert-DirectoryCollector ($actual.Count -eq 1) 'Direct collection did not return exactly one snapshot.'
             Assert-FixtureSuccess $actual[0] $status
             Assert-FixtureDirectTrace $script:SelectedServer ($transport -ceq 'PSDrive')
-            Assert-DirectoryCollector ((ConvertTo-FixtureJson $actual[0]) -ceq $native[$transport].Snapshot -and
+            Assert-DirectoryCollector ((ConvertTo-FixtureSnapshotComparisonJson $actual[0]) -ceq $native[$transport].Snapshot -and
                 (ConvertTo-FixtureJson ($script:Trace.ToArray())) -ceq $native[$transport].Queries) `
                 'Direct collection changed normalized data, order or request observations.'
         }
@@ -816,7 +1410,7 @@ $ErrorActionPreference = 'Stop'
         $independent = Invoke-FixtureDirect $fresh $context $profile
         Assert-FixtureSuccess $independent 'Direct'
         Assert-FixtureDirectTrace $script:SelectedServer $false
-        Assert-DirectoryCollector ((ConvertTo-FixtureJson $reused) -ceq (ConvertTo-FixtureJson $independent)) `
+        Assert-DirectoryCollector ((ConvertTo-FixtureSnapshotComparisonJson $reused) -ceq (ConvertTo-FixtureSnapshotComparisonJson $independent)) `
             'Secondary runspace disposal changed the existing or new collector result.'
 
         $index = New-ADAnalyzerMembershipIndex -Groups @($group)

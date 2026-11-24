@@ -2791,11 +2791,12 @@ foreach ($case in $projectorCases.Keys) {
 }
 
 $hostCollectorCases = [ordered]@{
-    Native = 10
+    Native = 11
     Construction = 3
-    Direct = 4
+    Direct = 7
     Reuse = 2
     Runspace = 2
+    Timeout = 15
 }
 foreach ($case in $hostCollectorCases.Keys) {
     Invoke-DirectoryTest ('host collector: ' + $case) {
@@ -2826,6 +2827,9 @@ $directoryCollectorCases = [ordered]@{
     Construction = 3
     Direct = 8
     Isolation = 2
+    UsersCoverage = 15
+    AclCoverage = 6
+    ResultantPolicyCoverage = 6
 }
 foreach ($case in $directoryCollectorCases.Keys) {
     Invoke-DirectoryTest ('directory collector: ' + $case) {

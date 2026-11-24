@@ -16,7 +16,8 @@ $manifest = @{
         'Test-ADAnalyzerGpoPolicy', 'Test-ADAnalyzerDirectoryPolicy', 'Resolve-ADAnalyzerRegistryPolicy',
         'Test-ADAnalyzerHostPolicy', 'Get-ADAnalyzerAuditPolicy', 'Get-ADAnalyzerTlsCertificate',
         'Export-ADAnalyzerAssessment', 'Compare-ADAnalyzerAssessment',
-        'New-ADAnalyzerRemediationPlan', 'Invoke-ADAnalyzerRemediationPlan', 'Undo-ADAnalyzerRemediation', 'Start-ADAnalyzer'
+        'New-ADAnalyzerRemediationPlan', 'Invoke-ADAnalyzerRemediationPlan',
+        'Undo-ADAnalyzerRemediation', 'Get-ADAnalyzerRemediationReservation', 'Start-ADAnalyzer'
     )
     CmdletsToExport = @()
     VariablesToExport = @()

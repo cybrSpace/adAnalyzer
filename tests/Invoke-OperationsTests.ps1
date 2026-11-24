@@ -10,6 +10,15 @@ $script:Passed = 0
 $script:Failed = 0
 $script:Temporary = Join-Path ([IO.Path]::GetTempPath()) ('ad-operations-tests-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -Path $script:Temporary -ItemType Directory
+$script:RemediationAuthorityDirectory = $null
+
+function Get-ADAnalyzerRemediationAuthorityDirectory {
+    if ([string]::IsNullOrEmpty($script:RemediationAuthorityDirectory) -or
+        -not [IO.Directory]::Exists($script:RemediationAuthorityDirectory)) {
+        throw 'The fixture has no disposable remediation authority.'
+    }
+    return $script:RemediationAuthorityDirectory
+}
 
 function Assert-Equal($Expected, $Actual) {
     if ($Expected -ne $Actual) {
@@ -48,9 +57,12 @@ function Assert-ThrowsMessage([scriptblock]$Body, [string]$Message) {
 }
 
 function Reset-Fixture {
+    $script:RemediationAuthorityDirectory = Join-Path $script:Temporary ('authority-' + [guid]::NewGuid().ToString('N'))
+    $null = [IO.Directory]::CreateDirectory($script:RemediationAuthorityDirectory)
     $script:Reads = 0
     $script:GroupReads = 0
     $script:Disables = 0
+    $script:DisableDispatches = 0
     $script:Enables = 0
     $script:FreshPrivileged = $false
     $script:FreshAccountType = 'User'
@@ -417,6 +429,7 @@ function Disable-ADAccount {
     if ($persisted.Entries[-1].Status -ne 'Prepared') {
         throw 'Mutation intent was not journaled'
     }
+    $script:DisableDispatches++
     if ($script:FailMutation) {
         throw 'Fixture mutation failure'
     }
@@ -843,17 +856,27 @@ try {
             [Environment]::CurrentDirectory = $dotnet
         }
     }
-    Invoke-Test 'journal ownership is released after a failed mutation and a successful retry' {
+    Invoke-Test 'journal ownership releases after a failed mutation but Uncertain blocks the same-plan retry' {
         $plan = New-FixturePlan
         $script:FailMutation = $true
         Assert-Throws { Apply-FixturePlan $plan }
         $lease = [IO.File]::Open(($script:Journal + '.lock'), [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
         $lease.Dispose()
+        $dispatches = $script:DisableDispatches
+        Assert-Equal 1 $dispatches
         $script:FailMutation = $false
-        $null = Apply-FixturePlan $plan
+        $retryFailure = $null
+        try {
+            $null = Apply-FixturePlan $plan
+        }
+        catch {
+            $retryFailure = $_
+        }
+        Assert-True ($null -ne $retryFailure -and $retryFailure.Exception.Message -match '\bUncertain\b') 'The uncertain provider mutation did not block retry.'
         $lease = [IO.File]::Open(($script:Journal + '.lock'), [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
         $lease.Dispose()
-        Assert-Equal 1 $script:Disables
+        Assert-Equal $dispatches $script:DisableDispatches
+        Assert-Equal 0 $script:Disables
     }
     Invoke-Test 'early result selection preserves successful evidence and releases journal ownership' {
         $plan = New-FixturePlan
@@ -1925,6 +1948,248 @@ try {
         Assert-Equal 1 @($plan.Actions).Count
         Assert-Equal 'MaximumActionsReached' $plan.Excluded[0].Reason
     }
+    & {
+        function Assert-ConsentTargetRejection([scriptblock]$Body) {
+            $caught = $null
+            $output = [Collections.Generic.List[object]]::new()
+            try {
+                & $Body | ForEach-Object { $output.Add($_) }
+            }
+            catch {
+                $caught = $_.Exception.GetBaseException().Message
+            }
+            Assert-Equal 0 $output.Count
+            Assert-Equal (
+                'Remediation target distinguished name is missing or differs from the verified identity.'
+            ) $caught
+        }
+
+        function Invoke-ConsentTargetFixture([scriptblock]$Body) {
+            $blocked = @(
+                'Get-ADAnalyzerRemediationAuthorityDirectory'
+                'Enter-ADAnalyzerJournalLease'
+                'Get-ADAnalyzerOperationCurrentObject'
+                'Get-ADObject'
+                'Get-ADGroup'
+                'Disable-ADAccount'
+                'Enable-ADAccount'
+            )
+            $saved = @{}
+            $script:ConsentTargetEffectCalls = [Collections.Generic.List[string]]::new()
+            try {
+                foreach ($name in $blocked) {
+                    $path = 'Function:script:' + $name
+                    $saved[$path] = (Get-Command -Name $name -CommandType Function -ErrorAction Stop).ScriptBlock
+                    Set-Item -LiteralPath $path -Value {
+                        $script:ConsentTargetEffectCalls.Add($MyInvocation.MyCommand.Name)
+                        throw 'The consent target fixture reached a forbidden effect.'
+                    }
+                }
+                & $Body
+                Assert-Equal 0 $script:ConsentTargetEffectCalls.Count
+            }
+            finally {
+                foreach ($item in $saved.GetEnumerator()) {
+                    Set-Item -LiteralPath $item.Key -Value $item.Value
+                }
+            }
+        }
+
+        Invoke-Test 'Apply validates the displayed distinguished name against the checked target before effects' {
+            $executor = [ADAnalyzerRemediationExecutor]::new()
+            $server = 'dc.example.invalid'
+            Invoke-ConsentTargetFixture {
+                $script:ConsentGetterReads = 0
+                $cases = @(
+                    'Mismatched'
+                    'SavedMismatch'
+                    'Missing'
+                    'Blank'
+                    'NonString'
+                    'GuidFields'
+                    'DateFields'
+                    'ComputedField'
+                    'MissingPrecondition'
+                    'LaterMismatch'
+                )
+                foreach ($case in $cases) {
+                    if ($case -eq 'LaterMismatch') {
+                        $plan = New-ActionIdentityFixturePlan
+                    }
+                    else {
+                        $plan = New-FixturePlan
+                    }
+                    $action = $plan.Actions[-1]
+                    switch ($case) {
+                        { $_ -in 'Mismatched', 'SavedMismatch' } {
+                            $action.DistinguishedName = 'CN=Different Fixture,DC=example,DC=invalid'
+                        }
+                        'Missing' {
+                            $action.PSObject.Properties.Remove('DistinguishedName')
+                        }
+                        'Blank' {
+                            $action.DistinguishedName = ' '
+                        }
+                        'NonString' {
+                            $action.DistinguishedName = @($script:Current.DistinguishedName)
+                        }
+                        'GuidFields' {
+                            $value = [guid]'20000000-0000-4000-8000-000000000001'
+                            $action.DistinguishedName = $value
+                            $action.Preconditions.DistinguishedName = $value
+                        }
+                        'DateFields' {
+                            $value = [datetime]'2025-02-01T00:00:00Z'
+                            $action.DistinguishedName = $value
+                            $action.Preconditions.DistinguishedName = $value
+                        }
+                        'ComputedField' {
+                            $action.PSObject.Properties.Remove('DistinguishedName')
+                            $action | Add-Member -MemberType ScriptProperty -Name DistinguishedName -Value {
+                                $script:ConsentGetterReads++
+                                return $script:Current.DistinguishedName
+                            }
+                        }
+                        'MissingPrecondition' {
+                            $action.Preconditions.PSObject.Properties.Remove('DistinguishedName')
+                        }
+                        'LaterMismatch' {
+                            $action.DistinguishedName = $plan.Actions[0].DistinguishedName
+                        }
+                    }
+                    $planInput = $plan
+                    if ($case -eq 'SavedMismatch') {
+                        $planInput = Join-Path $script:Temporary 'inconsistent reviewed plan.json'
+                        $json = ConvertTo-Json -InputObject $plan -Depth 30 -Compress
+                        [IO.File]::WriteAllText($planInput, $json)
+                    }
+                    $parameters = @{
+                        Plan = $planInput
+                        Server = $server
+                        JournalPath = $script:Journal
+                    }
+                    Assert-ConsentTargetRejection { Invoke-ADAnalyzerRemediationPlan @parameters -WhatIf }
+                    Assert-ConsentTargetRejection { Invoke-ADAnalyzerRemediationPlan @parameters -Confirm:$false }
+                    Assert-ConsentTargetRejection { $executor.Preview($planInput, $server, $script:Journal) }
+                    Assert-ConsentTargetRejection {
+                        $executor.Apply($planInput, $server, $script:Journal, @($plan.Actions.ActionId))
+                    }
+                }
+                Assert-Equal 0 $script:ConsentGetterReads
+
+                $plan = New-FixturePlan
+                $action = $plan.Actions[0]
+                $action.DistinguishedName = $action.DistinguishedName.ToLowerInvariant()
+                Assert-True ($action.DistinguishedName -cne $action.Preconditions.DistinguishedName)
+                $native = @(Invoke-ADAnalyzerRemediationPlan -Plan $plan -Server $server -JournalPath $script:Journal -WhatIf)
+                $direct = @($executor.Preview($plan, $server, $script:Journal))
+                foreach ($row in @($native + $direct)) {
+                    Assert-Equal $action.ActionId $row.ActionId
+                    Assert-Equal $action.ObjectGuid $row.ObjectGuid
+                    Assert-Equal 'Skipped' $row.Status
+                }
+                Assert-Equal 1 $native.Count
+                Assert-Equal 1 $direct.Count
+                Assert-Equal $false ([IO.File]::Exists($script:Journal))
+                Assert-Equal $false ([IO.File]::Exists($script:Journal + '.lock'))
+            }
+        }
+
+        Invoke-Test 'Undo validates the displayed distinguished name against both journal states before effects' {
+            $executor = [ADAnalyzerRemediationExecutor]::new()
+            $server = 'dc.example.invalid'
+            $plan = New-FixturePlan
+            $action = $plan.Actions[0]
+            Invoke-ConsentTargetFixture {
+                $cases = @('DifferentBefore', 'DifferentAfter', 'Missing', 'Blank', 'NonString', 'LaterMismatch', 'CaseOnly')
+                foreach ($case in $cases) {
+                    $after = $action.Preconditions.PSObject.Copy()
+                    $after.Enabled = $false
+                    $entry = [pscustomobject]@{
+                        EntryId = '44444444-4444-4444-8444-444444444444'
+                        ActionId = $action.ActionId
+                        ObjectGuid = $action.ObjectGuid
+                        SID = $action.SID
+                        DistinguishedName = $action.DistinguishedName
+                        ObjectClass = $action.ObjectClass
+                        AccountType = $action.AccountType
+                        Action = 'DisableAccount'
+                        Before = $action.Preconditions.PSObject.Copy()
+                        After = $after
+                        Status = 'Succeeded'
+                        Undo = $null
+                    }
+                    switch ($case) {
+                        'DifferentBefore' {
+                            $entry.Before.DistinguishedName = 'CN=Different Fixture,DC=example,DC=invalid'
+                        }
+                        'DifferentAfter' {
+                            $entry.After.DistinguishedName = 'CN=Different Fixture,DC=example,DC=invalid'
+                        }
+                        'Missing' {
+                            $entry.PSObject.Properties.Remove('DistinguishedName')
+                        }
+                        'Blank' {
+                            $entry.DistinguishedName = ' '
+                        }
+                        'NonString' {
+                            $entry.DistinguishedName = @($script:Current.DistinguishedName)
+                        }
+                        'CaseOnly' {
+                            $entry.DistinguishedName = $entry.DistinguishedName.ToLowerInvariant()
+                        }
+                    }
+                    $entries = @($entry)
+                    if ($case -eq 'LaterMismatch') {
+                        $later = $entry.PSObject.Copy()
+                        $later.EntryId = '44444444-4444-4444-8444-444444444445'
+                        $later.DistinguishedName = 'CN=Different Fixture,DC=example,DC=invalid'
+                        $entries += $later
+                    }
+                    $journal = [pscustomobject]@{
+                        SchemaVersion = 1
+                        JournalType = 'ADAnalyzerRemediationJournal'
+                        JournalId = '55555555-5555-4555-8555-555555555555'
+                        PlanId = $plan.PlanId
+                        Server = $server
+                        Remediation = $plan.Remediation
+                        Entries = $entries
+                    }
+                    $json = ConvertTo-Json -InputObject $journal -Depth 30 -Compress
+                    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+                    [IO.File]::WriteAllBytes($script:Journal, $bytes)
+                    $parameters = @{
+                        Server = $server
+                        JournalPath = $script:Journal
+                    }
+                    if ($case -eq 'CaseOnly') {
+                        Assert-True ($entry.DistinguishedName -cne $entry.Before.DistinguishedName)
+                        $native = @(Undo-ADAnalyzerRemediation @parameters -WhatIf)
+                        $direct = @($executor.PreviewUndo($script:Journal, $server))
+                        Assert-Equal 1 $native.Count
+                        Assert-Equal 1 $direct.Count
+                        foreach ($row in @($native + $direct)) {
+                            Assert-Equal $entry.EntryId $row.EntryId
+                            Assert-Equal $entry.ObjectGuid $row.ObjectGuid
+                            Assert-Equal 'Skipped' $row.Status
+                        }
+                    }
+                    else {
+                        Assert-ConsentTargetRejection { Undo-ADAnalyzerRemediation @parameters -WhatIf }
+                        Assert-ConsentTargetRejection { Undo-ADAnalyzerRemediation @parameters -Confirm:$false }
+                        Assert-ConsentTargetRejection { $executor.PreviewUndo($script:Journal, $server) }
+                        Assert-ConsentTargetRejection {
+                            $executor.Undo($script:Journal, $server, @($entries.EntryId))
+                        }
+                    }
+                    Assert-Equal ([Convert]::ToBase64String($bytes)) (
+                        [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:Journal))
+                    )
+                    Assert-Equal $false ([IO.File]::Exists($script:Journal + '.lock'))
+                }
+            }
+        }
+    }
     Invoke-Test 'plan execution WhatIf performs no query mutation or journal write' {
         $null = Invoke-ADAnalyzerRemediationPlan -Plan (New-FixturePlan) -Server dc.example.invalid -JournalPath $script:Journal -WhatIf
         Assert-Equal 0 $script:Reads
@@ -2194,7 +2459,8 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
             [string]$Field,
             [string]$ChangedValue,
             [string]$ExpectedMessage,
-            [switch]$JournalField
+            [switch]$JournalField,
+            [switch]$AfterField
         ) {
             Reset-Fixture
             $plan = New-FixturePlan
@@ -2229,7 +2495,10 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
             $originalBytes = [IO.File]::ReadAllBytes($script:Journal)
             $edited = [IO.File]::ReadAllText($script:Journal) | ConvertFrom-Json
             $subject = $edited
-            if (-not $JournalField) {
+            if ($AfterField) {
+                $subject = $edited.Entries[0].After
+            }
+            elseif (-not $JournalField) {
                 $subject = $edited.Entries[0]
             }
             $property = $subject.PSObject.Properties[$Field]
@@ -2326,6 +2595,13 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
                 Assert-UndoReviewBinding $item.Key $item.Value 'Journal entry identity changed after undo review'
             }
             Assert-UndoReviewBinding 'Status' 'Undone' ''
+            $nestedBinding = @{
+                Field = 'DistinguishedName'
+                ChangedValue = 'CN=Changed Fixture,DC=offline,DC=invalid'
+                ExpectedMessage = 'Remediation target distinguished name is missing or differs from the verified identity.'
+                AfterField = $true
+            }
+            Assert-UndoReviewBinding @nestedBinding
         }
     }
     Invoke-Test 'undo rejects concurrent state changes and new privileged membership' {
@@ -2387,7 +2663,7 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
         $b.Checks[0].Status = 'Unknown'
         Assert-Equal Changed (Compare-ADAnalyzerAssessment $a $b).Changes[0].Change
     }
-    Invoke-Test 'named host comparisons distinguish removal ordering expectation changes and observed resolution' {
+    Invoke-Test 'named host comparisons distinguish removal, ordering and expectation changes' {
         foreach ($file in @('ADGpo', 'ADPolicyAnalysis', 'ADHostAnalysis')) {
             . (Join-Path $RepositoryRoot ('bin/' + $file + '.ps1'))
         }
@@ -2447,8 +2723,145 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
             Checks = @(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile | Where-Object RuleId -eq HOST.SERVICE)
         }
         $comparison = Compare-ADAnalyzerAssessment $a $b
-        Assert-Equal 1 $comparison.Summary.Resolved
-        Assert-Equal 1 $comparison.Summary.Changed
+        Assert-Equal 0 $comparison.Summary.Resolved
+        Assert-Equal 2 $comparison.Summary.Changed
+        $relaxed = @($comparison.Changes | Where-Object { $_.Reference[0].Evidence.ProfileRuleId -ceq 'missing' })[0]
+        Assert-Equal 'RulePredicateChanged' $relaxed.Reason
+        $unchangedStatus = @($comparison.Changes | Where-Object { $_.Reference[0].Evidence.ProfileRuleId -ceq 'observed' })[0]
+        Assert-True ($null -eq $unchangedStatus.Reason) 'An unchanged status was misclassified as a predicate transition.'
+    }
+    Invoke-Test 'host service comparison distinguishes changed predicates from changed observations' {
+        foreach ($file in @('ADGpo', 'ADPolicyAnalysis', 'ADHostAnalysis')) {
+            . (Join-Path $RepositoryRoot ('bin/' + $file + '.ps1'))
+        }
+        $computer = 'service-comparison.fixture.invalid'
+        $makeSnapshot = {
+            param([string]$State, [string]$Mode, [hashtable]$Expected, [string]$Status)
+
+            $profile = Get-ADAnalyzerDefaultProfile
+            $profile.Host.Services = @(@{
+                    Id = 'spooler-control'
+                    Name = 'Spooler'
+                } + $Expected)
+            $hostRecord = [pscustomobject]@{
+                ComputerName = $computer
+                Services = @([pscustomobject]@{
+                        Name = 'Spooler'
+                        State = $State
+                        StartMode = $Mode
+                    })
+                Registry = @()
+            }
+            $checks = @(Test-ADAnalyzerHostPolicy -Hosts @($hostRecord) -Profile $profile | Where-Object RuleId -CEQ 'HOST.SERVICE')
+            Assert-Equal 1 $checks.Count
+            Assert-Equal $Status $checks[0].Status
+            @{
+                Checks = $checks
+            }
+        }
+
+        $running = @{
+            State = 'Running'
+            StartMode = 'Disabled'
+        }
+        $stopped = @{
+            State = 'Stopped'
+            StartMode = 'Disabled'
+        }
+        $automatic = @{
+            State = 'Stopped'
+            StartMode = 'Auto'
+        }
+        $noStartMode = @{ State = 'Stopped' }
+        $caseFoldedRunning = @{
+            State = 'RUNNING'
+            StartMode = 'DISABLED'
+        }
+        $runningAndAutoStart = @{
+            State = 'Running'
+            StartMode = 'Auto'
+        }
+        $snapshots = [ordered]@{
+            RequireRunning = & $makeSnapshot 'Stopped' 'Disabled' $running 'Fail'
+            AcceptStopped = & $makeSnapshot 'Stopped' 'Disabled' $stopped 'Pass'
+            RequireAuto = & $makeSnapshot 'Stopped' 'Disabled' $automatic 'Fail'
+            NoStartMode = & $makeSnapshot 'Stopped' 'Disabled' $noStartMode 'Pass'
+            ActuallyRunning = & $makeSnapshot 'Running' 'Disabled' $running 'Pass'
+            CaseFolded = & $makeSnapshot 'Running' 'Disabled' $caseFoldedRunning 'Pass'
+            BothChanged = & $makeSnapshot 'Running' 'Auto' $runningAndAutoStart 'Pass'
+            ActuallyAuto = & $makeSnapshot 'Stopped' 'Auto' $automatic 'Pass'
+            ModeAndRequirementChanged = & $makeSnapshot 'Stopped' 'Auto' $noStartMode 'Pass'
+            Legacy = & $makeSnapshot 'Stopped' 'Disabled' $stopped 'Pass'
+            Contradictory = & $makeSnapshot 'Stopped' 'Disabled' $stopped 'Pass'
+            Ambiguous = & $makeSnapshot 'Stopped' 'Disabled' $stopped 'Pass'
+        }
+        $snapshots.Legacy.Checks[0].PSObject.Properties.Remove('Expected')
+        $snapshots.Contradictory.Checks[0].Expected.State = 'Paused'
+        $single = $snapshots.Ambiguous.Checks[0].Observed[0]
+        $snapshots.Ambiguous.Checks[0].Observed = @($single, $single)
+
+        $paths = @{}
+        $hashes = @{}
+        $exporter = [ADAnalyzerAssessmentReport]::new()
+        foreach ($name in $snapshots.Keys) {
+            Assert-Equal $snapshots.RequireRunning.Checks[0].CheckId $snapshots[$name].Checks[0].CheckId
+            $paths[$name] = Join-Path $script:Temporary ('host-service-predicate-' + $name + '.json')
+            $null = $exporter.Write($snapshots[$name], $paths[$name], 'Json')
+            $hashes[$name] = (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $differences = [Collections.Generic.List[string]]::new()
+        foreach ($representation in 'Object', 'Json') {
+            $documents = if ($representation -ceq 'Object') {
+                $snapshots
+            }
+            else {
+                $paths
+            }
+            foreach ($case in @(
+                    @('RequireRunning', 'AcceptStopped', 'Changed', 'RulePredicateChanged'),
+                    @('AcceptStopped', 'RequireRunning', 'Changed', 'RulePredicateChanged'),
+                    @('RequireAuto', 'NoStartMode', 'Changed', 'RulePredicateChanged'),
+                    @('NoStartMode', 'RequireAuto', 'Changed', 'RulePredicateChanged'),
+                    @('RequireAuto', 'AcceptStopped', 'Changed', 'RulePredicateChanged'),
+                    @('RequireRunning', 'ActuallyRunning', 'Resolved', $null),
+                    @('ActuallyRunning', 'RequireRunning', 'New', $null),
+                    @('RequireRunning', 'CaseFolded', 'Resolved', $null),
+                    @('RequireRunning', 'BothChanged', 'Resolved', $null),
+                    @('RequireAuto', 'ActuallyAuto', 'Resolved', $null),
+                    @('RequireAuto', 'ModeAndRequirementChanged', 'Resolved', $null),
+                    @('RequireRunning', 'Legacy', 'Resolved', $null),
+                    @('RequireRunning', 'Contradictory', 'Resolved', $null),
+                    @('RequireRunning', 'Ambiguous', 'Resolved', $null)
+                )) {
+                $before, $after, $change, $reason = $case
+                $reference = $documents[$before]
+                $difference = $documents[$after]
+                $results = [ordered]@{
+                    Native = Compare-ADAnalyzerAssessment -Reference $reference -Difference $difference
+                    Direct = $comparer.Compare($reference, $difference)
+                }
+                foreach ($api in $results.Keys) {
+                    Assert-Equal 1 $results[$api].Changes.Count
+                    $row = $results[$api].Changes[0]
+                    Assert-True (
+                        $row.RuleId -ceq 'HOST.SERVICE' -and $row.Target -ceq ($computer + '/Service/Spooler') -and
+                        $row.Reference.Count -eq 1 -and $row.Difference.Count -eq 1 -and
+                        $row.Reference[0].Status -ceq $snapshots[$before].Checks[0].Status -and
+                        $row.Difference[0].Status -ceq $snapshots[$after].Checks[0].Status
+                    ) 'Service identity, recorded outcomes or evidence cardinality changed.'
+                    if ($row.Change -cne $change -or $row.Reason -cne $reason) {
+                        $label = "$representation/$api/$before-$after"
+                        $differences.Add("$label expected $change/$reason, received $($row.Change)/$($row.Reason)")
+                    }
+                }
+            }
+        }
+        foreach ($name in $paths.Keys) {
+            Assert-Equal $hashes[$name] (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+        Assert-True ($differences.Count -eq 0) ($differences -join [Environment]::NewLine)
     }
     Invoke-Test 'named host registry comparison preserves literal key and value identity' {
         foreach ($file in @('ADGpo', 'ADPolicyAnalysis', 'ADHostAnalysis')) {
@@ -2494,6 +2907,197 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
         Assert-Equal 1 $comparison.Summary.Unchanged
         Assert-Equal 1 $comparison.Summary.Changed
         Assert-Equal NotObservedInDifference ($comparison.Changes | Where-Object Change -eq Changed).Reason
+    }
+    Invoke-Test 'named host registry comparison distinguishes predicate edits from observed repairs' {
+        foreach ($file in 'ADGpo', 'ADPolicyAnalysis', 'ADHostAnalysis') {
+            . (Join-Path $RepositoryRoot ('bin/' + $file + '.ps1'))
+        }
+        $providerCalls = [Collections.Generic.List[string]]::new()
+        $unexpectedProvider = {
+            $providerCalls.Add($MyInvocation.InvocationName)
+            throw 'Unexpected provider call in the offline host registry fixture.'
+        }
+        foreach ($commandName in 'New-CimSession', 'Invoke-CimMethod', 'Get-CimInstance', 'Get-WinEvent', 'Invoke-Command') {
+            Set-Item -LiteralPath ('Function:local:' + $commandName) -Value $unexpectedProvider
+        }
+        Assert-Throws { New-CimSession }
+        Assert-Equal 1 $providerCalls.Count
+        $providerCalls.Clear()
+
+        $computer = 'registry-comparison.fixture.invalid'
+        $key = 'SYSTEM\Fixture/Control'
+        $name = 'Part/Enabled'
+        $ruleId = 'fixture-registry-enabled'
+        $target = $computer + '/Registry/' + $key + '/' + $name
+        $evaluator = [ADAnalyzerHostPolicyEvaluator]::new()
+        $makeSnapshot = {
+            param(
+                [string]$Route,
+                [int]$ObservedType,
+                [object]$Observed,
+                [int]$ExpectedType,
+                [object]$Expected,
+                [object]$Operator,
+                [string]$Status
+            )
+
+            $profile = Get-ADAnalyzerDefaultProfile
+            $rule = @{
+                Id = $ruleId
+                Key = $key
+                ValueName = $name
+                Type = $ExpectedType
+                Expected = $Expected
+            }
+            if ($null -ne $Operator) {
+                $rule.Operator = $Operator
+            }
+            $profile.Host.RegistryRules = @($rule)
+            $hosts = @([pscustomobject]@{
+                    ComputerName = $computer
+                    Services = @()
+                    Registry = @([pscustomobject]@{
+                            Path = $key
+                            Name = $name
+                            Type = $ObservedType
+                            Status = 'Observed'
+                            Value = $Observed
+                        })
+                })
+            $rows = if ($Route -ceq 'Command') {
+                Test-ADAnalyzerHostPolicy -Hosts $hosts -Profile $profile
+            }
+            else {
+                $evaluator.Evaluate($hosts, $profile)
+            }
+            $checks = @($rows | Where-Object RuleId -CEQ 'HOST.REGISTRY')
+            Assert-Equal 1 $checks.Count
+            $check = $checks[0]
+            Assert-Equal $target $check.Target
+            Assert-Equal $Status $check.Status
+            Assert-True (
+                $check.Observed.GetType() -eq $Observed.GetType() -and $check.Observed -eq $Observed -and
+                $check.Expected.GetType() -eq $Expected.GetType() -and $check.Expected -eq $Expected
+            ) 'The host evaluator must retain typed observation and expectation values.'
+            Assert-True (
+                $check.Evidence.ProfileRuleId -ceq $ruleId -and
+                $check.Evidence.RegistryPath -ceq $key -and $check.Evidence.ValueName -ceq $name -and
+                $check.Evidence.RegistryType -eq $ObservedType -and $check.Evidence.ExpectedRegistryType -eq $ExpectedType
+            ) 'The host evaluator lost the named registry identity or type evidence.'
+            return @{ Checks = $checks }
+        }
+
+        $reporter = [ADAnalyzerAssessmentReport]::new()
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $failures = [Collections.Generic.List[string]]::new()
+        $comparisons = 0
+        foreach ($evaluatorRoute in 'Command', 'Class') {
+            $snapshots = [ordered]@{
+                RequireZero = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 0 $null 'Fail'
+                AcceptOne = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 1 'Equals' 'Pass'
+                RejectOne = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 1 'NotEquals' 'Fail'
+                MinimumTwo = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 2 'Minimum' 'Fail'
+                MinimumOne = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 1 'Minimum' 'Pass'
+                Repaired = & $makeSnapshot $evaluatorRoute 4 ([uint32]0) 4 ([long]0) 'eQuAlS' 'Pass'
+                BothChanged = & $makeSnapshot $evaluatorRoute 4 ([uint32]2) 4 2 'Equals' 'Pass'
+                ChangedType = & $makeSnapshot $evaluatorRoute 11 ([uint64]1) 11 1 'Equals' 'Pass'
+                InvalidType = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 11 1 'Equals' 'Invalid'
+                TextFail = & $makeSnapshot $evaluatorRoute 1 'disabled' 1 'enabled' 'Equals' 'Fail'
+                TextPass = & $makeSnapshot $evaluatorRoute 1 'disabled' 1 'disabled' 'Equals' 'Pass'
+                Legacy = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 1 'Equals' 'Pass'
+                MalformedOperator = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 1 'Equals' 'Pass'
+                MalformedObserved = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 1 'Equals' 'Pass'
+                MissingType = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 1 'Equals' 'Pass'
+                Contradictory = & $makeSnapshot $evaluatorRoute 4 ([uint32]1) 4 2 'Equals' 'Fail'
+            }
+            $snapshots.Legacy.Checks[0].Evidence.Remove('RegistryOperator')
+            $snapshots.MalformedOperator.Checks[0].Evidence.RegistryOperator = 'Unsupported'
+            $snapshots.MalformedObserved.Checks[0].Observed = @([uint32]1)
+            $snapshots.MissingType.Checks[0].Evidence.Remove('RegistryType')
+            $snapshots.Contradictory.Checks[0].Status = 'Pass'
+            $files = @{}
+            $hashes = @{}
+            foreach ($snapshotName in $snapshots.Keys) {
+                Assert-Equal $snapshots.RequireZero.Checks[0].CheckId $snapshots[$snapshotName].Checks[0].CheckId
+                $path = Join-Path $script:Temporary ('host-registry-' + $evaluatorRoute + '-' + $snapshotName + '.json')
+                $null = $reporter.Write($snapshots[$snapshotName], $path, 'Json')
+                $files[$snapshotName] = $path
+                $hashes[$snapshotName] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            }
+
+            foreach ($representation in 'Memory', 'Json') {
+                $inputDocuments = if ($representation -ceq 'Memory') {
+                    $snapshots
+                }
+                else {
+                    $files
+                }
+                foreach ($case in @(
+                        @('RequireZero', 'AcceptOne', 'Changed', 'RulePredicateChanged'),
+                        @('AcceptOne', 'RequireZero', 'Changed', 'RulePredicateChanged'),
+                        @('RejectOne', 'AcceptOne', 'Changed', 'RulePredicateChanged'),
+                        @('AcceptOne', 'RejectOne', 'Changed', 'RulePredicateChanged'),
+                        @('MinimumTwo', 'MinimumOne', 'Changed', 'RulePredicateChanged'),
+                        @('TextFail', 'TextPass', 'Changed', 'RulePredicateChanged'),
+                        @('RequireZero', 'Repaired', 'Resolved', $null),
+                        @('Repaired', 'RequireZero', 'New', $null),
+                        @('RequireZero', 'BothChanged', 'Resolved', $null),
+                        @('RequireZero', 'ChangedType', 'Resolved', $null),
+                        @('InvalidType', 'AcceptOne', 'Resolved', $null),
+                        @('RequireZero', 'Legacy', 'Resolved', $null),
+                        @('RequireZero', 'MalformedOperator', 'Resolved', $null),
+                        @('RequireZero', 'MalformedObserved', 'Resolved', $null),
+                        @('RequireZero', 'MissingType', 'Resolved', $null),
+                        @('RequireZero', 'Contradictory', 'Resolved', $null)
+                    )) {
+                    $beforeName, $afterName, $expectedChange, $expectedReason = $case
+                    $reference = $inputDocuments[$beforeName]
+                    $difference = $inputDocuments[$afterName]
+                    $results = [ordered]@{
+                        Command = Compare-ADAnalyzerAssessment -Reference $reference -Difference $difference
+                        Class = $comparer.Compare($reference, $difference)
+                    }
+                    foreach ($compareRoute in $results.Keys) {
+                        $comparison = $results[$compareRoute]
+                        Assert-Equal 1 $comparison.Changes.Count
+                        $change = $comparison.Changes[0]
+                        Assert-True (
+                            $change.RuleId -ceq 'HOST.REGISTRY' -and $change.Target -ceq $target -and
+                            $change.Reference.Count -eq 1 -and $change.Difference.Count -eq 1 -and
+                            $change.Reference[0].Status -ceq $snapshots[$beforeName].Checks[0].Status -and
+                            $change.Difference[0].Status -ceq $snapshots[$afterName].Checks[0].Status
+                        ) 'The comparer changed the registry identity or either original verdict.'
+                        if ($change.Change -cne $expectedChange -or $change.Reason -cne $expectedReason) {
+                            $label = "$evaluatorRoute/$representation/$compareRoute/$beforeName-$afterName"
+                            $failures.Add("$label expected $expectedChange/$expectedReason, got $($change.Change)/$($change.Reason).")
+                        }
+                        $comparisons++
+                    }
+                }
+            }
+            foreach ($snapshotName in $files.Keys) {
+                Assert-Equal $hashes[$snapshotName] (Get-FileHash -LiteralPath $files[$snapshotName] -Algorithm SHA256).Hash
+            }
+            foreach ($sample in @(
+                    @('RequireZero', 'Equals'),
+                    @('AcceptOne', 'Equals'),
+                    @('RejectOne', 'NotEquals'),
+                    @('MinimumTwo', 'Minimum')
+                )) {
+                $snapshotName, $expectedOperator = $sample
+                $memory = $snapshots[$snapshotName]
+                $saved = Get-Content -LiteralPath $files[$snapshotName] -Raw | ConvertFrom-Json
+                foreach ($document in $memory, $saved) {
+                    $actualOperator = $document.Checks[0].Evidence.RegistryOperator
+                    if ($actualOperator -isnot [string] -or $actualOperator -ine $expectedOperator) {
+                        $failures.Add("$evaluatorRoute/$snapshotName expected recorded operator $expectedOperator.")
+                    }
+                }
+            }
+        }
+        Assert-Equal 128 $comparisons
+        Assert-Equal 0 $providerCalls.Count
+        Assert-True ($failures.Count -eq 0) ($failures -join [Environment]::NewLine)
     }
     Invoke-Test 'malformed named host snapshot identities are rejected instead of merged' {
         foreach ($id in @('', ' ', 1, ('bad' + [char]0 + 'id'))) {
@@ -3117,7 +3721,7 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
     $assessmentComparerCases = [ordered]@{
         Native = 22
         Construction = 2
-        Standalone = 1
+        Standalone = 2
         Direct = 7
         Isolation = 2
     }
@@ -3311,6 +3915,90 @@ Read-ADAnalyzerOperationDocument -InputObject $JournalPath -Kind Journal
             }
 
             $marker = 'PASS remediation journal ' + $case + ' ' + $remediationJournalCases[$case]
+            Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+        }
+    }
+
+    Invoke-Test 'compound journal failures identify the dispatched reservation' {
+        $engine = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'RemediationPersistenceContextFixture.ps1'
+        $output = @(& $engine -NoLogo -NoProfile -NonInteractive -File $fixture -RepositoryRoot $RepositoryRoot)
+        if ($LASTEXITCODE -ne 0) {
+            throw 'The compound remediation failure fixture failed.'
+        }
+        $marker = 'PASS remediation persistence context 8'
+        Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+    }
+
+    Invoke-Test 'ambiguous remediation errors identify the held account attempt' {
+        $engine = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'RemediationFailureContextFixture.ps1'
+        $output = @(& $engine -NoLogo -NoProfile -NonInteractive -File $fixture -RepositoryRoot $RepositoryRoot)
+        if ($LASTEXITCODE -ne 0) {
+            throw 'The remediation failure context fixture failed.'
+        }
+        $marker = 'PASS remediation failure context 8'
+        Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+    }
+
+    Invoke-Test 'read-only reservation inspection reports local state' {
+        $engine = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'ReservationInspectionFixture.ps1'
+        $output = @(& $engine -NoLogo -NoProfile -NonInteractive -File $fixture -RepositoryRoot $RepositoryRoot)
+        if ($LASTEXITCODE -ne 0) {
+            throw 'The reservation inspection fixture failed.'
+        }
+        $marker = 'PASS remediation reservation inspection 8'
+        Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+    }
+
+    Invoke-Test 'shared account reservation blocks cross-journal retries and undo' {
+        $engine = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'UncertainRemediationFixture.ps1'
+        $output = @(& $engine -NoLogo -NoProfile -NonInteractive -File $fixture -RepositoryRoot $RepositoryRoot)
+        if ($LASTEXITCODE -ne 0) {
+            throw 'The shared account reservation fixture failed.'
+        }
+
+        $expected = @(
+            'PASS isolated uncertainty Native to Direct'
+            'PASS isolated uncertainty Direct to Native'
+            'PASS isolated uncertainty Native Apply to Direct Undo'
+            'PASS isolated uncertainty Direct Apply to Native Undo'
+            'PASS account reservation storage failure and known no-send'
+        )
+        foreach ($marker in $expected) {
+            Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+        }
+    }
+
+    Invoke-Test 'account reservation survives interruption and a new PowerShell process' {
+        $engine = (Get-Process -Id $PID).Path
+        $fixture = Join-Path $PSScriptRoot 'UncertainRemediationRestartFixture.ps1'
+        foreach ($route in 'Native', 'Direct') {
+            $arguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                $fixture
+                '-RepositoryRoot'
+                $RepositoryRoot
+                '-Route'
+                $route
+            )
+            $output = @(& $engine @arguments)
+            if ($LASTEXITCODE -ne 0) {
+                throw ('The account reservation restart fixture failed for ' + $route)
+            }
+
+            $next = if ($route -eq 'Native') {
+                'Direct'
+            }
+            else {
+                'Native'
+            }
+            $marker = "PASS synthetic restart $route to $next"
             Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
         }
     }

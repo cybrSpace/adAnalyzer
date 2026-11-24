@@ -562,6 +562,845 @@ try {
         Assert-Equal 'NotConfigured' ($result.Checks | Where-Object RuleId -eq COLLECTION.ACL).Status
         Assert-Equal 1 $result.SchemaVersion
     }
+    Test-Assessment 'offline password expiration requires a Boolean account observation' {
+        $unexpectedCalls = [Collections.Generic.List[string]]::new()
+        $denyAcquisition = {
+            $unexpectedCalls.Add($MyInvocation.InvocationName)
+            throw 'Unexpected acquisition in the offline password expiration fixture.'
+        }
+        foreach ($commandName in @(
+                'Import-Module'
+                'Get-ADRootDSE'
+                'Get-ADAnalyzerDirectoryData'
+                'Get-ADAnalyzerHostData'
+                'Get-ADAnalyzerGpo'
+                'Get-ADAnalyzerGpoReport'
+                'Invoke-Command'
+                'New-CimSession'
+            )) {
+            Set-Item -LiteralPath ('Function:local:' + $commandName) -Value $denyAcquisition
+        }
+        Assert-Throws { Get-ADRootDSE }
+        Assert-Equal 1 $unexpectedCalls.Count
+        $unexpectedCalls.Clear()
+
+        $flags = [ordered]@{
+            BooleanTrue = $true
+            BooleanFalse = $false
+            DisabledBooleanTrue = $true
+            Null = $null
+            EmptyString = ''
+            TextFalse = 'false'
+            NumericZero = 0
+            EmptyArray = @()
+            SingletonBooleanArray = @($false)
+        }
+        $caseNames = @($flags.Keys) + 'Missing'
+        $statusWhenDisallowed = @{
+            BooleanTrue = 'Fail'
+            BooleanFalse = 'Pass'
+            DisabledBooleanTrue = 'Fail'
+        }
+        $projector = [ADAnalyzerDirectoryObjectProjector]::new()
+        $identities = @{}
+        $statusDifferences = [Collections.Generic.List[string]]::new()
+        foreach ($projection in 'Snapshot', 'Class', 'Command') {
+            $directory = New-AssessmentFixture
+            $directory.Users = @(
+                for ($index = 0; $index -lt $caseNames.Count; $index++) {
+                    $caseName = $caseNames[$index]
+                    $fields = [ordered]@{
+                        DistinguishedName = 'CN=' + $caseName + ',DC=example,DC=invalid'
+                        SID = 'S-1-5-21-1-2-3-' + (2300 + $index)
+                        ObjectClass = 'User'
+                        Enabled = $caseName -ne 'DisabledBooleanTrue'
+                    }
+                    if ($flags.Contains($caseName)) {
+                        $fields['PasswordNeverExpires'] = $flags[$caseName]
+                    }
+                    $record = [pscustomobject]$fields
+                    switch ($projection) {
+                        'Snapshot' {
+                            $record
+                        }
+                        'Class' {
+                            $projector.Project($record, 'User')
+                        }
+                        'Command' {
+                            ConvertTo-ADAnalyzerDirectoryObject -Record $record -Kind User
+                        }
+                    }
+                }
+            )
+
+            foreach ($allowNeverExpires in $false, $true) {
+                $profile = @{
+                    Analysis = @{
+                        IncludeGpo = $false
+                        IncludeHostChecks = $false
+                    }
+                    Policy = @{
+                        AllowPasswordNeverExpires = $allowNeverExpires
+                    }
+                }
+                $result = Invoke-ADAnalyzerAssessment -DirectoryData $directory -Profile $profile
+                $checks = @($result.Checks | Where-Object RuleId -CEQ 'ACCOUNT.PASSWORD_NEVER_EXPIRES')
+                Assert-Equal $caseNames.Count $checks.Count
+                for ($index = 0; $index -lt $caseNames.Count; $index++) {
+                    $caseName = $caseNames[$index]
+                    $row = $checks[$index]
+                    $userRecord = $directory.Users[$index]
+                    $expectedStatus = $statusWhenDisallowed[$caseName]
+                    if ($null -eq $expectedStatus) {
+                        $expectedStatus = 'Unknown'
+                    }
+                    elseif ($allowNeverExpires) {
+                        $expectedStatus = 'Pass'
+                    }
+                    if ($row.Status -cne $expectedStatus) {
+                        $statusDifferences.Add(('{0}/{1} (allow={2}): expected {3}, got {4}' -f
+                                $projection, $caseName, $allowNeverExpires, $expectedStatus, $row.Status))
+                    }
+                    Assert-True (
+                        $row.Target -ceq $userRecord.DistinguishedName -and
+                        $row.DistinguishedName -ceq $userRecord.DistinguishedName -and
+                        $row.SID -ceq $userRecord.SID -and
+                        $row.CheckId -cmatch '^[0-9a-f]{64}$' -and
+                        $row.Applicability -ceq 'Configured' -and
+                        $row.Expected -is [bool] -and $row.Expected -eq $allowNeverExpires -and
+                        $null -ne $row.PSObject.Properties['Observed']
+                    ) ('The password expiration check lost its identity or result shape for ' + $caseName)
+                    if ($identities.ContainsKey($caseName)) {
+                        Assert-Equal $identities[$caseName] $row.CheckId
+                    }
+                    else {
+                        $identities[$caseName] = $row.CheckId
+                    }
+                    if ($flags[$caseName] -is [bool]) {
+                        Assert-True ($row.Observed -is [bool] -and $row.Observed -eq $flags[$caseName]) (
+                            'The password expiration check lost its Boolean observation for ' + $caseName
+                        )
+                    }
+                }
+            }
+        }
+        Assert-Equal 0 $unexpectedCalls.Count
+        Assert-True ($statusDifferences.Count -eq 0) ($statusDifferences -join '; ')
+    }
+    Test-Assessment 'offline trust SID filtering requires typed Boolean evidence' {
+        $acquisition = [Collections.Generic.List[string]]::new()
+        $denyAcquisition = {
+            $acquisition.Add($MyInvocation.InvocationName)
+            throw 'Unexpected provider call from the offline trust fixture.'
+        }
+        foreach ($commandName in 'Get-ADTrust', 'Get-ADRootDSE', 'Get-ADAnalyzerDirectoryData', 'New-CimSession') {
+            Set-Item -LiteralPath ('Function:local:' + $commandName) -Value $denyAcquisition
+        }
+        Assert-Throws { Get-ADTrust }
+        Assert-Equal 1 $acquisition.Count
+        $acquisition.Clear()
+
+        $base = @{
+            IntraForest = $false
+            ForestTransitive = $false
+            SIDFilteringQuarantined = $false
+            SIDFilteringForestAware = $true
+        }
+        $cases = [ordered]@{
+            ExternalFail = @{}
+            ExternalPass = @{ SIDFilteringQuarantined = $true }
+            ForestPass = @{ ForestTransitive = $true }
+            ForestFail = @{
+                ForestTransitive = $true
+                SIDFilteringForestAware = $false
+            }
+            IntraForest = @{ IntraForest = $true }
+            ExternalText = @{ SIDFilteringQuarantined = 'False' }
+            ForestText = @{
+                ForestTransitive = $true
+                SIDFilteringForestAware = 'False'
+            }
+            NumericFlag = @{ SIDFilteringQuarantined = 0 }
+            ArrayFlag = @{ SIDFilteringQuarantined = @($true) }
+            EmptyFlag = @{ SIDFilteringQuarantined = @() }
+            NullFlag = @{ SIDFilteringQuarantined = $null }
+            MissingFlag = @{}
+            TextIntraForest = @{ IntraForest = 'True' }
+            ArrayIntraForest = @{ IntraForest = @($true) }
+            MissingIntraForest = @{}
+            TextMode = @{ ForestTransitive = 'False' }
+            ArrayMode = @{ ForestTransitive = @($false) }
+            MissingMode = @{}
+        }
+        $valid = @{
+            ExternalFail = 'Fail'
+            ExternalPass = 'Pass'
+            ForestPass = 'Pass'
+            ForestFail = 'Fail'
+            IntraForest = 'NotApplicable'
+        }
+        $engine = [ADAnalyzerAssessmentEngine]::new()
+        $reporter = [ADAnalyzerAssessmentReport]::new()
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $makeAssessment = {
+            param($Method, $Directory)
+
+            if ($Method -ceq 'Command') {
+                Invoke-ADAnalyzerAssessment -DirectoryData $Directory -Target 'example.invalid'
+            }
+            else {
+                $engine.Evaluate($Directory, @(), 'example.invalid')
+            }
+        }
+        $records = @{
+            ExternalFail = $false
+            ExternalPass = $true
+            ForestPass = $true
+            ForestFail = $false
+            IntraForest = $false
+        }
+        $failures = [Collections.Generic.List[string]]::new()
+        foreach ($route in 'Command', 'Class') {
+            $directory = New-AssessmentFixture
+            $directory.Trusts = @(
+                foreach ($name in $cases.Keys) {
+                    $trust = $base.Clone()
+                    foreach ($key in $cases[$name].Keys) {
+                        $trust[$key] = $cases[$name][$key]
+                    }
+                    switch ($name) {
+                        'MissingFlag' { $trust.Remove('SIDFilteringQuarantined') }
+                        'MissingIntraForest' { $trust.Remove('IntraForest') }
+                        'MissingMode' { $trust.Remove('ForestTransitive') }
+                    }
+                    $trust.Target = $name + '.example.invalid'
+                    [pscustomobject]$trust
+                }
+            )
+
+            $assessment = & $makeAssessment $route $directory
+            $saved = Join-Path $temp ('trust-shapes-' + $route + '.json')
+            $null = $reporter.Write($assessment, $saved, 'Json')
+            $loaded = Get-Content -LiteralPath $saved -Raw | ConvertFrom-Json
+            foreach ($result in $assessment, $loaded) {
+                $checks = @($result.Checks | Where-Object RuleId -CEQ 'TRUST.SID_FILTERING')
+                Assert-Equal $cases.Count $checks.Count
+                for ($index = 0; $index -lt $checks.Count; $index++) {
+                    $name = @($cases.Keys)[$index]
+                    $check = $checks[$index]
+                    Assert-Equal ($name + '.example.invalid') $check.Target
+                    $expected = if ($valid.ContainsKey($name)) {
+                        $valid[$name]
+                    }
+                    else {
+                        'Unknown'
+                    }
+                    if ($check.Status -cne $expected -or
+                        ($valid.ContainsKey($name) -and
+                            ($check.Observed -isnot [bool] -or $check.Observed -ne $records[$name]))) {
+                        $failures.Add(('{0}/{1}: expected {2}, got {3}.' -f $route, $name, $expected, $check.Status))
+                    }
+                }
+            }
+
+            $comparisonPaths = @{}
+            foreach ($name in 'ExternalFail', 'ExternalText', 'ExternalPass') {
+                $one = New-AssessmentFixture
+                $trust = $directory.Trusts[[array]::IndexOf(@($cases.Keys), $name)].PSObject.Copy()
+                $trust.Target = 'partner.example.invalid'
+                $one.Trusts = @($trust)
+                $comparisonPaths[$name] = Join-Path $temp ($route + '-' + $name + '.json')
+                $null = $reporter.Write((& $makeAssessment $route $one), $comparisonPaths[$name], 'Json')
+            }
+            $previous = $comparisonPaths.ExternalFail
+            foreach ($nextCase in 'ExternalText', 'ExternalPass') {
+                $next = $comparisonPaths[$nextCase]
+                $expectedChange = if ($nextCase -ceq 'ExternalText') {
+                    'Changed'
+                }
+                else {
+                    'Resolved'
+                }
+                $comparisons = @(
+                    Compare-ADAnalyzerAssessment -Reference $previous -Difference $next
+                    $comparer.Compare($previous, $next)
+                )
+                foreach ($comparison in $comparisons) {
+                    $rows = @($comparison.Changes | Where-Object RuleId -CEQ 'TRUST.SID_FILTERING')
+                    Assert-Equal 1 $rows.Count
+                    if ($rows[0].Change -cne $expectedChange) {
+                        $failures.Add(('{0}/{1} comparison: expected {2}, got {3}.' -f
+                                $route, $nextCase, $expectedChange, $rows[0].Change))
+                    }
+                }
+            }
+        }
+        Assert-Equal 0 $acquisition.Count
+        Assert-True ($failures.Count -eq 0) ($failures -join [Environment]::NewLine)
+    }
+    Test-Assessment 'scoped password expiration uses one typed account-control observation' {
+        $ruleId = 'ACCOUNT.PASSWORD_NEVER_EXPIRES'
+        $scope = 'OU=Selected,DC=example,DC=invalid'
+        $accountDn = 'CN=Scoped User,' + $scope
+        $subjectGuid = '4bba9958-e7c0-4102-9ad8-ddba376b91f7'
+        $domainSid = 'S-1-5-21-1-2-3'
+        $earlier = '2026-02-09T12:00:00.0000000Z'
+        $later = '2026-02-09T12:05:00.0000000Z'
+        $projector = [ADAnalyzerDirectoryObjectProjector]::new()
+        # The legacy projector rejects text it cannot cast before an assessment exists.
+        Assert-Throws {
+            $projector.Project(@{ UserAccountControl = 'not an account-control value' }, 'User')
+        }
+        $makeAssessment = {
+            param([hashtable]$Options)
+
+            $directory = New-AssessmentFixture
+            $user = [ordered]@{
+                ObjectClass = 'User'
+                AccountType = 'User'
+                DistinguishedName = $accountDn
+                ObjectGuid = $subjectGuid
+                SID = $domainSid + '-3201'
+            }
+            if ($Options.OtherSubject) {
+                $user.ObjectGuid = '4bba9958-e7c0-4102-9ad8-ddba376b91f8'
+            }
+            if ($Options.ContainsKey('Uac')) {
+                $user['UserAccountControl'] = $Options.Uac
+            }
+            if ($Options.ContainsKey('Flags')) {
+                $user['Enabled'] = $true
+                $user['PasswordNeverExpires'] = $Options.Flags
+            }
+            if ($Options.MissingAuthority) {
+                $directory.Domain.PSObject.Properties.Remove('SID')
+            }
+            $record = [pscustomobject]$user
+            $directory.Users = @(
+                switch ($Options.Projection) {
+                    'Class' {
+                        $projector.Project($record, 'User', @('UserAccountControl'))
+                    }
+                    'Command' {
+                        ConvertTo-ADAnalyzerDirectoryObject -Record $record -Kind User -AdditionalProperties 'UserAccountControl'
+                    }
+                    default {
+                        $record
+                    }
+                }
+            )
+            if ($Options.MissingScopedSubject -or $Options.DuplicateScopedSubject -or $Options.ConflictingObjectsRow) {
+                $directory.Objects = @($directory.Users[0].PSObject.Copy())
+            }
+            if ($Options.MissingScopedSubject) {
+                $directory.Users = @()
+            }
+            if ($Options.DuplicateScopedSubject) {
+                $directory.Users += $directory.Users[0].PSObject.Copy()
+            }
+            if ($Options.ConflictingObjectsRow) {
+                $directory.Objects[0].PasswordNeverExpires = $false
+                $directory.Objects[0].UserAccountControl = [int]512
+            }
+            if (-not $Options.Legacy) {
+                $time = if ($Options.Earlier) {
+                    $earlier
+                }
+                else {
+                    $later
+                }
+                $directory.Coverage['DirectoryConnection'] = 'Collected'
+                $directory | Add-Member -NotePropertyMembers @{
+                    DirectoryConnection = [pscustomobject]@{
+                        Mode = 'PSDrive'
+                        Server = $directory.Server
+                        Status = 'Connected'
+                    }
+                    UsersObservation = [pscustomobject]@{
+                        Version = 1
+                        RequestedSearchBase = $scope
+                        SearchBase = $scope
+                        Server = $directory.Server
+                        Mode = 'PSDrive'
+                        ObservedAt = $time
+                        Status = 'Completed'
+                    }
+                }
+            }
+            if ($Options.UnreadableScope) {
+                $directory.UsersObservation.Status = 'Unreadable'
+                $directory.Coverage.Users = 'Unreadable'
+            }
+            Invoke-ADAnalyzerAssessment -DirectoryData $directory -Target 'example.invalid'
+        }
+
+        # 512 is NORMAL_ACCOUNT, 65536 is DONT_EXPIRE_PASSWD, and 2 is ACCOUNTDISABLE.
+        $specifications = [ordered]@{
+            ScopedBefore = @{
+                Uac = [int]66048
+                Flags = $true
+                Earlier = $true
+            }
+            ScopedAfter = @{
+                Uac = [long]512
+                Flags = $false
+            }
+            RawOnlyBefore = @{
+                Uac = [int]66048
+                Earlier = $true
+            }
+            RawOnlyAfter = @{
+                Uac = [long]512
+            }
+            ContradictoryFlag = @{
+                Uac = [int]66048
+                Flags = $false
+            }
+            ContradictoryEnabled = @{
+                Uac = [int]514
+                Flags = $false
+            }
+            MissingUac = @{
+                Flags = $false
+            }
+            StringUac = @{
+                Uac = '512'
+                Flags = $false
+            }
+            InvalidTextUac = @{
+                Uac = 'not an account-control value'
+                Flags = $false
+            }
+            Disabled = @{
+                Uac = [int]514
+            }
+            SingletonUac = @{
+                Uac = @([int]512)
+                Flags = $false
+            }
+            SingletonUacClass = @{
+                Uac = @([int]512)
+                Flags = $false
+                Projection = 'Class'
+            }
+            SingletonUacCommand = @{
+                Uac = @([int]512)
+                Flags = $false
+                Projection = 'Command'
+            }
+            MissingAuthority = @{
+                Uac = [int]512
+                Flags = $false
+                MissingAuthority = $true
+            }
+            OtherSubject = @{
+                Uac = [int]512
+                Flags = $false
+                OtherSubject = $true
+            }
+            MissingScopedSubject = @{
+                Uac = [int]512
+                Flags = $false
+                MissingScopedSubject = $true
+            }
+            DuplicateScopedSubject = @{
+                Uac = [int]512
+                Flags = $false
+                DuplicateScopedSubject = $true
+            }
+            UnreadableScope = @{
+                Uac = [int]512
+                Flags = $false
+                UnreadableScope = $true
+            }
+            ConflictingObjectsRow = @{
+                Uac = [int]66048
+                Flags = $true
+                ConflictingObjectsRow = $true
+            }
+            LegacyBefore = @{
+                Uac = [int]66048
+                Flags = $true
+                Legacy = $true
+            }
+            LegacyAfter = @{
+                Uac = [int]66048
+                Flags = $false
+                Legacy = $true
+            }
+            LegacyUnknown = @{
+                Uac = [int]66048
+                Legacy = $true
+            }
+        }
+        $snapshotDirectory = Join-Path $temp 'scoped account control evidence'
+        $null = [IO.Directory]::CreateDirectory($snapshotDirectory)
+        $report = [ADAnalyzerAssessmentReport]::new()
+        $snapshots = @{}
+        $paths = @{}
+        $hashes = @{}
+        $failureDetails = [Collections.Generic.List[string]]::new()
+        foreach ($name in $specifications.Keys) {
+            $snapshot = & $makeAssessment $specifications[$name]
+            $snapshots[$name] = $snapshot
+            $rows = @($snapshot.Checks | Where-Object RuleId -CEQ $ruleId)
+            Assert-Equal 1 $rows.Count
+            Assert-Equal $accountDn $rows[0].Target
+            $expected = switch ($name) {
+                { $_ -in 'ScopedBefore', 'RawOnlyBefore', 'LegacyBefore', 'ConflictingObjectsRow' } {
+                    'Fail'
+                }
+                { $_ -in 'ScopedAfter', 'RawOnlyAfter', 'MissingAuthority', 'OtherSubject', 'LegacyAfter' } {
+                    'Pass'
+                }
+                'Disabled' {
+                    'NotApplicable'
+                }
+                default {
+                    'Unknown'
+                }
+            }
+            if ($expected -and $rows[0].Status -cne $expected) {
+                $failureDetails.Add(('{0}: expected assessment {1}, received {2}.' -f $name, $expected, $rows[0].Status))
+            }
+            if ($expected -in 'Fail', 'Pass' -and $rows[0].Status -ceq $expected) {
+                Assert-True (
+                    $rows[0].Observed -is [bool] -and $rows[0].Observed -eq ($expected -eq 'Fail')
+                ) ('The check lost Boolean evidence for ' + $name)
+            }
+            if ($name -in 'ScopedBefore', 'ScopedAfter') {
+                $otherCheck = @($snapshot.Checks | Where-Object RuleId -CEQ 'ACCOUNT.PASSWORD_NOT_REQUIRED')
+                if ($otherCheck.Count -ne 1 -or
+                    $otherCheck[0].Evidence.UserAccountControl.GetType() -ne $specifications[$name].Uac.GetType()) {
+                    $failureDetails.Add($name + ': an unrelated flag check changed the recorded numeric type.')
+                }
+            }
+            $path = Join-Path $snapshotDirectory ($name + '.json')
+            [IO.File]::WriteAllText($path, $report.Render($snapshot, 'Json'))
+            $paths[$name] = $path
+            $hashes[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        }
+        # Prior scoped files can carry a Boolean-based Pass that the new evaluator would withhold.
+        foreach ($sourceName in 'ContradictoryFlag', 'SingletonUac') {
+            $name = 'PriorPass' + $sourceName
+            $prior = $snapshots[$sourceName].PSObject.Copy()
+            $prior.Checks = @(
+                foreach ($row in $prior.Checks) {
+                    if ($row.RuleId -cne $ruleId) {
+                        $row
+                        continue
+                    }
+                    $check = $row.PSObject.Copy()
+                    $check.Status = 'Pass'
+                    $check.Observed = $false
+                    $check
+                }
+            )
+            $snapshots[$name] = $prior
+            $path = Join-Path $snapshotDirectory ($name + '.json')
+            [IO.File]::WriteAllText($path, $report.Render($prior, 'Json'))
+            $paths[$name] = $path
+            $hashes[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        }
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $pairs = @(
+            @('ScopedBefore', 'ScopedAfter', 'Resolved'),
+            @('RawOnlyBefore', 'RawOnlyAfter', 'Resolved'),
+            @('LegacyBefore', 'LegacyAfter', 'Resolved'),
+            @('LegacyBefore', 'LegacyUnknown', 'Changed'),
+            @('ScopedBefore', 'ContradictoryFlag', 'Changed'),
+            @('ScopedBefore', 'ContradictoryEnabled', 'Changed'),
+            @('ScopedBefore', 'MissingUac', 'Changed'),
+            @('ScopedBefore', 'StringUac', 'Changed'),
+            @('ScopedBefore', 'InvalidTextUac', 'Changed'),
+            @('ScopedBefore', 'Disabled', 'Changed'),
+            @('ScopedBefore', 'SingletonUac', 'Changed'),
+            @('ScopedBefore', 'SingletonUacClass', 'Changed'),
+            @('ScopedBefore', 'SingletonUacCommand', 'Changed'),
+            @('ScopedBefore', 'PriorPassContradictoryFlag', 'Changed'),
+            @('ScopedBefore', 'PriorPassSingletonUac', 'Changed'),
+            @('ScopedBefore', 'MissingAuthority', 'Changed'),
+            @('ScopedBefore', 'OtherSubject', 'Changed'),
+            @('ScopedBefore', 'MissingScopedSubject', 'Changed'),
+            @('ScopedBefore', 'DuplicateScopedSubject', 'Changed'),
+            @('ScopedBefore', 'UnreadableScope', 'Changed')
+        )
+        foreach ($inputForm in 'InMemory', 'Saved') {
+            $documents = if ($inputForm -ceq 'InMemory') {
+                $snapshots
+            }
+            else {
+                $paths
+            }
+            foreach ($pair in $pairs) {
+                $before, $after, $expected = $pair
+                $expectedReason = if ($expected -ceq 'Changed' -and $after -cne 'LegacyUnknown') {
+                    'DirectoryEvidenceInsufficient'
+                }
+                $comparisons = [ordered]@{
+                    Native = Compare-ADAnalyzerAssessment -Reference $documents[$before] -Difference $documents[$after]
+                    Direct = $comparer.Compare($documents[$before], $documents[$after])
+                }
+                foreach ($route in $comparisons.Keys) {
+                    $rows = @($comparisons[$route].Changes | Where-Object RuleId -CEQ $ruleId)
+                    Assert-Equal 1 $rows.Count
+                    if ($rows[0].Change -cne $expected) {
+                        $failureDetails.Add(('{0}/{1}/{2}: expected {3}, received {4}.' -f
+                                $inputForm, $route, $after, $expected, $rows[0].Change))
+                    }
+                    if ($rows[0].Reason -cne $expectedReason) {
+                        $failureDetails.Add(('{0}/{1}/{2}: expected reason [{3}], received [{4}].' -f
+                                $inputForm, $route, $after, $expectedReason, $rows[0].Reason))
+                    }
+                }
+            }
+        }
+        foreach ($name in $paths.Keys) {
+            Assert-Equal $hashes[$name] (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+        Assert-True ($failureDetails.Count -eq 0) ($failureDetails -join [Environment]::NewLine)
+    }
+    Test-Assessment 'password expiry allowance changes are not recorded as account flag changes' {
+        $ruleId = 'ACCOUNT.PASSWORD_NEVER_EXPIRES'
+        $accountDn = 'CN=Expiry Test,DC=example,DC=invalid'
+        $makeSnapshot = {
+            param([bool]$NeverExpires, [bool]$Allowed)
+
+            $directory = New-AssessmentFixture
+            $directory.Objects = @([pscustomobject]@{
+                    ObjectClass = 'User'
+                    AccountType = 'User'
+                    Enabled = $true
+                    DistinguishedName = $accountDn
+                    ObjectGuid = [guid]'4bba9958-e7c0-4102-9ad8-ddba376b91f7'
+                    SID = 'S-1-5-21-1-2-3-3201'
+                    PasswordNeverExpires = $NeverExpires
+                })
+            $profile = @{ Policy = @{ AllowPasswordNeverExpires = $Allowed } }
+            Invoke-ADAnalyzerAssessment -DirectoryData $directory -Profile $profile -Target 'example.invalid'
+        }
+
+        $snapshots = [ordered]@{}
+        $checks = @{}
+        foreach ($fixture in @(
+                @('Disallowed', $true, $false, 'Fail'),
+                @('Allowed', $true, $true, 'Pass'),
+                @('FlagCleared', $false, $false, 'Pass'),
+                @('BothChanged', $false, $true, 'Pass')
+            )) {
+            $name, $flag, $allowance, $status = $fixture
+            $snapshot = & $makeSnapshot $flag $allowance
+            $rows = @($snapshot.Checks | Where-Object RuleId -eq $ruleId)
+            Assert-Equal 1 $rows.Count
+            $row = $rows[0]
+            Assert-Equal $accountDn $row.Target
+            Assert-Equal $status $row.Status
+            Assert-True ($row.Observed -is [bool] -and $row.Observed -eq $flag -and
+                $row.Expected -is [bool] -and $row.Expected -eq $allowance) 'Assessment lost the typed Boolean evidence'
+            $snapshots[$name] = $snapshot
+            $checks[$name] = $row
+        }
+
+        $snapshots.LegacyAllowance = & $makeSnapshot $true $true
+        $checks.LegacyAllowance = $snapshots.LegacyAllowance.Checks | Where-Object RuleId -eq $ruleId
+        $checks.LegacyAllowance.Expected = 'True'
+        $snapshots.CaseFoldedAllowance = & $makeSnapshot $true $true
+        $checks.CaseFoldedAllowance = $snapshots.CaseFoldedAllowance.Checks | Where-Object RuleId -eq $ruleId
+        $checks.CaseFoldedAllowance.RuleId = $ruleId.ToLowerInvariant()
+        $snapshots.ArrayRuleId = & $makeSnapshot $true $true
+        $checks.ArrayRuleId = $snapshots.ArrayRuleId.Checks | Where-Object RuleId -eq $ruleId
+        $checks.ArrayRuleId.RuleId = @($ruleId)
+
+        $paths = @{}
+        $hashes = @{}
+        foreach ($name in $snapshots.Keys) {
+            Assert-Equal $checks.Disallowed.CheckId $checks[$name].CheckId
+            $paths[$name] = Join-Path $temp ('password-expiry-comparison-' + $name + '.json')
+            $null = Export-ADAnalyzerAssessment -Assessment $snapshots[$name] -Path $paths[$name] -Format Json -Confirm:$false
+            $hashes[$name] = (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $cases = @(
+            @('Disallowed', 'FlagCleared', 'Resolved', $null),
+            @('FlagCleared', 'Disallowed', 'New', $null),
+            @('Disallowed', 'BothChanged', 'Resolved', $null),
+            @('Disallowed', 'LegacyAllowance', 'Resolved', $null),
+            @('Disallowed', 'Allowed', 'Changed', 'RulePredicateChanged'),
+            @('Allowed', 'Disallowed', 'Changed', 'RulePredicateChanged'),
+            @('Disallowed', 'CaseFoldedAllowance', 'Changed', 'RulePredicateChanged'),
+            @('Disallowed', 'ArrayRuleId', 'Resolved', $null)
+        )
+        foreach ($documents in @($snapshots, $paths)) {
+            foreach ($case in $cases) {
+                $before, $after, $expectedChange, $expectedReason = $case
+                $reference = $documents[$before]
+                $difference = $documents[$after]
+                $command = Compare-ADAnalyzerAssessment -Reference $reference -Difference $difference
+                $direct = $comparer.Compare($reference, $difference)
+                foreach ($result in @($command, $direct)) {
+                    $changes = @($result.Changes | Where-Object RuleId -eq $ruleId)
+                    Assert-Equal 1 $changes.Count
+                    $change = $changes[0]
+                    Assert-True ($change.Change -eq $expectedChange -and $change.Reason -eq $expectedReason) (
+                        "Comparison $before to $after expected $expectedChange/$expectedReason, received $($change.Change)/$($change.Reason)"
+                    )
+                    Assert-Equal $accountDn $change.Target
+                    foreach ($field in @('Status', 'Observed', 'Expected')) {
+                        Assert-Equal $checks[$before].$field $change.Reference[0].$field
+                        Assert-Equal $checks[$after].$field $change.Difference[0].$field
+                    }
+                }
+            }
+        }
+        foreach ($name in $paths.Keys) {
+            Assert-Equal $hashes[$name] (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+    }
+    Test-Assessment 'comparison rejects distinct recorded domain SIDs for the same target label' {
+        $domainSid = 'S-1-5-21-1-2-3'
+        $otherDomainSid = 'S-1-5-21-4-5-4294967295'
+        $rule = 'ACCOUNT.PASSWORD_NEVER_EXPIRES'
+        $accountDn = 'CN=Domain Comparison Test,DC=example,DC=invalid'
+        $makeSnapshot = {
+            param([string]$DomainSid, [bool]$Flag)
+
+            $directory = New-AssessmentFixture
+            $directory.Domain.SID = $DomainSid
+            $directory.Objects = @([pscustomobject]@{
+                    ObjectClass = 'User'
+                    AccountType = 'User'
+                    Enabled = $true
+                    DistinguishedName = $accountDn
+                    SID = $DomainSid + '-4201'
+                    PasswordNeverExpires = $Flag
+                })
+            $profile = @{ Policy = @{ AllowPasswordNeverExpires = $false } }
+            Invoke-ADAnalyzerAssessment -DirectoryData $directory -Profile $profile
+        }
+
+        $snapshots = [ordered]@{
+            Before = & $makeSnapshot $domainSid $true
+            Same = & $makeSnapshot $domainSid $false
+            Distinct = & $makeSnapshot $otherDomainSid $false
+        }
+        Assert-Equal $domainSid $snapshots.Before.Data.Directory.Domain.SID
+        Assert-Equal $otherDomainSid $snapshots.Distinct.Data.Directory.Domain.SID
+        foreach ($name in 'Missing', 'Null', 'Overflow', 'Account', 'Array') {
+            $snapshots[$name] = & $makeSnapshot $domainSid $false
+        }
+        $snapshots.Missing.Data.Directory.Domain.PSObject.Properties.Remove('SID')
+        $snapshots.Null.Data.Directory.Domain.SID = $null
+        $snapshots.Overflow.Data.Directory.Domain.SID = 'S-1-5-21-4-5-4294967296'
+        $snapshots.Account.Data.Directory.Domain.SID = $otherDomainSid + '-4201'
+        $snapshots.Array.Data.Directory.Domain.SID = @($otherDomainSid)
+
+        $paths = @{}
+        $hashes = @{}
+        foreach ($name in $snapshots.Keys) {
+            Assert-Equal 'offline' $snapshots[$name].Target
+            $paths[$name] = Join-Path $temp ('recorded-domain-comparison-' + $name + '.json')
+            $null = Export-ADAnalyzerAssessment -Assessment $snapshots[$name] -Path $paths[$name] -Format Json -Confirm:$false
+            $hashes[$name] = (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $differences = [Collections.Generic.List[string]]::new()
+        $controlRows = $null
+        foreach ($representation in 'Object', 'Json') {
+            $documents = if ($representation -ceq 'Object') { $snapshots } else { $paths }
+            foreach ($api in 'Native', 'Direct') {
+                foreach ($pair in @(
+                        @('Before', 'Same'),
+                        @('Before', 'Missing'),
+                        @('Before', 'Null'),
+                        @('Before', 'Overflow'),
+                        @('Before', 'Account'),
+                        @('Before', 'Array'),
+                        @('Before', 'Distinct'),
+                        @('Distinct', 'Before')
+                    )) {
+                    $before, $after = $pair
+                    $label = "$representation/$api/$before-$after"
+                    $rows = [Collections.Generic.List[object]]::new()
+                    $problem = $null
+                    try {
+                        if ($api -ceq 'Native') {
+                            Compare-ADAnalyzerAssessment -Reference $documents[$before] -Difference $documents[$after] -ErrorAction Stop |
+                                ForEach-Object { $rows.Add($_) }
+                        }
+                        else {
+                            $rows.Add($comparer.Compare($documents[$before], $documents[$after]))
+                        }
+                    }
+                    catch {
+                        $problem = $_
+                    }
+
+                    if ('Distinct' -cin $pair) {
+                        if ($null -eq $problem -or $rows.Count -ne 0 -or
+                            $problem.Exception.GetBaseException().Message -cnotlike '*different*domain SID*') {
+                            $differences.Add("$label did not reject a different recorded domain SID before emitting results")
+                        }
+                        continue
+                    }
+                    Assert-True ($null -eq $problem -and $rows.Count -eq 1) "$label rejected the same domain or unusable legacy evidence"
+                    $result = $rows[0]
+                    $expiry = @($result.Changes | Where-Object RuleId -CEQ $rule)
+                    Assert-True (
+                        $expiry.Count -eq 1 -and $expiry[0].Target -ceq $accountDn -and
+                        $expiry[0].Change -ceq 'Resolved' -and $null -eq $expiry[0].Reason -and
+                        $expiry[0].Reference[0].Observed -is [bool] -and $expiry[0].Reference[0].Observed -and
+                        $expiry[0].Difference[0].Observed -is [bool] -and -not $expiry[0].Difference[0].Observed
+                    ) "$label changed a verified same-label comparison"
+                    $rowOrder = @($result.Changes | ForEach-Object { $_.RuleId + '|' + $_.Target + '|' + $_.Change })
+                    if ($null -eq $controlRows) {
+                        $controlRows = $rowOrder
+                    }
+                    Assert-Equal ($controlRows -join [Environment]::NewLine) ($rowOrder -join [Environment]::NewLine)
+                }
+            }
+        }
+        foreach ($name in $paths.Keys) {
+            Assert-Equal $hashes[$name] (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+        Assert-True ($differences.Count -eq 0) ($differences -join [Environment]::NewLine)
+
+        $ordinary = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = 'offline'
+            Checks = @([pscustomobject]@{
+                    RuleId = 'FIXTURE.UNRELATED'
+                    Target = 'fixture.invalid'
+                    Status = 'Pass'
+                })
+        }
+        $getterReads = [pscustomobject]@{ Data = 0; Sid = 0 }
+        $legacyData = $ordinary.PSObject.Copy()
+        $readData = {
+            $getterReads.Data++
+            throw 'Unused legacy Data getter was invoked.'
+        }.GetNewClosure()
+        $legacyData | Add-Member -MemberType ScriptProperty -Name Data -Value $readData
+        $legacySid = $ordinary.PSObject.Copy()
+        $legacyDomain = [pscustomobject]@{}
+        $readSid = {
+            $getterReads.Sid++
+            throw 'Unused legacy SID getter was invoked.'
+        }.GetNewClosure()
+        $legacyDomain | Add-Member -MemberType ScriptProperty -Name SID -Value $readSid
+        $legacySid | Add-Member -NotePropertyName Data -NotePropertyValue @{
+            Directory = @{ Domain = $legacyDomain }
+        }
+        foreach ($legacy in $legacyData, $legacySid) {
+            $native = Compare-ADAnalyzerAssessment -Reference $ordinary -Difference $legacy -ErrorAction Stop
+            $direct = $comparer.Compare($ordinary, $legacy)
+            Assert-Equal 1 $native.Summary.Unchanged
+            Assert-Equal 1 $direct.Summary.Unchanged
+        }
+        Assert-Equal 0 $getterReads.Data
+        Assert-Equal 0 $getterReads.Sid
+    }
     Test-Assessment 'unreadable collectors produce partial coverage and preserve errors' {
         $data = New-AssessmentFixture
         $data.Coverage.Users = 'Unreadable'
@@ -638,6 +1477,1009 @@ try {
         $json = ConvertTo-Json -InputObject $result -Depth 100
         Assert-True ($json -notmatch 'fixture-secret|fixture-password') 'Secret crossed assessment boundary'
         Assert-Equal Fail ($result.Checks | Where-Object RuleId -eq GPO.Preferences.CPassword).Status
+    }
+    Test-Assessment 'omitted inventoried GPO XML limits credential evidence through both assessment APIs' {
+        $data = New-AssessmentFixture
+        $policy = New-PolicyFixture
+        $xml = [pscustomobject]@{
+            Scope = 'Computer'
+            Path = 'Machine/Preferences/Groups/Groups.xml'
+            Kind = 'Preferences'
+            Xml = '<Groups><User cpasswordPresent="false" /></Groups>'
+        }
+        $policy.XmlFiles = @($xml)
+        $policy.Files = @([pscustomobject]@{
+                Scope = $xml.Scope
+                Path = $xml.Path
+                Kind = 'Xml'
+                Length = 52
+            })
+        $gpoData = @([pscustomobject]@{
+                Gpo = [pscustomobject]@{
+                    Id = [guid]'11111111-1111-1111-1111-111111111111'
+                    Flags = 0
+                    Version = 1
+                    Links = @()
+                }
+                Policy = $policy
+                Error = $null
+            })
+        $target = $data.Domain.DNSRoot
+        $engine = [ADAnalyzerAssessmentEngine]::new()
+        $clean = $engine.Evaluate($data, $gpoData, $target)
+        $original = $clean.Checks | Where-Object RuleId -eq GPO.Preferences.CPassword
+        Assert-Equal Pass $original.Status
+        Assert-True ($original.Observed -is [bool] -and -not $original.Observed) 'Readable clean XML lost Boolean absence'
+        Assert-Equal 0 @($clean.Checks | Where-Object RuleId -eq GPO.Coverage.MissingXml).Count
+
+        $policy.Files += [pscustomobject]@{
+            Scope = 'User'
+            Path = 'User/Preferences/Groups/Groups.xml'
+            Kind = 'Xml'
+            Length = 51
+        }
+        $arguments = @{
+            DirectoryData = $data
+            GpoData = $gpoData
+            Target = $target
+        }
+        foreach ($result in @((Invoke-ADAnalyzerAssessment @arguments), $engine.Evaluate($data, $gpoData, $target))) {
+            Assert-Equal Partial $result.State
+            $credential = $result.Findings | Where-Object RuleId -eq GPO.Preferences.CPassword
+            Assert-Equal Unknown $credential.Status
+            Assert-Equal $original.CheckId $credential.CheckId
+            Assert-True ($null -eq $credential.Observed -and $null -eq $credential.Evidence.SecretPresent) 'Incomplete evidence established absence'
+            $coverage = @($result.Findings | Where-Object RuleId -eq GPO.Coverage.MissingXml)
+            Assert-Equal 1 $coverage.Count
+            Assert-Equal Unknown $coverage[0].Status
+            Assert-True ($coverage[0].Observed -is [int] -and $coverage[0].Observed -eq 1) 'Missing XML lost its integer count'
+            Assert-Equal 0 $coverage[0].Expected
+            Assert-Equal 0 @($result.Checks | Where-Object RuleId -eq GPO.Xml.Readable).Count
+        }
+
+        $xml.Xml = '<Groups><User cpasswordPresent="true" /></Groups>'
+        $result = Invoke-ADAnalyzerAssessment @arguments
+        $json = ConvertTo-Json -InputObject $result -Depth 100
+        $decoded = ConvertFrom-Json -InputObject $json
+        Assert-Equal Partial $decoded.State
+        $positive = $decoded.Findings | Where-Object RuleId -eq GPO.Preferences.CPassword
+        Assert-Equal Fail $positive.Status
+        Assert-True ($positive.Observed -is [bool] -and $positive.Observed -and
+            $positive.Evidence.SecretPresent -is [bool] -and $positive.Evidence.SecretPresent) 'Incomplete coverage erased confirmed presence'
+        $gap = $decoded.Findings | Where-Object RuleId -eq GPO.Coverage.MissingXml
+        Assert-Equal Unknown $gap.Status
+        Assert-Equal 1 $gap.Observed
+        Assert-True ($json -notmatch '<Groups') 'Raw XML escaped through the assessment'
+    }
+    Test-Assessment 'custom GPO comparison distinguishes changed operators, values and registry types' {
+        $ruleId = 'GPO.Expected.FixtureLevel'
+        $key = 'Software\Fixture'
+        $gpo = [pscustomobject]@{
+            Id = [guid]'11111111-1111-1111-1111-111111111111'
+            Version = 1
+            Flags = 0
+            Links = @()
+        }
+        $directory = New-AssessmentFixture
+        $inputs = [ordered]@{
+            Strict = @{
+                Observed = 1
+                Operator = 'Minimum'
+                Expected = 2
+                Status = 'Fail'
+            }
+            Inverted = @{
+                Observed = 1
+                Operator = 'Maximum'
+                Expected = 2
+                Status = 'Pass'
+            }
+            Relaxed = @{
+                Observed = 1
+                Operator = 'Minimum'
+                Expected = 1
+                Status = 'Pass'
+            }
+            Improved = @{
+                Observed = 3
+                Operator = 'Minimum'
+                Expected = 2
+                Status = 'Pass'
+            }
+            EqualStrict = @{
+                Observed = 1
+                Expected = [uint32]2
+                Status = 'Fail'
+            }
+            EqualRelaxed = @{
+                Observed = 1
+                Operator = 'Equals'
+                Expected = [int]1
+                Status = 'Pass'
+            }
+            EqualImproved = @{
+                Observed = 2
+                Operator = 'Equals'
+                Expected = [long]2
+                Status = 'Pass'
+            }
+            NotEqualStrict = @{
+                Observed = 1
+                Operator = 'NotEquals'
+                Expected = [uint32]1
+                Status = 'Fail'
+            }
+            NotEqualRelaxed = @{
+                Observed = 1
+                Operator = 'NotEquals'
+                Expected = [int]2
+                Status = 'Pass'
+            }
+            TypeConstraintWrong = @{
+                Observed = 1
+                Expected = 1
+                RuleType = 'REG_SZ'
+                Status = 'Invalid'
+            }
+            TypeConstraintWrongText = @{
+                Observed = 1
+                Expected = 1
+                RuleType = ' +1 '
+                Status = 'Invalid'
+            }
+            TypeConstraintMatched = @{
+                Observed = 1
+                Expected = 1
+                RuleType = 'REG_DWORD'
+                Status = 'Pass'
+            }
+            TypeUnconstrained = @{
+                Observed = 1
+                Expected = 1
+                RuleType = $null
+                Status = 'Pass'
+            }
+            TypeObservationWrong = @{
+                Observed = 1
+                Expected = 1
+                RuleType = [long]4
+                ObservedType = [uint32]5
+                Status = 'Invalid'
+            }
+            TypeObservationWrongText = @{
+                Observed = 1
+                Expected = 1
+                RuleType = ' +4 '
+                ObservedType = [uint32]5
+                Status = 'Invalid'
+            }
+            UserTypeWrong = @{
+                Observed = 1
+                Expected = 1
+                RuleType = 1
+                UserPolicy = $true
+                Status = 'Invalid'
+            }
+            UserTypeMatched = @{
+                Observed = 1
+                Expected = 1
+                RuleType = 4
+                UserPolicy = $true
+                Status = 'Pass'
+            }
+            AggregateLow = @{
+                Observed = 1
+                Operator = 'Equals'
+                Expected = @([uint32]3)
+                Status = 'Fail'
+                Aggregate = $true
+            }
+            AggregateHigh = @{
+                Observed = 3
+                Operator = 'Equals'
+                Expected = @([uint32]3)
+                Status = 'Pass'
+                Aggregate = $true
+            }
+        }
+        $assessments = @{}
+        $checks = @{}
+        $paths = @{}
+        $pathHashes = @{}
+        foreach ($name in $inputs.Keys) {
+            $inputCase = $inputs[$name]
+            $policy = New-PolicyFixture
+            $policy.RegistrySettings = @([pscustomobject]@{
+                    Hive = 'HKLM'
+                    Scope = 'Computer'
+                    Key = $key
+                    ValueName = 'Level'
+                    Value = [uint32]$inputCase.Observed
+                    Type = 4
+                    Source = 'Machine/Registry.pol'
+                    KeyOnly = $false
+                })
+            if ($inputCase.ContainsKey('ObservedType')) {
+                $policy.RegistrySettings[0].Type = $inputCase.ObservedType
+            }
+            if ($inputCase.UserPolicy) {
+                $policy.RegistrySettings[0].Hive = 'HKCU'
+                $policy.RegistrySettings[0].Scope = 'User'
+                $policy.RegistrySettings[0].Source = 'User/Registry.pol'
+            }
+            $rule = @{
+                Id = 'FixtureLevel'
+                Hive = $policy.RegistrySettings[0].Hive
+                Key = $key
+                ValueName = 'Level'
+                Expected = $inputCase.Expected
+                Type = 4
+            }
+            $operator = 'Equals'
+            if ($inputCase.ContainsKey('Operator')) {
+                $operator = $inputCase.Operator
+                $rule.Operator = $operator
+            }
+            if ($inputCase.ContainsKey('Aggregate')) {
+                $rule.Aggregate = $true
+            }
+            if ($inputCase.ContainsKey('RuleType')) {
+                if ($null -eq $inputCase.RuleType) {
+                    $rule.Remove('Type')
+                }
+                else {
+                    $rule.Type = $inputCase.RuleType
+                }
+            }
+            $arguments = @{
+                DirectoryData = $directory
+                GpoData = @([pscustomobject]@{
+                        Gpo = $gpo
+                        Policy = $policy
+                    })
+                Profile = @{ RegistryRules = @($rule) }
+            }
+            $assessments[$name] = Invoke-ADAnalyzerAssessment @arguments
+            $ruleChecks = @($assessments[$name].Checks | Where-Object RuleId -eq $ruleId)
+            Assert-Equal 1 $ruleChecks.Count
+            $checks[$name] = $ruleChecks[0]
+            Assert-Equal $inputCase.Status $ruleChecks[0].Status
+            Assert-Equal $inputCase.Observed (@($ruleChecks[0].Observed)[0])
+            Assert-Equal $operator $ruleChecks[0].Evidence.Operator
+        }
+        foreach ($name in @(
+            'Inverted'
+            'Relaxed'
+            'Improved'
+            'EqualStrict'
+            'EqualRelaxed'
+            'EqualImproved'
+            'NotEqualStrict'
+            'NotEqualRelaxed'
+            'TypeConstraintWrong'
+            'TypeConstraintWrongText'
+            'TypeConstraintMatched'
+            'TypeUnconstrained'
+            'TypeObservationWrong'
+            'TypeObservationWrongText'
+        )) {
+            Assert-Equal $checks.Strict.CheckId $checks[$name].CheckId
+        }
+        Assert-Equal $checks.AggregateLow.CheckId $checks.AggregateHigh.CheckId
+        Assert-Equal $checks.UserTypeWrong.CheckId $checks.UserTypeMatched.CheckId
+        Assert-Equal User $checks.UserTypeWrong.Evidence.Scope
+        Assert-Equal 'User/Registry.pol' $checks.UserTypeWrong.Evidence.Path
+        Assert-Equal 1 $checks.TypeConstraintWrong.Evidence.ExpectedRegistryType
+        Assert-True ($checks.TypeConstraintWrongText.Evidence.ExpectedRegistryType -is [string]) 'The evaluator did not retain the numeric type text'
+        Assert-Equal ' +1 ' $checks.TypeConstraintWrongText.Evidence.ExpectedRegistryType
+        Assert-Equal 4 $checks.TypeConstraintMatched.Evidence.ExpectedRegistryType
+        Assert-Equal 4 $checks.TypeConstraintWrong.Evidence.RegistryType
+        Assert-Equal 4 $checks.TypeConstraintMatched.Evidence.RegistryType
+        Assert-Equal 5 $checks.TypeObservationWrong.Evidence.RegistryType
+        Assert-Equal $null (Get-ADAnalyzerOperationValue $checks.TypeUnconstrained.Evidence @('ExpectedRegistryType') ([object]::new()))
+
+        $assessments.Legacy = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $assessments.Strict.Target
+            Checks = @([pscustomobject]@{
+                    RuleId = $ruleId
+                    Target = $checks.Relaxed.Target
+                    Status = $checks.Relaxed.Status
+                    Observed = $checks.Relaxed.Observed
+                    Expected = $checks.Relaxed.Expected
+                })
+        }
+        $legacyEqual = $checks.EqualRelaxed.PSObject.Copy()
+        $legacyEqual.PSObject.Properties.Remove('Expected')
+        $assessments.LegacyEqual = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $assessments.Strict.Target
+            Checks = @($legacyEqual)
+        }
+        $legacyType = $checks.TypeConstraintMatched.PSObject.Copy()
+        $legacyType.Evidence = [pscustomobject]@{
+            Path = $checks.TypeConstraintMatched.Evidence.Path
+            Scope = $checks.TypeConstraintMatched.Evidence.Scope
+            Operator = $checks.TypeConstraintMatched.Evidence.Operator
+            RegistryType = $checks.TypeConstraintMatched.Evidence.RegistryType
+        }
+        $assessments.LegacyType = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $assessments.Strict.Target
+            Checks = @($legacyType)
+        }
+        $unknown = $checks.Relaxed.PSObject.Copy()
+        $unknown.Status = 'Unknown'
+        $assessments.Unknown = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $assessments.Strict.Target
+            Checks = @($unknown)
+        }
+        $assessments.Unobserved = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = $assessments.Strict.Target
+            Checks = @()
+        }
+
+        foreach ($name in $assessments.Keys) {
+            $paths[$name] = Join-Path $temp ('gpo-compare-predicate-' + $name + '.json')
+            $null = Export-ADAnalyzerAssessment -Assessment $assessments[$name] -Path $paths[$name] -Format Json -Confirm:$false
+            $pathHashes[$name] = (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $cases = @(
+            @('Strict', 'Inverted', 'Changed', 'RulePredicateChanged'),
+            @('Strict', 'Relaxed', 'Changed', 'RulePredicateChanged'),
+            @('Relaxed', 'Strict', 'Changed', 'RulePredicateChanged'),
+            @('Strict', 'Improved', 'Resolved', $null),
+            @('EqualStrict', 'EqualRelaxed', 'Changed', 'RulePredicateChanged'),
+            @('EqualRelaxed', 'EqualStrict', 'Changed', 'RulePredicateChanged'),
+            @('EqualStrict', 'EqualImproved', 'Resolved', $null),
+            @('NotEqualStrict', 'NotEqualRelaxed', 'Changed', 'RulePredicateChanged'),
+            @('NotEqualRelaxed', 'NotEqualStrict', 'Changed', 'RulePredicateChanged'),
+            @('EqualStrict', 'LegacyEqual', 'Resolved', $null),
+            @('TypeConstraintWrongText', 'TypeConstraintMatched', 'Changed', 'RulePredicateChanged'),
+            @('TypeConstraintWrong', 'TypeConstraintMatched', 'Changed', 'RulePredicateChanged'),
+            @('TypeConstraintMatched', 'TypeConstraintWrong', 'Changed', 'RulePredicateChanged'),
+            @('TypeConstraintWrong', 'TypeUnconstrained', 'Changed', 'RulePredicateChanged'),
+            @('TypeUnconstrained', 'TypeConstraintWrong', 'Changed', 'RulePredicateChanged'),
+            @('TypeObservationWrong', 'TypeConstraintMatched', 'Resolved', $null),
+            @('TypeObservationWrongText', 'TypeConstraintMatched', 'Resolved', $null),
+            @('TypeConstraintWrong', 'LegacyType', 'Resolved', $null),
+            @('UserTypeWrong', 'UserTypeMatched', 'Changed', 'RulePredicateChanged'),
+            @('AggregateLow', 'AggregateHigh', 'Resolved', $null),
+            @('Strict', 'Legacy', 'Resolved', $null),
+            @('Strict', 'Unknown', 'Changed', $null),
+            @('Strict', 'Unobserved', 'Changed', 'NotObservedInDifference'),
+            @('Unobserved', 'Strict', 'New', $null)
+        )
+        foreach ($documents in @($assessments, $paths)) {
+            foreach ($case in $cases) {
+                $before, $after, $expectedChange, $expectedReason = $case
+                $arguments = @{
+                    Reference = $documents[$before]
+                    Difference = $documents[$after]
+                }
+                $commandResult = Compare-ADAnalyzerAssessment @arguments
+                $classResult = $comparer.Compare($arguments.Reference, $arguments.Difference)
+                foreach ($result in @($commandResult, $classResult)) {
+                    $changes = @($result.Changes | Where-Object RuleId -eq $ruleId)
+                    Assert-Equal 1 $changes.Count
+                    Assert-True ($changes[0].Change -eq $expectedChange) (
+                        "Comparison $before to $after expected $expectedChange, received $($changes[0].Change)"
+                    )
+                    Assert-Equal $expectedReason $changes[0].Reason
+                    if ($before -eq 'Unobserved') {
+                        Assert-Equal 0 $changes[0].Reference.Count
+                    }
+                    else {
+                        Assert-Equal $checks[$before].Status $changes[0].Reference[0].Status
+                    }
+                    if ($after -eq 'Unobserved') {
+                        Assert-Equal 0 $changes[0].Difference.Count
+                    }
+                    else {
+                        Assert-Equal 1 $changes[0].Difference.Count
+                    }
+                }
+            }
+        }
+        foreach ($name in $paths.Keys) {
+            Assert-Equal $pathHashes[$name] (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+    }
+    Test-Assessment 'comparison qualifies changes only on the recorded mismatched Registry.pol side' {
+        $gpoId = [guid]'11111111-1111-1111-1111-111111111111'
+        $otherId = [guid]'22222222-2222-2222-2222-222222222222'
+        # Directory encodes 0x80010002 as a signed DWORD. User and Computer occupy different halves.
+        $directoryVersion = [int]-2147418110
+        $consistentVersion = [uint32]2147549186
+        $computerMismatch = [uint32]2147549187
+        $userMismatch = [uint32]2147614722
+        $key = 'Software\Fixture'
+        $directory = New-AssessmentFixture
+        $versionRule = 'GPO.VERSION_CONSISTENCY'
+
+        $makeSnapshot = {
+            param(
+                [uint32]$Value,
+                $SysvolVersion,
+                [uint32]$Expected = 2,
+                [switch]$OtherMismatch,
+                $Identity = $gpoId
+            )
+
+            $gpo = [pscustomobject]@{
+                Id = $Identity
+                Flags = 0
+                Version = $directoryVersion
+                Links = @()
+            }
+            $policy = New-PolicyFixture
+            $policy.SysvolVersion = $SysvolVersion
+            $policy.RegistrySettings = @(
+                [pscustomobject]@{
+                    Hive = 'HKLM'
+                    Scope = 'Computer'
+                    Key = $key
+                    ValueName = 'Level'
+                    Value = $Value
+                    Type = 4
+                    Source = 'Machine/Registry.pol'
+                }
+                [pscustomobject]@{
+                    Hive = 'HKCU'
+                    Scope = 'User'
+                    Key = $key
+                    ValueName = 'Level'
+                    Value = $Value
+                    Type = 4
+                    Source = 'User/Registry.pol'
+                }
+            )
+            $policies = @([pscustomobject]@{ Gpo = $gpo; Policy = $policy })
+            if ($OtherMismatch) {
+                $other = [pscustomobject]@{ Id = $otherId; Flags = 0; Version = 1; Links = @() }
+                $otherPolicy = New-PolicyFixture
+                $otherPolicy.SysvolVersion = [uint32]2
+                $policies += [pscustomobject]@{ Gpo = $other; Policy = $otherPolicy }
+            }
+            $rules = @(
+                @{ Id = 'FixtureComputerVersion'; Hive = 'HKLM'; Key = $key; ValueName = 'Level'; Expected = $Expected }
+                @{ Id = 'FixtureUserVersion'; Hive = 'HKCU'; Key = $key; ValueName = 'Level'; Expected = $Expected }
+            )
+            Invoke-ADAnalyzerAssessment -DirectoryData $directory -GpoData $policies -Profile @{ RegistryRules = $rules }
+        }
+
+        $snapshots = [ordered]@{
+            Before = & $makeSnapshot 1 $consistentVersion
+            Healthy = & $makeSnapshot 2 $consistentVersion
+            ComputerMismatch = & $makeSnapshot 2 $computerMismatch
+            UserMismatch = & $makeSnapshot 2 $userMismatch
+            EarlierMismatch = & $makeSnapshot 1 $computerMismatch
+            UnrelatedMismatch = & $makeSnapshot 2 $consistentVersion -OtherMismatch
+            UnknownVersion = & $makeSnapshot 2 $null
+            ChangedPredicate = & $makeSnapshot 1 $computerMismatch -Expected 1
+        }
+        $gpoVersionTarget = [string]$gpoId + '/Version'
+        foreach ($entry in $snapshots.GetEnumerator()) {
+            $version = @($entry.Value.Checks | Where-Object {
+                    $_.RuleId -eq $versionRule -and $_.Target -eq $gpoVersionTarget
+                })
+            Assert-Equal 1 $version.Count
+            Assert-Equal $directoryVersion $version[0].Expected
+            $expectedVersionStatus = switch ($entry.Key) {
+                { $_ -in 'Before', 'Healthy', 'UnrelatedMismatch' } { 'Pass' }
+                'UnknownVersion' { 'Unknown' }
+                default { 'Fail' }
+            }
+            Assert-Equal $expectedVersionStatus $version[0].Status
+        }
+        Assert-Equal 'Fail' ($snapshots.UnrelatedMismatch.Checks | Where-Object {
+                $_.RuleId -eq $versionRule -and $_.Target -eq ([string]$otherId + '/Version')
+            }).Status
+
+        $snapshots.DisplayNameBefore = & $makeSnapshot 1 $consistentVersion -Identity 'Fixture GPO'
+        $snapshots.DisplayNameAfter = & $makeSnapshot 2 $computerMismatch -Identity 'Fixture GPO'
+        $mismatchedVersionRow = $snapshots.ComputerMismatch.Checks | Where-Object RuleId -eq $versionRule
+        $snapshots.Legacy = $snapshots.ComputerMismatch.PSObject.Copy()
+        $snapshots.Legacy.Checks = @($snapshots.ComputerMismatch.Checks | Where-Object RuleId -ne $versionRule)
+        $snapshots.Ambiguous = $snapshots.ComputerMismatch.PSObject.Copy()
+        $snapshots.Ambiguous.Checks = @($snapshots.ComputerMismatch.Checks) + @($mismatchedVersionRow)
+        $malformedVersion = $mismatchedVersionRow.PSObject.Copy()
+        $malformedVersion.Observed = [string]$malformedVersion.Observed
+        $snapshots.Malformed = $snapshots.Legacy.PSObject.Copy()
+        $snapshots.Malformed.Checks = @($snapshots.Legacy.Checks) + @($malformedVersion)
+
+        $paths = @{}
+        $hashes = @{}
+        $originals = @{}
+        foreach ($name in $snapshots.Keys) {
+            $originals[$name] = ConvertTo-Json -InputObject $snapshots[$name] -Depth 100 -Compress
+            $paths[$name] = Join-Path $temp ('gpo-version-comparison-' + $name + '.json')
+            $null = Export-ADAnalyzerAssessment -Assessment $snapshots[$name] -Path $paths[$name] -Format Json -Confirm:$false
+            $hashes[$name] = (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+
+        $comparer = [ADAnalyzerAssessmentComparer]::new()
+        $cases = @(
+            @('Before', 'ComputerMismatch', 'Computer', 'Fail', 'Pass', 'Changed', 'PolicyVersionMismatch'),
+            @('ComputerMismatch', 'Before', 'Computer', 'Pass', 'Fail', 'Changed', 'PolicyVersionMismatch'),
+            @('EarlierMismatch', 'Healthy', 'Computer', 'Fail', 'Pass', 'Changed', 'PolicyVersionMismatch'),
+            @('Before', 'UserMismatch', 'User', 'Fail', 'Pass', 'Changed', 'PolicyVersionMismatch'),
+            @('Before', 'ComputerMismatch', 'User', 'Fail', 'Pass', 'Resolved', $null),
+            @('Before', 'UserMismatch', 'Computer', 'Fail', 'Pass', 'Resolved', $null),
+            @('Before', 'Healthy', 'Computer', 'Fail', 'Pass', 'Resolved', $null),
+            @('Healthy', 'Before', 'Computer', 'Pass', 'Fail', 'New', $null),
+            @('Before', 'UnrelatedMismatch', 'Computer', 'Fail', 'Pass', 'Resolved', $null),
+            @('Before', 'UnknownVersion', 'Computer', 'Fail', 'Pass', 'Resolved', $null),
+            @('Before', 'Legacy', 'Computer', 'Fail', 'Pass', 'Resolved', $null),
+            @('Before', 'Ambiguous', 'Computer', 'Fail', 'Pass', 'Resolved', $null),
+            @('Before', 'Malformed', 'Computer', 'Fail', 'Pass', 'Resolved', $null),
+            @('DisplayNameBefore', 'DisplayNameAfter', 'Computer', 'Fail', 'Pass', 'Resolved', $null),
+            @('Before', 'ChangedPredicate', 'Computer', 'Fail', 'Pass', 'Changed', 'RulePredicateChanged')
+        )
+        foreach ($documents in @($snapshots, $paths)) {
+            foreach ($case in $cases) {
+                $before, $after, $side, $beforeStatus, $afterStatus, $expectedChange, $expectedReason = $case
+                $ruleId = 'GPO.Expected.Fixture' + $side + 'Version'
+                $reference = $snapshots[$before].Checks | Where-Object RuleId -eq $ruleId
+                $difference = $snapshots[$after].Checks | Where-Object {
+                    $_.RuleId -eq $ruleId -and $_.Target -eq $reference.Target
+                }
+                Assert-Equal $reference.CheckId $difference.CheckId
+                Assert-Equal $beforeStatus $reference.Status
+                Assert-Equal $afterStatus $difference.Status
+                $command = Compare-ADAnalyzerAssessment -Reference $documents[$before] -Difference $documents[$after]
+                $direct = $comparer.Compare($documents[$before], $documents[$after])
+                foreach ($result in @($command, $direct)) {
+                    $changes = @($result.Changes | Where-Object {
+                            $_.RuleId -eq $ruleId -and $_.Target -eq $reference.Target
+                        })
+                    Assert-Equal 1 $changes.Count
+                    $change = $changes[0]
+                    Assert-True ($change.Change -eq $expectedChange -and $change.Reason -eq $expectedReason) (
+                        "Comparison $before to $after ($side) expected $expectedChange/$expectedReason, received $($change.Change)/$($change.Reason)"
+                    )
+                    Assert-Equal $beforeStatus $change.Reference[0].Status
+                    Assert-Equal $afterStatus $change.Difference[0].Status
+                    Assert-Equal $reference.Observed $change.Reference[0].Observed
+                    Assert-Equal $difference.Observed $change.Difference[0].Observed
+                }
+            }
+        }
+
+        $report = $snapshots.ComputerMismatch.PSObject.Copy()
+        $report | Add-Member -NotePropertyName Comparison -NotePropertyValue (
+            Compare-ADAnalyzerAssessment -Reference $paths.Before -Difference $paths.ComputerMismatch
+        )
+        $htmlPath = Join-Path $temp 'gpo-version-comparison.html'
+        $null = Export-ADAnalyzerAssessment -Assessment $report -Path $htmlPath -Format Html -Confirm:$false
+        $html = Get-Content -LiteralPath $htmlPath -Raw
+        Assert-True ($html.Contains('PolicyVersionMismatch Check the recorded directory and SYSVOL versions for this policy side.')) (
+            'HTML did not explain the recorded policy-side version mismatch'
+        )
+        foreach ($name in $snapshots.Keys) {
+            Assert-Equal $originals[$name] (ConvertTo-Json -InputObject $snapshots[$name] -Depth 100 -Compress)
+            Assert-Equal $hashes[$name] (Get-FileHash -LiteralPath $paths[$name] -Algorithm SHA256).Hash
+        }
+    }
+    Test-Assessment 'report exports preserve the selected saved assessment source' {
+        $directory = Join-Path $temp 'report source preservation'
+        $null = [IO.Directory]::CreateDirectory($directory)
+        $null = [IO.Directory]::CreateDirectory((Join-Path $directory 'subfolder'))
+        $leaf = 'source [literal].json'
+        $source = Join-Path $directory $leaf
+        $content = '{"SchemaVersion":1,"Target":"artifact.example.invalid","Checks":[],"Findings":[]}'
+        $encoding = [Text.UTF8Encoding]::new($false)
+        [IO.File]::WriteAllText($source, $content, $encoding)
+        $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+
+        # The reader accepts JSON by content regardless of the extension.
+        $prefix = Join-Path $directory 'report [literal]'
+        $priorOutput = $prefix + '.json'
+        $laterSource = $prefix + '.html'
+        $laterOutput = $prefix + '.csv'
+        [IO.File]::WriteAllText($priorOutput, 'prior report bytes', $encoding)
+        [IO.File]::WriteAllText($laterSource, $content, $encoding)
+        $priorHash = (Get-FileHash -LiteralPath $priorOutput -Algorithm SHA256).Hash
+        $laterHash = (Get-FileHash -LiteralPath $laterSource -Algorithm SHA256).Hash
+
+        $report = [ADAnalyzerAssessmentReport]::new()
+        $routes = [ordered]@{
+            Command = {
+                param($InputFile, $OutputPath, $Format, $Preview, $ErrorMode = 'Stop')
+
+                $exportParameters = @{
+                    Assessment = $InputFile
+                    Path = $OutputPath
+                    Format = $Format
+                    Confirm = $false
+                    WhatIf = $Preview
+                    ErrorAction = $ErrorMode
+                }
+                Export-ADAnalyzerAssessment @exportParameters
+            }
+            Direct = {
+                param($InputFile, $OutputPath, $Format, $Preview)
+                $report.Write($InputFile, $OutputPath, $Format, $Preview)
+            }
+        }
+        $assertCollision = {
+            param($InvokeExport, $InputFile, $OutputPath, $Format, $Case, $ErrorMode = 'Stop')
+
+            $failure = $null
+            $paths = [Collections.Generic.List[object]]::new()
+            try {
+                & $InvokeExport $InputFile $OutputPath $Format $false $ErrorMode | ForEach-Object {
+                    $paths.Add($_)
+                }
+            }
+            catch {
+                $failure = $_
+            }
+            Assert-True ($null -ne $failure -and
+                $failure.Exception.GetBaseException().Message -ceq 'A report destination matches the saved assessment source.') (
+                "Expected report source collision rejection for $Case"
+            )
+            Assert-Equal 0 $paths.Count
+        }
+
+        $driveName = 'ADReportSourceFixture'
+        $null = New-PSDrive -Name $driveName -PSProvider FileSystem -Root $directory -Scope Script -ErrorAction Stop
+        try {
+            Push-Location -LiteralPath $directory
+            try {
+                $separator = [IO.Path]::DirectorySeparatorChar
+                $relative = 'subfolder' + $separator + '..' + $separator + $leaf
+                $mapped = $driveName + ':' + $separator + $leaf
+                $qualified = 'FileSystem::' + $source
+                $aliases = @(
+                    @('literal', $source, $source),
+                    @('relative destination', $source, $relative),
+                    @('mapped input', $mapped, $source),
+                    @('qualified destination', $source, $qualified)
+                )
+                if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                    $aliases += , @('Windows case alias', $source, (Join-Path $directory $leaf.ToUpperInvariant()))
+                }
+
+                foreach ($entry in $routes.GetEnumerator()) {
+                    foreach ($case in $aliases) {
+                        $label, $inputFile, $outputPath = $case
+                        & $assertCollision $entry.Value $inputFile $outputPath 'Json' ($entry.Key + ' ' + $label)
+                        Assert-Equal $sourceHash (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+                    }
+                    & $assertCollision $entry.Value $laterSource $prefix 'All' ($entry.Key + ' later format')
+                    if ($entry.Key -eq 'Command') {
+                        & $assertCollision $entry.Value $laterSource $prefix 'All' 'Command later format under Continue' 'Continue'
+                    }
+                    Assert-Equal $laterHash (Get-FileHash -LiteralPath $laterSource -Algorithm SHA256).Hash
+                    Assert-Equal $priorHash (Get-FileHash -LiteralPath $priorOutput -Algorithm SHA256).Hash
+                    Assert-True (-not [IO.File]::Exists($laterOutput)) 'The rejected All export wrote a later sibling.'
+
+                    $preview = @(& $entry.Value $laterSource $prefix 'All' $true)
+                    Assert-Equal 0 $preview.Count
+                    Assert-Equal $laterHash (Get-FileHash -LiteralPath $laterSource -Algorithm SHA256).Hash
+                    Assert-Equal $priorHash (Get-FileHash -LiteralPath $priorOutput -Algorithm SHA256).Hash
+                    Assert-True (-not [IO.File]::Exists($laterOutput)) 'The All preview wrote a later sibling.'
+
+                    $unsupported = Join-Path $directory 'unsupported.json'
+                    [IO.File]::WriteAllText($unsupported, '{"SchemaVersion":2}', $encoding)
+                    Assert-Throws { & $entry.Value $unsupported $prefix 'All' $true }
+
+                    $distinct = Join-Path $directory ($entry.Key + ' destination.json')
+                    [IO.File]::WriteAllText($distinct, 'old destination bytes', $encoding)
+                    $written = @(& $entry.Value $source $distinct 'Json' $false)
+                    Assert-Equal 1 $written.Count
+                    $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($distinct))
+                    Assert-Equal 'artifact.example.invalid' $saved.Target
+                    Assert-Equal $sourceHash (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+                }
+
+                $invalidDestinationFailure = $null
+                try {
+                    $null = & $routes.Command $source 'Variable:ADReportSourceFixtureInvalid' 'Json' $false
+                }
+                catch {
+                    $invalidDestinationFailure = $_
+                }
+                Assert-True ($null -ne $invalidDestinationFailure -and
+                    $invalidDestinationFailure.Exception.GetBaseException().Message -ceq
+                    'Report paths must use the FileSystem provider') 'Expected the existing non-FileSystem destination error.'
+                Assert-Equal $sourceHash (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+            }
+            finally {
+                Pop-Location
+            }
+        }
+        finally {
+            Remove-PSDrive -Name $driveName -Scope Script -Force -ErrorAction Stop
+        }
+    }
+    Test-Assessment 'create-only JSON export preserves existing bytes and honors preview' {
+        $directory = Join-Path $temp 'create-only JSON'
+        $null = [IO.Directory]::CreateDirectory($directory)
+        $document = [pscustomobject]@{
+            SchemaVersion = 1
+            Target = 'assessment-' + [char]233 + '.example.invalid'
+            Checks = @()
+            Findings = @()
+        }
+        $report = [ADAnalyzerAssessmentReport]::new()
+        $routes = [ordered]@{
+            Native = {
+                param($InputDocument, $Destination, [bool]$Preview)
+
+                $parameters = @{
+                    Assessment = $InputDocument
+                    Path = $Destination
+                    Format = 'Json'
+                    CreateOnly = $true
+                    Confirm = $false
+                    WhatIf = $Preview
+                    ErrorAction = 'Stop'
+                }
+                Export-ADAnalyzerAssessment @parameters
+            }
+            Direct = {
+                param($InputDocument, $Destination, [bool]$Preview)
+
+                if ($Preview) {
+                    $report.WriteNew($InputDocument, $Destination, $true)
+                }
+                else {
+                    $report.WriteNew($InputDocument, $Destination)
+                }
+            }
+        }
+        Assert-True ((Get-Command Export-ADAnalyzerAssessment).Parameters.ContainsKey('CreateOnly')) (
+            'The native exporter has no create-only option.'
+        )
+        Assert-True ($null -ne $report.PSObject.Methods['WriteNew']) (
+            'The direct report API has no create-only method.'
+        )
+
+        foreach ($route in $routes.GetEnumerator()) {
+            $previewParent = Join-Path $directory ($route.Key + ' preview')
+            $previewPath = Join-Path $previewParent 'assessment [literal].json'
+            $preview = @(& $route.Value $document $previewPath $true)
+            Assert-Equal 0 $preview.Count
+            Assert-True (-not [IO.Directory]::Exists($previewParent)) 'Preview created a destination directory.'
+            $invalidProviderPreview = @(& $route.Value $document 'Variable:ADAnalyzerCreateOnlyFixture' $true)
+            Assert-Equal 0 $invalidProviderPreview.Count
+            Assert-Throws { & $route.Value ([pscustomobject]@{ SchemaVersion = 2 }) $previewPath $true }
+            Assert-True (-not [IO.Directory]::Exists($previewParent)) 'Invalid preview created a destination directory.'
+
+            $path = Join-Path $directory ($route.Key + ' assessment [literal].json')
+            $published = @(& $route.Value $document $path $false)
+            Assert-Equal 1 $published.Count
+            Assert-Equal $path $published[0]
+            $bytes = [IO.File]::ReadAllBytes($path)
+            Assert-True (
+                $bytes.Length -gt 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191
+            ) 'The JSON writer did not preserve its UTF-8 BOM.'
+            $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path))
+            Assert-Equal $document.Target $saved.Target
+            $original = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            $replacement = [pscustomobject]@{
+                SchemaVersion = 1
+                Target = 'replacement.example.invalid'
+            }
+
+            $failure = $null
+            $unexpectedPaths = [Collections.Generic.List[object]]::new()
+            try {
+                & $route.Value $replacement $path $false | ForEach-Object {
+                    $unexpectedPaths.Add($_)
+                }
+            }
+            catch {
+                $failure = $_
+            }
+            Assert-True (
+                $null -ne $failure -and
+                $failure.Exception.GetBaseException().Message -ceq 'The report destination already exists.'
+            ) ('Expected the create-only conflict diagnostic for ' + $route.Key)
+            Assert-Equal 0 $unexpectedPaths.Count
+            Assert-Equal $original (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+
+            $sourceOverlap = $null
+            try {
+                $null = & $route.Value $path $path $false
+            }
+            catch {
+                $sourceOverlap = $_
+            }
+            Assert-True (
+                $null -ne $sourceOverlap -and
+                $sourceOverlap.Exception.GetBaseException().Message -ceq 'A report destination matches the saved assessment source.'
+            ) ('Create-only export lost the saved source protection for ' + $route.Key)
+            Assert-Equal $original (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+
+            if ($route.Key -eq 'Native') {
+                $overwritten = @(Export-ADAnalyzerAssessment -Assessment $replacement -Path $path -Format Json -Confirm:$false)
+            }
+            else {
+                $overwritten = @($report.Write($replacement, $path, 'Json'))
+            }
+            Assert-Equal 1 $overwritten.Count
+            Assert-Equal $path $overwritten[0]
+            $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path))
+            Assert-Equal $replacement.Target $saved.Target
+        }
+        foreach ($format in 'Html', 'Csv', 'All') {
+            $invalidParent = Join-Path $directory ('invalid ' + $format)
+            $invalidPath = Join-Path $invalidParent 'report'
+            $failure = $null
+            try {
+                $null = Export-ADAnalyzerAssessment -Assessment $document -Path $invalidPath -Format $format -CreateOnly -Confirm:$false
+            }
+            catch {
+                $failure = $_
+            }
+            Assert-True (
+                $null -ne $failure -and
+                $failure.Exception.GetBaseException().Message -match 'CreateOnly.*Json|Json.*CreateOnly'
+            ) ('Create-only export did not identify the unsupported ' + $format + ' format.')
+            Assert-True (-not [IO.Directory]::Exists($invalidParent)) 'Invalid create-only format created a destination directory.'
+        }
+        Assert-Equal 0 @(Get-ChildItem -LiteralPath $directory -Force -Filter '.ad-analyzer-*.tmp').Count
+    }
+    Test-Assessment 'create-only export preserves a staging file it could not open' {
+        $directory = Join-Path $temp 'create-only staging ownership'
+        $null = [IO.Directory]::CreateDirectory($directory)
+        $destination = Join-Path $directory 'report.json'
+        $sentinel = [byte[]]@(0, 1, 239, 255)
+        $state = [pscustomobject]@{
+            StagePath = $null
+            Failure = $null
+            OutputPaths = [Collections.Generic.List[object]]::new()
+        }
+        try {
+            & {
+                # Restrict the shadow to this one write and its private staging directory.
+                function Join-Path {
+                    [CmdletBinding()]
+                    param(
+                        [Parameter(Mandatory, Position = 0)][string[]]$Path,
+                        [Parameter(Mandatory, Position = 1)][string]$ChildPath
+                    )
+
+                    $resolved = Microsoft.PowerShell.Management\Join-Path @PSBoundParameters
+                    if ($Path.Count -eq 1 -and $Path[0] -eq $directory -and $ChildPath -like '.ad-analyzer-*.tmp') {
+                        Assert-True ($null -eq $state.StagePath -and -not [IO.File]::Exists($resolved)) (
+                            'Unexpected staging retry or fixture name collision.'
+                        )
+                        [IO.File]::WriteAllBytes($resolved, $sentinel)
+                        $state.StagePath = $resolved
+                    }
+                    return $resolved
+                }
+
+                $parameters = @{
+                    Assessment = [pscustomobject]@{
+                        SchemaVersion = 1
+                        Target = 'stage-ownership.example.invalid'
+                    }
+                    Path = $destination
+                    Format = 'Json'
+                    CreateOnly = $true
+                    Confirm = $false
+                    ErrorAction = 'Stop'
+                }
+                try {
+                    Export-ADAnalyzerAssessment @parameters | ForEach-Object {
+                        $state.OutputPaths.Add($_)
+                    }
+                }
+                catch {
+                    $state.Failure = $_
+                }
+            }
+            Assert-True ($null -ne $state.StagePath) 'The staging-name fault was not exercised.'
+            Assert-True (
+                $null -ne $state.Failure -and $state.Failure.Exception.GetBaseException() -is [IO.IOException]
+            ) 'Create-only export did not report the failed staging open.'
+            Assert-Equal 0 $state.OutputPaths.Count
+            Assert-True (-not [IO.File]::Exists($destination)) 'A failed staging open published a report.'
+            Assert-True ([IO.File]::Exists($state.StagePath)) 'The writer removed a staging file it never owned.'
+            Assert-Equal ([Convert]::ToBase64String($sentinel)) (
+                [Convert]::ToBase64String([IO.File]::ReadAllBytes($state.StagePath))
+            )
+        }
+        finally {
+            if ($null -ne $state.StagePath) {
+                [IO.File]::Delete($state.StagePath)
+            }
+        }
+        Assert-Equal 0 @([IO.Directory]::GetFileSystemEntries($directory)).Count
+    }
+    Test-Assessment 'overlapping create-only writers publish one complete JSON report' {
+        $directory = Join-Path $temp 'create-only concurrency'
+        $null = [IO.Directory]::CreateDirectory($directory)
+        $destination = Join-Path $directory 'shared [literal].json'
+        $fixture = Join-Path $RepositoryRoot 'tests/AssessmentCreateOnlyWorker.ps1'
+        $engine = (Get-Process -Id $PID).Path
+        $workers = [ordered]@{}
+        try {
+            foreach ($role in 'Native', 'Direct') {
+                $arguments = '-NoLogo -NoProfile -NonInteractive -File "{0}" -RepositoryRoot "{1}" -Destination "{2}" -Coordination "{3}" -Role {4}' -f
+                    $fixture, $RepositoryRoot, $destination, $directory, $role
+                $parameters = @{
+                    FilePath = $engine
+                    ArgumentList = $arguments
+                    PassThru = $true
+                    RedirectStandardOutput = Join-Path $directory ($role + '.out')
+                    RedirectStandardError = Join-Path $directory ($role + '.err')
+                }
+                $process = Start-Process @parameters
+                $workers[$role] = $process
+                # Windows PowerShell needs the process handle cached before exit.
+                $null = $process.Handle
+            }
+
+            $stages = [Collections.Generic.List[string]]::new()
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            foreach ($role in $workers.Keys) {
+                $readyPath = Join-Path $directory ($role + '.ready')
+                $process = $workers[$role]
+                while (-not [IO.File]::Exists($readyPath) -and -not $process.HasExited) {
+                    Assert-True ($watch.Elapsed.TotalSeconds -lt 30) ('Timed out waiting for ' + $role + ' to reach staging.')
+                    Start-Sleep -Milliseconds 25
+                }
+                if ($process.HasExited) {
+                    throw ('Fixture ' + $role + ' exited before release. ' +
+                        [IO.File]::ReadAllText((Join-Path $directory ($role + '.err'))))
+                }
+            }
+            Assert-True (-not [IO.File]::Exists($destination)) 'A writer published before both reached the staging boundary.'
+
+            foreach ($role in $workers.Keys) {
+                $releasePath = Join-Path $directory ($role + '.release')
+                [IO.File]::WriteAllText($releasePath, 'release')
+                $process = $workers[$role]
+                Assert-True ($process.WaitForExit(20000)) ('Timed out waiting for ' + $role + ' to finish.')
+                $process.WaitForExit()
+                $stages.Add([IO.File]::ReadAllText((Join-Path $directory ($role + '.ready'))))
+                $processOutput = [IO.File]::ReadAllText((Join-Path $directory ($role + '.out'))).Trim()
+                $processError = [IO.File]::ReadAllText((Join-Path $directory ($role + '.err'))).Trim()
+                if ($role -eq 'Native') {
+                    Assert-True ($process.ExitCode -eq 0 -and $processOutput -ceq 'Published') (
+                        'The first fixture writer did not publish. ' + $processError
+                    )
+                    $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($destination))
+                    Assert-Equal 'Native.example.invalid' $saved.Target
+                    Assert-Equal ('Native|' * 1024) $saved.Payload
+                    $publishedHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+                }
+                else {
+                    Assert-True ($process.ExitCode -eq 4 -and $processOutput -ceq 'The report destination already exists.') (
+                        'The competing writer did not report a create-only conflict. ' + $processError
+                    )
+                    Assert-Equal $publishedHash (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+                }
+            }
+            Assert-True ($stages[0] -cne $stages[1]) 'The workers shared a staging path.'
+            foreach ($stage in $stages) {
+                Assert-True (-not [IO.File]::Exists($stage)) 'An owned staging file remained after the writer exited.'
+            }
+            Assert-Equal 1 @(Get-ChildItem -LiteralPath $directory -Force -Filter '*.json').Count
+            Assert-Equal 0 @(Get-ChildItem -LiteralPath $directory -Force -Filter '.ad-analyzer-*.tmp').Count
+        }
+        finally {
+            foreach ($process in $workers.Values) {
+                try {
+                    if (-not $process.HasExited) {
+                        $process.Kill()
+                        $null = $process.WaitForExit(5000)
+                    }
+                }
+                finally {
+                    $process.Dispose()
+                }
+            }
+        }
     }
     Test-Assessment 'SYSVOL version mismatch and policy read errors remain explicit' {
         $policy = New-PolicyFixture
@@ -2077,12 +3919,45 @@ foreach ($case in $baselineImporterCases.Keys) {
             $baselineImporterCases[$case], $case)
     }
 }
+foreach ($case in 'Native', 'Direct') {
+    Test-Assessment ('scoped Users evidence comparison: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $arguments = @(
+            '-NoLogo'
+            '-NoProfile'
+            '-NonInteractive'
+            '-File'
+            (Join-Path $PSScriptRoot 'DirectoryUsersComparisonFixture.ps1')
+            '-Case'
+            $case
+            '-RepositoryRoot'
+            $RepositoryRoot
+        )
+        $priorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $output = @(& $executable @arguments 2>&1)
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $priorPreference
+        }
+        if ($exitCode -ne 0) {
+            throw ($output -join [Environment]::NewLine)
+        }
+        $marker = 'PASS AD-03 compare ' + $case + ' 29'
+        Assert-Equal 1 @($output | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+    }
+}
+
 $assessmentCollectorCases = [ordered]@{
     Native = 52
     Construction = 2
     Direct = 11
     Isolation = 2
-    Composition = 6
+    Composition = 8
+    HostRegistryCoverage = 1
+    HostRegistryReturnCodes = 8
 }
 foreach ($case in $assessmentCollectorCases.Keys) {
     Test-Assessment ('assessment collector API: ' + $case) {
@@ -2128,6 +4003,7 @@ $prerequisiteInspectorCases = [ordered]@{
     Direct = 4
     Isolation = 2
     Online = 14
+    RootDse = 21
 }
 foreach ($case in $prerequisiteInspectorCases.Keys) {
     Test-Assessment ('prerequisite inspector API: ' + $case) {

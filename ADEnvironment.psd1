@@ -79,7 +79,7 @@
     'Get-ADAnalyzerAuditPolicy', 'Get-ADAnalyzerTlsCertificate',
     'Export-ADAnalyzerAssessment', 'Compare-ADAnalyzerAssessment',
     'New-ADAnalyzerRemediationPlan', 'Invoke-ADAnalyzerRemediationPlan',
-    'Undo-ADAnalyzerRemediation', 'Start-ADAnalyzer'
+    'Undo-ADAnalyzerRemediation', 'Get-ADAnalyzerRemediationReservation', 'Start-ADAnalyzer'
 
     # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no cmdlets to export.
     CmdletsToExport = @()

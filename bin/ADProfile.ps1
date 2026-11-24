@@ -865,8 +865,11 @@ function Get-ADAnalyzerPrerequisiteObservation {
                 if ($null -eq $command) {
                     throw 'Bundled AD assembly does not provide RootDSE queries'
                 }
-                $root = & $command @splat
-                $rootHostName = $root.DnsHostName
+                $root = @(& $command @splat)
+                if ($root.Count -eq 1 -and
+                    ($root[0] -isnot [Collections.IEnumerable] -or $root[0] -is [Collections.IDictionary])) {
+                    $rootHostName = $root[0].DnsHostName
+                }
             }
         }
     }
@@ -954,9 +957,7 @@ class ADAnalyzerPrerequisiteInspector {
             }
             $directoryObservation = Get-ADAnalyzerPrerequisiteObservation -Kind Directory
             . $directoryObservation
-            $check = $this.DirectoryCheck($Server, $null)
-            $check.Observed = $rootHostName
-            $checks.Add($factory.Create($check))
+            $checks.Add($factory.Create($this.DirectoryObservationCheck($Server, $rootHostName)))
         }
         catch {
             $checks.Add($factory.Create($this.DirectoryCheck($Server, $_)))
@@ -1098,6 +1099,21 @@ class ADAnalyzerPrerequisiteInspector {
         return $arguments
     }
 
+    hidden [hashtable] DirectoryObservationCheck([string]$Server, [object]$DnsHostName) {
+        $check = $this.DirectoryCheck($Server, $null)
+        if ($DnsHostName -is [string] -and
+            $DnsHostName -notmatch '[\s\p{Cc}_]' -and
+            $DnsHostName -notmatch '(?:\A|\.)-|-(?:\.|\z)' -and
+            [Uri]::CheckHostName($DnsHostName) -eq [UriHostNameType]::Dns) {
+            $check.Observed = $DnsHostName
+        }
+        else {
+            $check.Status = 'Unreadable'
+            $check.Message = 'The bundled RootDSE query did not return one usable DNS hostname.'
+        }
+        return $check
+    }
+
     hidden [hashtable] DirectoryCheck(
         [string]$Server,
         [Management.Automation.ErrorRecord]$Failure
@@ -1199,9 +1215,14 @@ function Get-ADAnalyzerPrerequisite {
             if ($null -eq $command) {
                 throw 'Bundled AD assembly does not provide RootDSE queries'
             }
-            $root = & $command @splat
-            $check = $inspector.DirectoryCheck($Server, $null)
-            New-ADAnalyzerCheck @check -Observed $root.DnsHostName
+            $root = @(& $command @splat)
+            $rootHostName = $null
+            if ($root.Count -eq 1 -and
+                ($root[0] -isnot [Collections.IEnumerable] -or $root[0] -is [Collections.IDictionary])) {
+                $rootHostName = $root[0].DnsHostName
+            }
+            $check = $inspector.DirectoryObservationCheck($Server, $rootHostName)
+            New-ADAnalyzerCheck @check
         }
         catch {
             $check = $inspector.DirectoryCheck($Server, $_)

@@ -1,26 +1,7 @@
 # Offline policy assessment. Directory transport and changes belong to the caller.
 . (Join-Path $PSScriptRoot 'ADSecret.ps1')
 
-function Get-ADAnalyzerPolicyValue {
-    param(
-        $Object,
-        [string]$Name,
-        $Default = $null
-
-    )
-    if ($null -eq $Object) {
-        return $Default
-    }
-    if ($Object -is [Collections.IDictionary]) {
-        if (([Collections.IDictionary]$Object).Contains($Name)) {
-            return $Object[$Name]
-        }
-    }
-    elseif ($null -ne $Object.PSObject.Properties[$Name]) {
-        return $Object.$Name
-    }
-    return $Default
-}
+. (Join-Path $PSScriptRoot 'ADPolicyValueSemantics.ps1')
 
 function Get-ADAnalyzerPolicyProfileValue {
     param(
@@ -32,275 +13,10 @@ function Get-ADAnalyzerPolicyProfileValue {
     Get-ADAnalyzerPolicyValue (Get-ADAnalyzerPolicyValue $Profile Policy @{}) $Name $Default
 }
 
-class ADAnalyzerPolicyValueSemantics {
-    ADAnalyzerPolicyValueSemantics() {
-    }
-
-    [bool] IsValueValid([object]$Record) {
-        $marker = Get-ADAnalyzerPolicyValue $Record ValueValid $null
-        return $this.AcceptValidityMarker($marker)
-    }
-
-    hidden [bool] AcceptValidityMarker([object]$Marker) {
-        return $null -eq $Marker -or ($Marker -is [bool] -and $Marker)
-    }
-
-    [pscustomobject] ParseNumber([object]$Value) {
-        if (-not $this.CanParseNumber($Value)) {
-            return $this.MakeResult(@{
-                Valid = $false
-                Value = $null
-            })
-        }
-
-        $number = 0L
-        $valid = $this.ParseNumberText([string]$Value, [ref]$number)
-        return $this.MakeResult(@{
-            Valid = $valid
-            Value = $number
-        })
-    }
-
-    hidden [bool] CanParseNumber([object]$Value) {
-        return $Value -isnot [bool] -and $Value -isnot [array] -and $null -ne $Value
-    }
-
-    hidden [bool] ParseNumberText([string]$Text, [ref]$Number) {
-        return [long]::TryParse($Text,
-            [Globalization.NumberStyles]::Integer,
-            [Globalization.CultureInfo]::InvariantCulture,
-            $Number)
-    }
-
-    [pscustomobject] ParseBoolean([object]$Value) {
-        if ($this.IsBoolean($Value)) {
-            return $this.MakeResult(@{
-                Valid = $true
-                Value = $Value
-            })
-        }
-        if ($this.CanParseBooleanText($Value)) {
-            return $this.ParseBooleanText([string]$Value)
-        }
-        return $this.MakeResult(@{
-            Valid = $false
-            Value = $null
-        })
-    }
-
-    hidden [bool] IsBoolean([object]$Value) {
-        return $Value -is [bool]
-    }
-
-    hidden [bool] CanParseBooleanText([object]$Value) {
-        return $null -ne $Value -and $Value -isnot [array]
-    }
-
-    hidden [pscustomobject] ParseBooleanText([string]$Text) {
-        switch -Regex ($Text) {
-            '^(?i:true|1)$' {
-                return $this.MakeResult(@{
-                    Valid = $true
-                    Value = $true
-                })
-            }
-            '^(?i:false|0)$' {
-                return $this.MakeResult(@{
-                    Valid = $true
-                    Value = $false
-                })
-            }
-        }
-        return $this.MakeResult(@{
-            Valid = $false
-            Value = $null
-        })
-    }
-
-    hidden [pscustomobject] MakeResult([hashtable]$Observation) {
-        return [pscustomobject]@{
-            Valid = $Observation.Valid
-            Value = $Observation.Value
-        }
-    }
-
-    [bool] IsSid([object]$Value) {
-        # MS-DTYP 2.4.2.1: decimal authority below 2^32, otherwise 12 hex digits.
-        if ($Value -isnot [string] -or $Value -notmatch '^S-1-(?:0|[1-9][0-9]{0,9}|0x[0-9a-f]{12})(?:-(?:0|[1-9][0-9]{0,9})){1,15}$') {
-            return $false
-        }
-        $parts = $Value.Split('-')
-        [uint64]$authority = 0
-        if ($parts[2].StartsWith('0x', [StringComparison]::OrdinalIgnoreCase)) {
-            if (-not [uint64]::TryParse($parts[2].Substring(2),
-                    [Globalization.NumberStyles]::AllowHexSpecifier,
-                    [Globalization.CultureInfo]::InvariantCulture,
-                    [ref]$authority) -or
-                $authority -lt 4294967296) {
-                return $false
-            }
-        }
-        elseif (-not [uint64]::TryParse($parts[2], [ref]$authority) -or $authority -gt 4294967295) {
-            return $false
-        }
-        for ($index = 3; $index -lt $parts.Count; $index++) {
-            [uint32]$part = 0
-            if (-not [uint32]::TryParse($parts[$index], [ref]$part)) {
-                return $false
-            }
-        }
-        return $true
-    }
-
-    [bool] IsSidList([object]$Value) {
-        if (-not $this.CanValidateSidList($Value)) {
-            return $false
-        }
-        foreach ($sid in $Value) {
-            if (-not $this.IsSid($sid)) {
-                return $false
-            }
-        }
-        return $true
-    }
-
-    hidden [bool] CanValidateSidList([object]$Value) {
-        return $null -ne $Value -and ($Value -is [string] -or $Value -is [Collections.IList])
-    }
-
-    [pscustomobject] ParsePrincipal([string]$Value) {
-        if ($null -eq $Value) {
-            $Value = ''
-        }
-        $token = $Value.Trim()
-        $marked = $token.StartsWith('*')
-        if ($marked) {
-            $token = $token.Substring(1)
-        }
-        $sid = $null
-        $valid = -not [string]::IsNullOrWhiteSpace($token)
-        if ($this.IsSid($token)) {
-            $sid = $token
-        }
-        elseif ($marked -or $token -match '^S-\d') {
-            $valid = $false
-        }
-        return [pscustomobject]@{
-            Sid = $sid
-            Name = $(if (-not $sid) {
-                    $token
-                }
-                else {
-                    $null
-                })
-            Valid = $valid
-        }
-    }
-
-    [bool] Compare([object]$Observed, [object]$Expected) {
-        return $this.Compare($Observed, $Expected, 'Equals')
-    }
-
-    [bool] Compare([object]$Observed, [object]$Expected, [string]$Operator) {
-        $ErrorActionPreference = 'Stop'
-        $kind = $this.ResolveOperator($Operator)
-        switch ($kind) {
-            { $_ -in 'Equals', 'NotEquals' } {
-                $left = @($Observed)
-                $right = @($Expected)
-                $comparison = $this.PrepareEquality($left, $right)
-                $differences = 0
-                if ($comparison.CompareMembers) {
-                    $differences = @(Compare-Object -ReferenceObject $left -DifferenceObject $right).Count
-                }
-                return $this.FinishEquality($kind, $comparison.CountsMatch, $differences)
-            }
-            { $_ -in 'In', 'NotIn' } {
-                return $this.CompareMembership($kind, @{
-                    Observed = $Observed
-                    Expected = $Expected
-                })
-            }
-            { $_ -in 'Minimum', 'Maximum' } {
-                $number = $this.ParseNumber($Observed)
-                if (-not $this.HasNumericValue($number)) {
-                    throw 'A numeric value is required'
-                }
-                return $this.CompareBound($kind, $number.Value, [long]$Expected)
-            }
-            default {
-                throw 'Unsupported comparison operator'
-            }
-        }
-        return $false
-    }
-
-    hidden [string] ResolveOperator([string]$Operator) {
-        switch ($Operator) {
-            { $_ -in 'Equals', 'Equal', 'eq' } {
-                return 'Equals'
-            }
-            { $_ -in 'NotEquals', 'ne' } {
-                return 'NotEquals'
-            }
-            'In' {
-                return 'In'
-            }
-            'NotIn' {
-                return 'NotIn'
-            }
-            { $_ -in 'Minimum', 'AtLeast', 'ge' } {
-                return 'Minimum'
-            }
-            { $_ -in 'Maximum', 'AtMost', 'le' } {
-                return 'Maximum'
-            }
-            default {
-                return 'Unsupported'
-            }
-        }
-        return 'Unsupported'
-    }
-
-    hidden [hashtable] PrepareEquality([object[]]$Left, [object[]]$Right) {
-        $countsMatch = $Left.Count -eq $Right.Count
-        return @{
-            CountsMatch = $countsMatch
-            CompareMembers = $countsMatch -and $Left.Count
-        }
-    }
-
-    hidden [bool] FinishEquality([string]$Kind, [bool]$CountsMatch, [int]$Differences) {
-        $equal = $CountsMatch -and $Differences -eq 0
-        if ($Kind -eq 'NotEquals') {
-            return -not $equal
-        }
-        return $equal
-    }
-
-    hidden [bool] CompareMembership([string]$Kind, [hashtable]$Inputs) {
-        if ($Kind -eq 'NotIn') {
-            return @($Inputs.Expected) -notcontains $Inputs.Observed
-        }
-        return @($Inputs.Expected) -contains $Inputs.Observed
-    }
-
-    hidden [bool] HasNumericValue([pscustomobject]$Number) {
-        return [bool]$Number.Valid
-    }
-
-    hidden [bool] CompareBound([string]$Kind, [long]$Observed, [long]$Expected) {
-        if ($Kind -eq 'Minimum') {
-            return $Observed -ge $Expected
-        }
-        return $Observed -le $Expected
-    }
-}
-
 function Test-ADAnalyzerPolicyValueValid {
     param($Record)
     $marker = Get-ADAnalyzerPolicyValue $Record ValueValid $null
-    return [ADAnalyzerPolicyValueSemantics]::new().AcceptValidityMarker($marker)
+    return (New-ADAnalyzerPolicyValueSemantics).AcceptValidityMarker($marker)
 }
 
 function Get-ADAnalyzerXmlAttribute {
@@ -427,7 +143,7 @@ class ADAnalyzerGpoPolicyRecordParser {
     hidden [pscustomobject] ParseRestrictedGroupRecord([hashtable]$InputFrame) {
         $setting = $InputFrame.Setting
         $match = $InputFrame.Match
-        $values = [ADAnalyzerPolicyValueSemantics]::new()
+        $values = New-ADAnalyzerPolicyValueSemantics
         $valid = $match.Success
         $group = $null
         $members = @()
@@ -558,7 +274,7 @@ class ADAnalyzerGpoPolicyRecordParser {
     hidden [pscustomobject] ParseLocalGroupItem([hashtable]$InputFrame) {
         $record = $InputFrame.Record
         $item = $InputFrame.Item
-        $values = [ADAnalyzerPolicyValueSemantics]::new()
+        $values = New-ADAnalyzerPolicyValueSemantics
 
         $properties = $item.SelectSingleNode('./*[local-name()="Properties"]')
         $members = @()
@@ -703,7 +419,7 @@ function Get-ADAnalyzerPolicyApplicability {
 
 function ConvertTo-ADAnalyzerPolicyNumber {
     param($Value)
-    $semantics = [ADAnalyzerPolicyValueSemantics]::new()
+    $semantics = New-ADAnalyzerPolicyValueSemantics
     if (-not $semantics.CanParseNumber($Value)) {
         return $semantics.MakeResult(@{
             Valid = $false
@@ -722,7 +438,7 @@ function ConvertTo-ADAnalyzerPolicyNumber {
 
 function ConvertTo-ADAnalyzerPolicyBoolean {
     param($Value)
-    $semantics = [ADAnalyzerPolicyValueSemantics]::new()
+    $semantics = New-ADAnalyzerPolicyValueSemantics
     if ($semantics.IsBoolean($Value)) {
         return $semantics.MakeResult(@{
             Valid = $true
@@ -744,12 +460,12 @@ function ConvertTo-ADAnalyzerPolicyBoolean {
 
 function Test-ADAnalyzerPolicySid {
     param($Value)
-    return [ADAnalyzerPolicyValueSemantics]::new().IsSid($Value)
+    return (New-ADAnalyzerPolicyValueSemantics).IsSid($Value)
 }
 
 function Test-ADAnalyzerPolicySidList {
     param($Value)
-    $semantics = [ADAnalyzerPolicyValueSemantics]::new()
+    $semantics = New-ADAnalyzerPolicyValueSemantics
     if (-not $semantics.CanValidateSidList($Value)) {
         return $false
     }
@@ -765,7 +481,7 @@ function Test-ADAnalyzerPolicySidList {
 
 function ConvertFrom-ADAnalyzerPolicyPrincipal {
     param([string]$Value)
-    return [ADAnalyzerPolicyValueSemantics]::new().ParsePrincipal($Value)
+    return (New-ADAnalyzerPolicyValueSemantics).ParsePrincipal($Value)
 }
 
 function Test-ADAnalyzerSecurityTemplateSource {
@@ -1149,7 +865,7 @@ function Test-ADAnalyzerPolicyComparison {
 
     )
 
-    $semantics = [ADAnalyzerPolicyValueSemantics]::new()
+    $semantics = New-ADAnalyzerPolicyValueSemantics
     $kind = $semantics.ResolveOperator($Operator)
     switch ($kind) {
         { $_ -in 'Equals', 'NotEquals' } {
@@ -1520,6 +1236,53 @@ class ADAnalyzerGpoPolicyEvaluator {
         }
     }
 
+    hidden [int] CountMissingXml([object]$Policy, [object[]]$XmlRecords) {
+        $expected = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::Ordinal)
+        $missing = 0
+        foreach ($file in @(Get-ADAnalyzerPolicyValue $Policy Files)) {
+            $kind = Get-ADAnalyzerPolicyValue $file Kind
+            if ($kind -isnot [string] -or $kind -ine 'Xml') {
+                continue
+            }
+
+            $missing++
+            $scope = Get-ADAnalyzerPolicyValue $file Scope
+            $path = Get-ADAnalyzerPolicyValue $file Path
+            if ($scope -isnot [string] -or [string]::IsNullOrEmpty($scope) -or
+                $path -isnot [string] -or [string]::IsNullOrEmpty($path)) {
+                continue
+            }
+
+            # The reader puts the same logical scope and relative path in both lists.
+            $identity = Join-ADAnalyzerPolicyIdentity @($scope, $path)
+            $expected[$identity] = 1 + $expected[$identity]
+        }
+        if (-not $expected.Count) {
+            return $missing
+        }
+
+        foreach ($record in $XmlRecords) {
+            $scope = Get-ADAnalyzerPolicyValue $record.File Scope
+            $path = Get-ADAnalyzerPolicyValue $record.File Path
+            if ($scope -isnot [string] -or $path -isnot [string]) {
+                continue
+            }
+
+            $identity = Join-ADAnalyzerPolicyIdentity @($scope, $path)
+            if ($expected.ContainsKey($identity)) {
+                $missing--
+                $expected[$identity]--
+                if (-not $expected[$identity]) {
+                    $null = $expected.Remove($identity)
+                    if (-not $expected.Count) {
+                        break
+                    }
+                }
+            }
+        }
+        return $missing
+    }
+
     hidden [void] EvaluateCredentials([hashtable]$state) {
         $Gpo = $state.Gpo
         $Policy = $state.Policy
@@ -1623,36 +1386,47 @@ class ADAnalyzerGpoPolicyEvaluator {
                 $this.Emit($state, $arguments)
             }
         }
+        $missingXml = $this.CountMissingXml($Policy, $xmlRecords)
         if (-not $secretCount) {
+            $status = 'Pass'
+            $present = $false
+            if ($xmlErrors -or $missingXml) {
+                $status = 'Unknown'
+                $present = $null
+            }
+            $message = 'Assessed XML contains no nonempty cpassword attribute; unreadable files prevent a complete conclusion.'
+            if ($missingXml) {
+                $message = 'Credential presence cannot be determined because inventoried XML content is missing.'
+            }
+
             $this.Emit($state, @{
                 RuleId = 'GPO.Preferences.CPassword'
-                Status = $(if ($xmlErrors) {
-                        'Unknown'
-                    }
-                    else {
-                        'Pass'
-                    })
+                Status = $status
                 Severity = 'Critical'
                 Category = 'CredentialExposure'
                 Target = ($target + '/cpassword')
-                Observed = $(if ($xmlErrors) {
-                        $null
-                    }
-                    else {
-                        $false
-                    })
+                Observed = $present
                 Expected = $false
                 Evidence = @{
-                    SecretPresent = $(if ($xmlErrors) {
-                            $null
-                        }
-                        else {
-                            $false
-                        })
+                    SecretPresent = $present
                     UnreadableXmlFiles = $xmlErrors
                 }
-                Message = 'Assessed XML contains no nonempty cpassword attribute; unreadable files prevent a complete conclusion.'
+                Message = $message
                 Applicability = 'Configured'
+            })
+        }
+        if ($missingXml) {
+            $this.Emit($state, @{
+                RuleId = 'GPO.Coverage.MissingXml'
+                Status = 'Unknown'
+                Severity = 'Medium'
+                Category = 'PolicyCoverage'
+                Target = ($target + '/MissingXml')
+                Observed = $missingXml
+                Expected = 0
+                Evidence = $null
+                Message = 'The GPO inventory lists XML files without matching content for assessment.'
+                Applicability = 'Unknown'
             })
         }
 
@@ -2240,6 +2014,42 @@ class ADAnalyzerGpoPolicyEvaluator {
         }
     }
 
+    hidden [hashtable] RecordAggregateRegistrySelector([object]$Sample) {
+        # The replayed row identifies the actual selection without reading the rule again.
+        $hive = $Sample.Hive
+        $key = $Sample.Key
+        $name = $Sample.ValueName
+        $path = $Sample.Source
+        $scope = $Sample.Scope
+        if ($key -isnot [string] -or $key.Length -eq 0 -or $name -isnot [string] -or
+            $hive -isnot [string] -or $path -isnot [string] -or $scope -isnot [string] -or
+            -not (($scope -eq 'Computer' -and $path -eq 'Machine/Registry.pol' -and $hive -eq 'HKLM') -or
+                ($scope -eq 'User' -and $path -eq 'User/Registry.pol' -and $hive -eq 'HKCU'))) {
+            return $null
+        }
+
+        # Keep these literal strings outside the JSON reader's date coercion.
+        $recordedKey = ':' + $key
+        $recordedName = ':' + $name
+        $secretType = 'ADAnalyzerSecretIndicator' -as [type]
+        $secretIndicator = $secretType::new()
+        try {
+            if ($secretIndicator.ProjectText($key) -cne $key -or $secretIndicator.ProjectText($name) -cne $name -or
+                $secretIndicator.ProjectText($recordedKey) -cne $recordedKey -or
+                $secretIndicator.ProjectText($recordedName) -cne $recordedName) {
+                return $null
+            }
+        }
+        catch [IO.InvalidDataException] {
+            return $null
+        }
+        return @{
+            Hive = $hive
+            Key = $recordedKey
+            ValueName = $recordedName
+        }
+    }
+
     hidden [void] EvaluateCustomBaseline([hashtable]$state) {
         $Gpo = $state.Gpo
         $Policy = $state.Policy
@@ -2328,6 +2138,19 @@ class ADAnalyzerGpoPolicyEvaluator {
                     catch {
                         $status = 'Invalid'
                     }
+                    $evidence = @{
+                        Path = $sample.Source
+                        Scope = $sample.Scope
+                        Operator = $operator
+                        Aggregate = $true
+                        ExpectedRegistryType = $expectedType
+                    }
+                    if ($kind -eq 'Registry') {
+                        $selector = $this.RecordAggregateRegistrySelector($sample)
+                        if ($null -ne $selector) {
+                            $evidence.RegistrySelector = $selector
+                        }
+                    }
                     $this.Emit($state, @{
                         RuleId = ('GPO.Expected.' + $id)
                         Status = $status
@@ -2336,13 +2159,7 @@ class ADAnalyzerGpoPolicyEvaluator {
                         Target = $checkTarget
                         Observed = $observed
                         Expected = $expected
-                        Evidence = @{
-                            Path = $sample.Source
-                            Scope = $sample.Scope
-                            Operator = $operator
-                            Aggregate = $true
-                            ExpectedRegistryType = $expectedType
-                        }
+                        Evidence = $evidence
                         Message = 'The complete configured value collection was compared as a set within its source and scope.'
                         Applicability = (Get-ADAnalyzerPolicyApplicability $Gpo $sample.Scope $Profile)
                     })
@@ -2514,7 +2331,7 @@ class ADAnalyzerAdmxResolver {
         }
         switch ($value.PSBase.LocalName) {
             'decimal' {
-                $n = [ADAnalyzerPolicyValueSemantics]::new().ParseNumber((Get-ADAnalyzerXmlAttribute $value value))
+                $n = (New-ADAnalyzerPolicyValueSemantics).ParseNumber((Get-ADAnalyzerXmlAttribute $value value))
                 return [pscustomobject]@{
                     Valid = $n.Valid
                     Value = $n.Value
@@ -2522,7 +2339,7 @@ class ADAnalyzerAdmxResolver {
                 }
             }
             'longDecimal' {
-                $n = [ADAnalyzerPolicyValueSemantics]::new().ParseNumber((Get-ADAnalyzerXmlAttribute $value value))
+                $n = (New-ADAnalyzerPolicyValueSemantics).ParseNumber((Get-ADAnalyzerXmlAttribute $value value))
                 return [pscustomobject]@{
                     Valid = $n.Valid
                     Value = $n.Value
