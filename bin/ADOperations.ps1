@@ -825,7 +825,8 @@ class ADAnalyzerAssessmentReport {
         [string]$SourcePath,
         [string]$Path,
         [string]$Format,
-        [string[]]$Items
+        [string[]]$Items,
+        [bool]$CheckFileIdentity
     ) {
         if ([string]::IsNullOrEmpty($SourcePath)) {
             return $false
@@ -838,6 +839,10 @@ class ADAnalyzerAssessmentReport {
         foreach ($item in $Items) {
             $destination = $this.GetReportFileSystemPath($this.GetOutputPath($Path, $Format, $item))
             if ($SourcePath.Equals($destination, $comparison)) {
+                return $true
+            }
+            if ($CheckFileIdentity -and $SourcePath.Equals($destination, [StringComparison]::OrdinalIgnoreCase) -and
+                (Test-ADAnalyzerMacFileAlias -Source $SourcePath -Destination $destination)) {
                 return $true
             }
         }
@@ -1105,8 +1110,13 @@ class ADAnalyzerAssessmentReport {
         }
         if ($Assessment -is [string]) {
             $sourcePath = $this.GetReportFileSystemPath($Assessment)
-            if ($this.HasSavedSourceDestination($sourcePath, $Path, $Format, $formats)) {
-                throw 'A report destination matches the saved assessment source.'
+            try {
+                if ($this.HasSavedSourceDestination($sourcePath, $Path, $Format, $formats, -not $CreateOnly)) {
+                    throw 'A report destination matches the saved assessment source.'
+                }
+            }
+            catch {
+                throw
             }
         }
 
@@ -1330,11 +1340,21 @@ function Export-ADAnalyzerAssessment {
             else {
                 $formats
             }
-            if ($sourcePath -and $report.HasSavedSourceDestination($sourcePath, $Path, $Format, $itemsToCheck)) {
-                throw 'A report destination matches the saved assessment source.'
+            # A metadata error must end the export even in a caller using Continue.
+            try {
+                if ($sourcePath -and $report.HasSavedSourceDestination(
+                        $sourcePath, $Path, $Format, $itemsToCheck, -not $CreateOnly
+                    )) {
+                    throw 'A report destination matches the saved assessment source.'
+                }
+                if ($referencePath -and $report.HasSavedSourceDestination(
+                        $referencePath, $Path, $Format, $itemsToCheck, -not $CreateOnly
+                    )) {
+                    throw 'A report destination matches the saved comparison reference.'
+                }
             }
-            if ($referencePath -and $report.HasSavedSourceDestination($referencePath, $Path, $Format, $itemsToCheck)) {
-                throw 'A report destination matches the saved comparison reference.'
+            catch {
+                throw
             }
             $checkedOutputs = $true
         }

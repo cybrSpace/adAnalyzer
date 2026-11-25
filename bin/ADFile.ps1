@@ -1,4 +1,22 @@
 # Private package file I/O. Callers serialize and approve writes before invoking it.
+function Test-ADAnalyzerMacFileAlias {
+    param(
+        [string]$Source,
+        [string]$Destination
+    )
+
+    if ($PSVersionTable.PSEdition -ne 'Core' -or -not $IsMacOS) {
+        return $false
+    }
+
+    if (-not ('ADAnalyzer.MacFileIdentity' -as [type])) {
+        $null = Microsoft.PowerShell.Utility\Add-Type -Path (
+            Join-Path $PSScriptRoot 'ADFileIdentity.cs'
+        ) -ErrorAction Stop
+    }
+    return [ADAnalyzer.MacFileIdentity]::IsSameEntry($Source, $Destination)
+}
+
 function Get-ADAnalyzerJsonReadParameters {
     param([string]$Path)
 

@@ -2197,6 +2197,35 @@ try {
             Remove-PSDrive -Name $driveName -Scope Script -Force -ErrorAction Stop
         }
     }
+    if ($PSVersionTable.PSEdition -eq 'Core' -and
+        [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+            [Runtime.InteropServices.OSPlatform]::OSX
+        )) {
+        Test-Assessment 'portable saved reports distinguish file identity from case spelling' {
+            $executable = (Get-Process -Id $PID).Path
+            $fixture = Join-Path $PSScriptRoot 'PortableReportCaseAliasFixture.ps1'
+            $arguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                $fixture
+                '-RepositoryRoot'
+                $RepositoryRoot
+            )
+            $output = @(& $executable @arguments)
+            if ($LASTEXITCODE -ne 0) {
+                throw ('Portable report case fixture failed.' +
+                    [Environment]::NewLine + ($output -join [Environment]::NewLine))
+            }
+            $markers = @($output | Where-Object {
+                    $_ -is [string] -and $_ -cmatch '\APASS portable report case (?:Alias|DistinctCase) 11\z'
+                })
+            Assert-Equal 1 $markers.Count
+            Write-Host $markers[0]
+        }
+    }
+
     Test-Assessment 'create-only JSON export preserves existing bytes and honors preview' {
         $directory = Join-Path $temp 'create-only JSON'
         $null = [IO.Directory]::CreateDirectory($directory)
