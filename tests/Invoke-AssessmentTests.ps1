@@ -2197,6 +2197,35 @@ try {
             Remove-PSDrive -Name $driveName -Scope Script -Force -ErrorAction Stop
         }
     }
+    if ($PSVersionTable.PSEdition -eq 'Core' -and
+        [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+            [Runtime.InteropServices.OSPlatform]::OSX
+        )) {
+        Test-Assessment 'portable saved reports distinguish file identity from case spelling' {
+            $executable = (Get-Process -Id $PID).Path
+            $fixture = Join-Path $PSScriptRoot 'PortableReportCaseAliasFixture.ps1'
+            $arguments = @(
+                '-NoLogo'
+                '-NoProfile'
+                '-NonInteractive'
+                '-File'
+                $fixture
+                '-RepositoryRoot'
+                $RepositoryRoot
+            )
+            $output = @(& $executable @arguments)
+            if ($LASTEXITCODE -ne 0) {
+                throw ('Portable report case fixture failed.' +
+                    [Environment]::NewLine + ($output -join [Environment]::NewLine))
+            }
+            $markers = @($output | Where-Object {
+                    $_ -is [string] -and $_ -cmatch '\APASS portable report case (?:Alias|DistinctCase) 11\z'
+                })
+            Assert-Equal 1 $markers.Count
+            Write-Host $markers[0]
+        }
+    }
+
     Test-Assessment 'create-only JSON export preserves existing bytes and honors preview' {
         $directory = Join-Path $temp 'create-only JSON'
         $null = [IO.Directory]::CreateDirectory($directory)
@@ -3950,6 +3979,37 @@ foreach ($case in 'Native', 'Direct') {
     }
 }
 
+foreach ($case in 'Native', 'Direct') {
+    Test-Assessment ('scoped controller evidence: ' + $case) {
+        $executable = (Get-Process -Id $PID).Path
+        $arguments = @(
+            '-NoLogo'
+            '-NoProfile'
+            '-NonInteractive'
+            '-File'
+            (Join-Path $PSScriptRoot 'ScopedControllerEvidenceFixture.ps1')
+            '-Case'
+            $case
+            '-RepositoryRoot'
+            $RepositoryRoot
+        )
+        $output = & {
+            $ErrorActionPreference = 'Continue'
+            $PSNativeCommandUseErrorActionPreference = $false
+            $lines = @(& $executable @arguments 2>&1)
+            [pscustomobject]@{
+                ExitCode = $LASTEXITCODE
+                Lines = $lines
+            }
+        }
+        if ($output.ExitCode -ne 0) {
+            throw ($output.Lines -join [Environment]::NewLine)
+        }
+        $marker = 'PASS AD-09 scoped controller ' + $case + ' 17'
+        Assert-Equal 1 @($output.Lines | Where-Object { $_ -is [string] -and $_ -ceq $marker }).Count
+    }
+}
+
 $assessmentCollectorCases = [ordered]@{
     Native = 52
     Construction = 2
@@ -3957,7 +4017,7 @@ $assessmentCollectorCases = [ordered]@{
     Isolation = 2
     Composition = 8
     HostRegistryCoverage = 1
-    HostRegistryReturnCodes = 8
+    HostRegistryReturnCodes = 10
 }
 foreach ($case in $assessmentCollectorCases.Keys) {
     Test-Assessment ('assessment collector API: ' + $case) {
